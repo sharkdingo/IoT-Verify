@@ -1,22 +1,16 @@
-import { type APIRequestContext, type Page } from '@playwright/test'
+import { type APIRequestContext, type Page, type Request } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import {
   apiBaseURL,
+  authHeaders,
   createAuthenticatedUser,
+  seedBrowserSession,
   expect,
   test,
   type AuthUser
 } from './support/auth'
-
-const authHeaders = (auth: AuthUser) => ({
-  Authorization: `Bearer ${auth.token}`
-})
-
-const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data as T
-}
+import { afterHistoryRender, holdHistoryReply } from './support/historyReply'
+import { clickUnderTooltip } from './support/tooltips'
 
 // SVG attributes retain model precision; CSS transforms round fitted mobile zoom values.
 const readCanvasZoom = (element: Element) => Number(element.closest('.canvas')!
@@ -24,20 +18,7 @@ const readCanvasZoom = (element: Element) => Number(element.closest('.canvas')!
   .match(/^scale\(([^)]+)\)$/)![1])
 
 const openWorkspace = async (page: Page, auth: AuthUser, theme: 'light' | 'dark' = 'light') => {
-  await page.addInitScript(({ token, user, theme }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', theme)
-    window.localStorage.setItem('locale', 'en')
-  }, {
-    token: auth.token,
-    theme,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
+  await seedBrowserSession(page, auth, { locale: 'en', theme })
 
   await page.goto('/#/board')
   await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
@@ -52,6 +33,94 @@ const addNodes = async (
   headers: authHeaders(auth),
   data: { devices, environmentVariablePatches }
 }))
+
+test('restores the latest desktop zoom when a layout reply arrives during a narrow viewport', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const layoutPath = '/api/board/layout'
+  const desktop = { width: 1440, height: 900 }
+  await addNodes(request, auth, [{ id: 'viewport_lamp', templateName: 'Light', label: 'Viewport lamp',
+    state: 'off', position: { x: 380, y: 250 }, width: 176, height: 128 }])
+  await unwrap(await request.post(`${apiBaseURL}${layoutPath}`, { headers: authHeaders(auth), data: {
+    canvasPan: { x: 120, y: -80 }, canvasZoom: 0.75,
+    panels: { control: { collapsed: false, width: 390, activeSection: 'rules' },
+      inspector: { collapsed: false, width: 320, activeSection: 'devices' } }
+  } }))
+  await page.setViewportSize(desktop)
+  await openWorkspace(page, auth)
+  const zoom = page.getByTestId('canvas-map-zoom-input')
+  const control = page.getByTestId('control-center')
+  const canvas = page.getByTestId('canvas-board')
+  const pan = () => canvas.locator('.canvas-inner').evaluate(element => {
+    const { e, f } = new DOMMatrixReadOnly(getComputedStyle(element).transform)
+    return { x: e, y: f }
+  })
+  await expect(zoom).toHaveValue('75')
+  await expect(control).toHaveCSS('width', '390px')
+  await page.clock.install()
+
+  let releaseFirst!: () => void
+  let releaseLatest!: () => void
+  const firstPaused = new Promise<void>(resolve => { releaseFirst = resolve })
+  const latestPaused = new Promise<void>(resolve => { releaseLatest = resolve })
+  const writes: number[] = []
+  await page.route(url => url.pathname === layoutPath, async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    const { canvasZoom } = route.request().postDataJSON()
+    writes.push(canvasZoom)
+    const committed = await route.fetch()
+    expect(committed.ok(), await committed.text()).toBe(true)
+    if (canvasZoom === 0.85) await firstPaused
+    if (canvasZoom === 1.15) {
+      await latestPaused
+      return route.abort()
+    }
+    await route.fulfill({ response: committed })
+  })
+  const isLayoutWrite = (outgoing: Request, targetZoom: number) =>
+    outgoing.method() === 'POST' && new URL(outgoing.url()).pathname === layoutPath
+    && outgoing.postDataJSON().canvasZoom === targetZoom
+
+  try {
+    const olderWrite = page.waitForRequest(outgoing => isLayoutWrite(outgoing, 0.85))
+    await zoom.fill('85')
+    await page.clock.runFor(1000)
+    await olderWrite
+
+    await zoom.fill('115')
+    const priorPan = await pan()
+    const latestPan = { x: priorPan.x + 64, y: priorPan.y - 32 }
+    const expectedPan = { x: expect.closeTo(latestPan.x, 2), y: expect.closeTo(latestPan.y, 2) }
+    const box = (await canvas.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.75)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + 64, box.y + box.height * 0.75 - 32)
+    await page.mouse.up()
+    await expect.poll(pan).toEqual(expectedPan)
+    await page.setViewportSize({ width: 600, height: 900 })
+    await expect(control).toHaveClass(/is-collapsed/)
+    const latestWrite = page.waitForRequest(outgoing => isLayoutWrite(outgoing, 1.15))
+    releaseFirst()
+    expect((await latestWrite).postDataJSON(), 'queued write must carry the latest desktop layout')
+      .toMatchObject({ canvasPan: expectedPan, panels: { control: { width: 390, collapsed: false } } })
+
+    await page.setViewportSize(desktop)
+    await expect(zoom).toHaveValue('115')
+    await expect(control).toHaveClass(/is-expanded/)
+    await expect.poll(pan, { message: 'the queued desktop pan is restored before its reply' }).toEqual(expectedPan)
+    await expect(control, 'the saved desktop panel width is restored before the latest reply').toHaveCSS('width', '390px')
+    const dropped = page.waitForEvent('requestfailed', outgoing => isLayoutWrite(outgoing, 1.15))
+    releaseLatest()
+    await dropped
+    await page.clock.runFor(1000)
+
+    expect(writes).toEqual([0.85, 1.15])
+    const saved = await unwrap(await request.get(`${apiBaseURL}${layoutPath}`, { headers: authHeaders(auth) }))
+    expect(saved).toMatchObject({ canvasZoom: 1.15, panels: { control: { collapsed: false, activeSection: 'rules' } } })
+  } finally {
+    releaseFirst()
+    releaseLatest()
+  }
+})
 
 test('overview nodes resize directly without changing canvas zoom and retain their saved size', async ({ context, request }) => {
   const auth = await createAuthenticatedUser(request)
@@ -237,6 +306,140 @@ for (const { gesture, finish } of [
     }
   })
 }
+
+for (const completed of [true, false]) test(`lost layout reply preserves a ${completed ? 'queued' : 'held'} gesture`, async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const original = { id: 'layout_lamp', templateName: 'Light', label: 'Layout lamp', state: 'off',
+    position: { x: 300, y: 200 }, width: 176, height: 128 }
+  await addNodes(request, auth, [original])
+  const headers = authHeaders(auth)
+  const edits = `${apiBaseURL}/api/board/edits`
+  const { impactToken } = await unwrap<{ impactToken: string }>(await request.get(`${edits}/clear-preview`, { headers }))
+  await unwrap(await request.post(`${edits}/clear`, { headers, data: { impactToken } }))
+  await unwrap(await request.post(`${apiBaseURL}/api/board/layout`, {
+    headers, data: { canvasZoom: 1, canvasPan: { x: 0, y: 0 }, panels: {
+      control: { collapsed: true, width: 320, activeSection: 'templates' },
+      inspector: { collapsed: true, width: 320, activeSection: 'devices' }
+    } }
+  }))
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await openWorkspace(page, auth)
+  const node = page.locator(`[data-node-id="${original.id}"]`)
+  const undoButton = page.getByTestId('board-undo')
+  await expect(node).toBeVisible()
+  await expect.poll(() => node.evaluate(readCanvasZoom)).toBe(1)
+  await expect(undoButton).toBeDisabled()
+  const geometry = () => node.evaluate(element => {
+    const style = (element as HTMLElement).style
+    return { x: parseFloat(style.left), width: parseFloat(style.width) }
+  })
+  const snapshot = async () => unwrap<{ nodes: typeof original[]; editHistory: { editHistoryRevision: string } }>(
+    await request.get(`${apiBaseURL}/api/board/snapshot`, { headers: authHeaders(auth) }))
+  const layoutPath = '/api/board/nodes/layout'
+  let markFirst!: () => void
+  let markSecond!: () => void
+  let releaseFirst!: () => void
+  let releaseSecond!: () => void
+  const first = new Promise<void>(resolve => { markFirst = resolve })
+  const second = new Promise<void>(resolve => { markSecond = resolve })
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve })
+  const secondGate = new Promise<void>(resolve => { releaseSecond = resolve })
+  let writes = 0
+  let recoveryReads = 0
+  page.on('request', outgoing => {
+    if (writes && outgoing.method() === 'GET' && outgoing.url().endsWith('/api/board/snapshot')) recoveryReads += 1
+  })
+  await page.route(url => url.pathname === layoutPath, async route => {
+    writes += 1
+    if (writes === 1) {
+      if (completed) await unwrap(await route.fetch())
+      markFirst()
+      await firstGate
+      await route.abort()
+      return
+    }
+    markSecond()
+    await secondGate
+    await route.continue()
+  })
+  const recoveryReply = await holdHistoryReply(page, '/api/board/snapshot')
+
+  try {
+    const box = (await node.boundingBox())!
+    const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    await page.mouse.move(start.x, start.y)
+    await page.mouse.down()
+    await page.mouse.move(start.x + 40, start.y)
+    await page.mouse.up()
+    await first
+    await expect.poll(geometry).toEqual({ x: 340, width: 176 })
+
+    await node.hover()
+    const target = completed ? node : node.locator('.resize-handle.br')
+    const pointer = await target.evaluateHandle(element => {
+      const observed = { id: 0 }
+      element.addEventListener('pointerdown', event => { observed.id = (event as PointerEvent).pointerId }, { once: true })
+      return observed
+    })
+    const targetBox = (await target.boundingBox())!
+    const handle = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 }
+    await page.mouse.move(handle.x, handle.y)
+    await page.mouse.down()
+    await page.mouse.move(handle.x + 30, handle.y)
+    if (completed) await page.mouse.up()
+    const latest = completed ? { x: 370, width: 176 } : { x: 340, width: 206 }
+    await expect.poll(geometry).toEqual(latest)
+    expect(writes).toBe(1)
+
+    releaseFirst()
+    await recoveryReply.requested
+    await afterHistoryRender(page)
+    expect(writes, 'a queued layout must wait for the recovery snapshot').toBe(1)
+    recoveryReply.release()
+    const recovery = (await (await recoveryReply.delivered()).json()).data
+    await expect.poll(geometry).toEqual(latest)
+    if (completed) {
+      await second
+      await expect(undoButton).toBeEnabled()
+      expect(await geometry()).toEqual(latest)
+      const saved = page.waitForResponse(response => new URL(response.url()).pathname === layoutPath)
+      releaseSecond()
+      const updated = (await (await saved).json()).data
+      expect(updated.currentDevice).toMatchObject({ position: { x: latest.x, y: 200 }, width: latest.width })
+      const undo = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo'))
+      await clickUnderTooltip(page, undoButton)
+      const undone = await undo
+      expect(undone.request().postDataJSON()).toEqual({ expectedEditHistoryRevision: updated.editHistoryRevision })
+      const undoneEdit = (await undone.json()).data
+      expect(undoneEdit).toMatchObject({ applied: true })
+      await expect.poll(geometry).toEqual({ x: 340, width: 176 })
+      expect(recovery.nodes[0]).toMatchObject({ position: { x: 340, y: 200 }, width: 176 })
+      const undoRecovered = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo'))
+      await clickUnderTooltip(page, undoButton)
+      const previous = await undoRecovered
+      expect(previous.request().postDataJSON()).toEqual({ expectedEditHistoryRevision: undoneEdit.editHistoryRevision })
+      expect((await previous.json()).data).toMatchObject({ applied: true })
+      await expect.poll(geometry).toEqual({ x: 300, width: 176 })
+      expect(await page.getByText(/The layout save is unconfirmed/).count()).toBe(0)
+    } else {
+      await expect(page.getByText('The layout save is unconfirmed. The layout on the refreshed board differs from this edit.')).toBeVisible()
+      await page.mouse.move(handle.x + 50, handle.y)
+      await expect.poll(geometry).toEqual({ x: 340, width: 226 })
+      await target.dispatchEvent('pointercancel', { pointerId: await pointer.evaluate(value => value.id) })
+      await page.mouse.up()
+      await expect.poll(geometry).toEqual({ x: 300, width: 176 })
+      expect((await snapshot()).nodes[0]).toMatchObject(original)
+    }
+    await pointer.dispose()
+    expect(writes).toBe(completed ? 2 : 1)
+    expect(recoveryReads).toBe(1)
+  } finally {
+    recoveryReply.release()
+    releaseFirst()
+    releaseSecond()
+    await page.mouse.up()
+  }
+})
 
 test('self-loop follows a held drag, persists once and survives undo at 375px in dark', async ({ page, request }) => {
   const viewport = { width: 375, height: 812 }

@@ -135,12 +135,7 @@ public class ManageSpecTool extends AbstractAiTool {
 
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "name", "templateId", "aConditions", "ifConditions", "thenConditions",
                     "specId", "readRef", "confirmed", "impactToken"));
@@ -249,7 +244,7 @@ public class ManageSpecTool extends AbstractAiTool {
         response.put("specification", SpecificationToolPresenter.present(userId,
                 mutation.getAffectedItem(), deviceLookup.presentationContext()));
         response.put("totalSpecs", mutation.getCurrentCount());
-        return unchanged ? readOnlySuccessJson(response, message) : successJson(response, message);
+        return unchanged ? readOnlySuccessJson(response) : successJson(response);
     }
 
     private String executeDelete(Long userId, JsonNode args) throws Exception {
@@ -280,7 +275,7 @@ public class ManageSpecTool extends AbstractAiTool {
             preview.put("requiresUserConfirmation", true);
             preview.put("specification", presentedSpecification);
             preview.put("impactToken", impactToken);
-            return readOnlySuccessJson(preview, "Specification deletion preview unavailable.");
+            return readOnlySuccessJson(preview);
         }
 
         String impactToken = requiredTextField(args, "impactToken", "arguments");
@@ -329,7 +324,7 @@ public class ManageSpecTool extends AbstractAiTool {
         response.put("deletedSpecification", SpecificationToolPresenter.present(userId,
                 mutation.getAffectedItem(), presentationContext));
         response.put("totalSpecs", mutation.getCurrentCount());
-        return successJson(response, "Specification deleted successfully.");
+        return successJson(response);
     }
 
     private List<SpecConditionDto> parseConditions(JsonNode node,
@@ -432,7 +427,8 @@ public class ManageSpecTool extends AbstractAiTool {
                         + " requires relation/value (api allows default '= TRUE').");
             }
 
-            if (("in".equals(relation) || "not in".equals(relation)) && isEmptyValueList(value)) {
+            if (("in".equals(relation) || "not in".equals(relation))
+                    && SmvRelationUtils.splitRuleValues(value).isEmpty()) {
                 throw new IllegalArgumentException(conditionLabel
                         + " has empty value list for relation '" + relation + "'.");
             }
@@ -581,18 +577,6 @@ public class ManageSpecTool extends AbstractAiTool {
             return null;
         }
         return SmvRelationUtils.isSupportedRelation(normalized) ? normalized : null;
-    }
-
-    private boolean isEmptyValueList(String value) {
-        if (value == null) {
-            return true;
-        }
-        for (String item : value.split("[,;|]")) {
-            if (item != null && !item.trim().isEmpty()) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private record ConditionGroup(String side, List<SpecConditionDto> conditions) {

@@ -40,13 +40,7 @@ public class DeviceSmvDataFactory {
 
     public Map<String, DeviceSmvData> buildDeviceSmvMap(Long userId,
                                                         List<DeviceVerificationDto> devices) {
-        return buildDeviceSmvMap(userId, devices, new HashMap<>());
-    }
-
-    public Map<String, DeviceSmvData> buildDeviceSmvMap(Long userId,
-                                                        List<DeviceVerificationDto> devices,
-                                                        Map<String, DeviceManifest> templateCache) {
-        return buildDeviceSmvMap(userId, devices, templateCache, new HashMap<>(), false);
+        return buildDeviceSmvMap(userId, devices, new HashMap<>(), new HashMap<>(), false);
     }
 
     /** Build from an immutable run snapshot and never fall back to the mutable template repository. */
@@ -408,38 +402,6 @@ public class DeviceSmvDataFactory {
     }
 
     // ==================== 静态工具方法（原 SmvUtils，供 builder 使用） ====================
-
-    /** 获取 state 所属的 mode 索引 */
-    public static int getModeIndexOfState(DeviceSmvData smv, String state) {
-        if (smv == null || smv.getModes() == null || state == null) return -1;
-        // 优先：检查 state 是否以 mode 名作为独立词前缀（如 "ThermostatMode_cool"）
-        // 使用精确匹配或 mode+"_" 前缀，避免子串误判（如 mode "on" 误匹配 "offline"）
-        for (int i = 0; i < smv.getModes().size(); i++) {
-            String mode = smv.getModes().get(i);
-            if (mode == null || mode.isEmpty()) continue;
-            if (state.equals(mode) || state.startsWith(mode + "_")) {
-                return i;
-            }
-        }
-        // M3 修复：对分号分隔的 EndState（如 ";cool" 或 "auto;"），找到非空部分的索引
-        if (state.contains(";")) {
-            String[] parts = state.split(";", -1);
-            for (int i = 0; i < parts.length && i < smv.getModes().size(); i++) {
-                if (!parts[i].trim().isEmpty()) {
-                    return i;
-                }
-            }
-        }
-        // 单值 fallback：检查 value 在哪个 mode 的状态列表中
-        String cleanState = cleanStateName(state);
-        for (int i = 0; i < smv.getModes().size(); i++) {
-            List<String> modeStates = smv.getModeStates().get(smv.getModes().get(i));
-            if (modeStates != null && modeStates.contains(cleanState)) {
-                return i;
-            }
-        }
-        return -1;
-    }
 
     /*
      * Look up device SMV data by canonical varName.

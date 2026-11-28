@@ -30,6 +30,71 @@ class RecommendationReadCapabilityRegressionTest {
     private final RecommendationResultParser parser = new RecommendationResultParser(mapper);
 
     @Test
+    void recommendationsKeepBoardRuntimeAndTemplateCapabilitiesInTheirPrompts() throws Exception {
+        BoardStorageService board = mock(BoardStorageService.class);
+        PromptCompletionService provider = mock(PromptCompletionService.class);
+        var original = snapshot(false, true);
+        var node = original.nodes().get(0);
+        node.setTemplateName(" aIr CoNdItIoNeR ");
+        node.setCurrentStateTrust("untrusted");
+        node.setCurrentStatePrivacy("private");
+        var template = original.deviceTemplates().get(0);
+        template.setName("AC catalog entry");
+        var manifest = template.getManifest();
+        manifest.setApis(List.of(manifest.getApis().get(0), DeviceTemplateDto.DeviceManifest.API.builder()
+                .name("humidityReading").description("Reports humidity").signal(true).build()));
+        RuleDto rule = RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder().deviceName("ac_1").attribute("humidity")
+                        .targetType("variable").relation(">=").value("60").build()))
+                .command(RuleDto.Command.builder().deviceName("ac_1").action("dry").build())
+                .build();
+        when(board.getSemanticSnapshot(37L)).thenReturn(new BoardSemanticSnapshotDto(
+                original.nodes(), original.environmentVariables(), List.of(rule), List.of(), original.deviceTemplates()));
+        when(provider.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn("{\"recommendations\":[]}");
+
+        new DeviceRecommendationService(devices, board, provider, mapper, parser).recommend(37L, 2, "en", "");
+        new RuleRecommendationService(devices, board, provider, mapper, parser).recommend(37L, 2, "en", "");
+        new SpecificationRecommendationService(devices, board, provider, mapper, parser).recommend(37L, 2, "en", "");
+
+        ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
+        verify(provider, times(3)).completeRecommendation(anyString(), prompt.capture(), anyDouble(), anyInt());
+        List<String> prompts = prompt.getAllValues();
+        JsonNode deviceContext = promptSection(prompts.get(0), "## 现有设备\n");
+        JsonNode ruleContext = promptSection(prompts.get(1), "## 设备列表\n");
+        JsonNode specContext = promptSection(prompts.get(2), "## 设备列表\n");
+        JsonNode ruleDevice = ruleContext.path("devices").get(0);
+        JsonNode specDevice = specContext.path("devices").get(0);
+        assertAll(
+                () -> assertEquals(mapper.readTree("[\"humidityReading\"]"), ruleDevice.path("apiSignals")),
+                () -> assertEquals(mapper.readTree("[{\"name\":\"humidityReading\",\"description\":\"Reports humidity\"}]"),
+                        specDevice.path("apiSignals")),
+                () -> assertTrue(mapper.convertValue(ruleDevice.path("triggerableAttributes"), List.class)
+                        .contains("humidityReading")),
+                () -> assertPromptRuntime(deviceContext),
+                () -> assertPromptRuntime(ruleContext),
+                () -> assertPromptRuntime(specContext),
+                () -> assertEquals("ClimateState", ruleContext.path("devices").path(0).path("modes").path(0).path("name").asText()),
+                () -> assertEquals("ClimateState", specContext.path("devices").path(0).path("modes").path(0).path("name").asText()),
+                () -> assertEquals("humidity", promptSection(prompts.get(1), "## 现有规则（避免重复推荐）\n")
+                        .path(0).path("conditions").path(0).path("attribute").asText()),
+                () -> assertEquals("dry", promptSection(prompts.get(2), "## 现有规则\n")
+                        .path(0).path("command").path("action").asText()));
+    }
+
+    private void assertPromptRuntime(JsonNode context) {
+        JsonNode device = context.path("devices").path(0);
+        assertEquals("ac_1", device.path("deviceId").asText());
+        assertEquals("off", device.path("currentState").asText());
+        assertEquals("untrusted", device.path("currentStateTrust").asText());
+        assertEquals("private", device.path("currentStatePrivacy").asText());
+        assertTrue(device.path("initialVariables").isArray());
+        assertTrue(device.path("initialPrivacies").isArray());
+        assertEquals("Air Conditioner", device.path("capabilities").path("manifestName").asText());
+        assertEquals("50", context.path("environmentVariables").path(0).path("value").asText());
+    }
+
+    @Test
     void ruleRecommendationDoesNotValidateAnAffectOnlyVariableAsAnObservedTrigger() throws Exception {
         BoardStorageService board = mock(BoardStorageService.class);
         PromptCompletionService provider = mock(PromptCompletionService.class);
@@ -59,8 +124,8 @@ class RecommendationReadCapabilityRegressionTest {
         assertTrue(result.getRecommendations().isEmpty());
         ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
         verify(provider, times(2)).completeRecommendation(anyString(), prompt.capture(), anyDouble(), anyInt());
-        JsonNode readableDevice = deviceContext(prompt.getAllValues().get(0)).path("devices").get(0);
-        JsonNode affectOnlyDevice = deviceContext(prompt.getValue()).path("devices").get(0);
+        JsonNode readableDevice = promptSection(prompt.getAllValues().get(0), "## 设备列表\n").path("devices").get(0);
+        JsonNode affectOnlyDevice = promptSection(prompt.getValue(), "## 设备列表\n").path("devices").get(0);
         assertTrue(mapper.convertValue(readableDevice.path("triggerableAttributes"), List.class).contains("humidity"));
         assertFalse(mapper.convertValue(affectOnlyDevice.path("triggerableAttributes"), List.class).contains("humidity"));
         assertEquals("humidity", affectOnlyDevice.path("capabilities").path("variables").get(0).path("name").asText());
@@ -136,8 +201,7 @@ class RecommendationReadCapabilityRegressionTest {
         }
     }
 
-    private JsonNode deviceContext(String prompt) throws Exception {
-        String header = "## 设备列表\n";
+    private JsonNode promptSection(String prompt, String header) throws Exception {
         int start = prompt.indexOf(header) + header.length();
         assertTrue(start >= header.length());
         return mapper.readTree(prompt.substring(start, prompt.indexOf("\n\n", start)));

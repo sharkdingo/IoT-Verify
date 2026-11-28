@@ -40,9 +40,9 @@ import cn.edu.nju.Iot_Verify.util.JwtUtil;
 import cn.edu.nju.Iot_Verify.util.mapper.UserMapper;
 import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.MalformedJwtException;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -63,10 +63,14 @@ class AuthServiceImplLogoutTest {
     @Mock private TokenBlacklistService tokenBlacklistService;
     @Mock private UserMapper userMapper;
     @Mock private DeviceTemplateService deviceTemplateService;
-    @Mock private VerificationService verificationService;
-    @Mock private SimulationService simulationService;
-    @Mock private FuzzService fuzzService;
-    @Mock private ChatService chatService;
+    @Mock(extraInterfaces = AsyncTaskExecutionControl.class)
+    private VerificationService verificationService;
+    @Mock(extraInterfaces = AsyncTaskExecutionControl.class)
+    private SimulationService simulationService;
+    @Mock(extraInterfaces = AsyncTaskExecutionControl.class)
+    private FuzzService fuzzService;
+    @Mock(extraInterfaces = ChatExecutionControl.class)
+    private ChatService chatService;
     @Mock private InteractiveAiExecutionService interactiveAiExecutionService;
     @Mock private InteractiveFixExecutionService interactiveFixExecutionService;
     @Mock private UserRepository userRepository;
@@ -85,35 +89,9 @@ class AuthServiceImplLogoutTest {
     @Mock private TraceRepository traceRepository;
     @Mock private VerificationTaskRepository verificationTaskRepository;
     @Mock private AiSessionStateRepository aiSessionStateRepository;
-    private final BoardEditJournalRepository boardEditJournalRepository =
-            mock(BoardEditJournalRepository.class);
+    @Mock private BoardEditJournalRepository boardEditJournalRepository;
 
-    private AuthServiceImpl authService;
-
-    @BeforeEach
-    void setUp() {
-        verificationService = mock(
-                VerificationService.class, withSettings().extraInterfaces(AsyncTaskExecutionControl.class));
-        simulationService = mock(
-                SimulationService.class, withSettings().extraInterfaces(AsyncTaskExecutionControl.class));
-        fuzzService = mock(
-                FuzzService.class, withSettings().extraInterfaces(AsyncTaskExecutionControl.class));
-        chatService = mock(
-                ChatService.class, withSettings().extraInterfaces(ChatExecutionControl.class));
-        authService = new AuthServiceImpl(
-                userService, jwtUtil, passwordEncoder,
-                tokenBlacklistService, userMapper, deviceTemplateService,
-                verificationService, simulationService, fuzzService, chatService,
-                interactiveAiExecutionService, interactiveFixExecutionService, userRepository,
-                boardEnvironmentVariableRepository,
-                boardLayoutRepository, chatMessageRepository, chatSessionRepository,
-                deviceNodeRepository, deviceTemplateRepository, fuzzFindingRepository,
-                fuzzTaskRepository, ruleRepository,
-                simulationTaskRepository, simulationTraceRepository, specificationRepository,
-                traceRepository, verificationTaskRepository, aiSessionStateRepository,
-                boardEditJournalRepository
-        );
-    }
+    @InjectMocks private AuthServiceImpl authService;
 
     @Test
     void login_withUsername_usesOnlyUsernameNamespace() {

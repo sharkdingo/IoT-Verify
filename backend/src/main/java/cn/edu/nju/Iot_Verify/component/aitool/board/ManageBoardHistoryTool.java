@@ -96,10 +96,8 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
             response.put("canUndo", result.isCanUndo());
             response.put("canRedo", result.isCanRedo());
             return "availability".equals(action)
-                    ? readOnlySuccessJson(response, "Board history availability loaded.")
-                    : successJson(response, "Board history operation completed.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+                    ? readOnlySuccessJson(response)
+                    : successJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {
@@ -122,7 +120,7 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
             response.put("operation", "history_empty");
             response.put("requiresUserConfirmation", false);
             response.put("message", "Undo and redo history is already empty; no Board data changed.");
-            return readOnlySuccessJson(response, "Board edit-history state unavailable.");
+            return readOnlySuccessJson(response);
         }
         if (domainImpactToken == null) {
             return errorJson("The edit-history preview did not provide an impact token. No changes were made.",
@@ -139,7 +137,7 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
             response.put("requiresUserConfirmation", true);
             response.put("impactToken", confirmationToken);
             response.put("message", "No Board data changed. Confirm this exact preview to discard the current undo and redo history.");
-            return readOnlySuccessJson(response, "Board edit-history clear preview unavailable.");
+            return readOnlySuccessJson(response);
         }
 
         String suppliedToken = requiredTextField(args, "impactToken", "arguments");
@@ -158,7 +156,7 @@ public class ManageBoardHistoryTool extends AbstractAiTool {
             response.put("canUndo", result.isCanUndo());
             response.put("canRedo", result.isCanRedo());
             response.put("message", "Undo and redo history was cleared. Current Board data was not changed.");
-            return successJson(response, "Board edit history cleared.");
+            return successJson(response);
         } catch (ConflictException conflict) {
             return staleClearResponse(userId, conflict.getMessage(), "CONFIRMATION_STALE", null);
         }

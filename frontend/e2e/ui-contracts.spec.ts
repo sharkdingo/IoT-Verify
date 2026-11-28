@@ -1,5 +1,5 @@
 import { type APIRequestContext, type Page, type Route } from '@playwright/test'
-import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { createAuthenticatedUser, seedBrowserSession, expect, test, type AuthUser } from './support/auth'
 import { dismissHintTooltips } from './support/tooltips'
 
 /**
@@ -8,23 +8,8 @@ import { dismissHintTooltips } from './support/tooltips'
  * real focus movement, and real computed scroll state.
  */
 
-const seedSession = async (page: Page, auth: AuthUser, extra: Record<string, string> = {}) => {
-  await page.addInitScript(({ token, user, extraEntries }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('locale', 'en')
-    for (const [key, value] of Object.entries(extraEntries)) {
-      window.localStorage.setItem(key, value)
-    }
-  }, {
-    token: auth.token,
-    user: { userId: auth.userId, phone: auth.phone, username: auth.username },
-    extraEntries: extra
-  })
-}
-
 const openBoard = async (page: Page, auth: AuthUser) => {
-  await seedSession(page, auth, { iot_verify_theme: 'light' })
+  await seedBrowserSession(page, auth, { locale: 'en', theme: 'light' })
   await page.goto('/#/board')
   await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
 }
@@ -108,14 +93,30 @@ test.describe('board accessibility contracts', () => {
   test('keeps focus escapable from a non-modal panel and closes it with Escape', async ({ page, sharedReadOnlyAccount: auth }) => {
     await openBoard(page, auth)
 
-    await page.getByTestId('open-verification-panel').click()
-    const panel = page.getByTestId('verification-panel')
-    await expect(panel).toBeVisible()
+    await expect(page.getByTestId('scene-import')).toBeEnabled()
+    for (const kind of ['verification', 'simulation']) {
+      const opener = page.getByTestId(`open-${kind}-panel`)
+      await opener.click()
+      const panel = page.getByTestId(`${kind}-panel`)
+      await expect(panel).toBeVisible()
 
-    await page.keyboard.press('Escape')
-    await expect(panel).toBeHidden()
-    // Focus returns to the control that opened the panel.
-    await expect(page.getByTestId('open-verification-panel')).toBeFocused()
+      const run = page.getByTestId(`run-${kind}`)
+      const reason = page.getByTestId(`${kind}-run-blocked-reason`)
+      await expect(run).toBeDisabled()
+      await expect(reason).toBeVisible()
+      await expect(reason).toHaveText(/Add at least one device/)
+      await expect(run).toHaveAccessibleDescription(await reason.innerText())
+
+      const attack = page.getByTestId(`${kind}-attack-toggle`)
+      const attackReason = page.getByTestId(`${kind}-attack-unavailable`)
+      await expect(attack).toBeDisabled()
+      await expect(attackReason).toBeVisible()
+      await expect(attack).toHaveAccessibleDescription(await attackReason.innerText())
+
+      await page.keyboard.press('Escape')
+      await expect(panel).toBeHidden()
+      await expect(opener).toBeFocused()
+    }
   })
 
   test('retracts wrapped panel hints while preserving an unrelated draft focus', async ({ page, request }) => {
@@ -207,7 +208,7 @@ test.describe('board top chrome', () => {
     test(`keeps an unavailable run and failed refresh readable with keyboard Retry at ${viewport.width}px`, async ({ page, sharedReadOnlyAccount: auth }) => {
       await page.setViewportSize(viewport)
       const theme = viewport.width === 375 ? 'dark' : 'light'
-      await seedSession(page, auth, { iot_verify_theme: theme })
+      await seedBrowserSession(page, auth, { locale: 'en', theme })
       await page.route('**/api/verify/runs/999999', route => route.fulfill({
         status: 404,
         contentType: 'application/json',
@@ -257,10 +258,9 @@ test.describe('board top chrome', () => {
       try {
         // Foreground refresh is a read, so the shared account's Board remains untouched.
         await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-        await expect(page.getByTestId('board-data-loading')).toBeVisible()
-        await expect(unavailableRun).toBeVisible()
-        await expectSeparatedFromRunAlert('board-data-loading')
         await expect.poll(() => refreshState.held !== null).toBe(true)
+        await expect(page.getByTestId('board-data-loading')).toHaveCount(0)
+        await expect(unavailableRun).toBeVisible()
         const refresh = refreshState.held!
         refreshState.held = null
         await refresh.fulfill({

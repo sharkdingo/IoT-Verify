@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { compareModelSnapshot, hasRunBoardDifference } from '@/utils/modelComparison'
+import { getVerificationRepairRunBlock, getVerificationRepairTraceBlock } from '@/utils/verificationRepair'
 import { activeTaskProgressStage } from '@/utils/runResponse'
 import type { BoardModelFingerprints, ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
+import type { VerificationRepairBlock } from '@/types/fix'
 import { formatRunTimestamp } from '@/utils/runTimestamp'
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -69,7 +71,7 @@ const props = defineProps<{
   actionLocked: boolean
   currentModelFingerprints?: BoardModelFingerprints | null
   modelComparisonLoading?: boolean
-  rejectedVerificationRepairTraceIds?: ReadonlySet<number>
+  verificationRepairBlocks?: ReadonlyMap<number, VerificationRepairBlock>
 }>()
 
 const emit = defineEmits<{
@@ -317,6 +319,11 @@ const fuzzingModeDescription = (mode: FuzzingExplorationMode) => t(
 
 const comparisonFor = (snapshot: ModelRunSnapshot, kind: TaskKind) =>
   compareModelSnapshot(snapshot, props.currentModelFingerprints, kind)
+
+const verificationRunRepairBlock = (snapshot: ModelRunSnapshot) =>
+  getVerificationRepairRunBlock(comparisonFor(snapshot, 'verification'), props.modelComparisonLoading)
+const verificationTraceRepairBlock = (trace: TraceSummary) =>
+  trace.dataAvailable ? getVerificationRepairTraceBlock(trace, props.verificationRepairBlocks) : null
 
 const comparisonLabel = (comparison: RunBoardComparison) => comparison === 'UNAVAILABLE' && props.modelComparisonLoading
   ? t('app.historyModelComparing') : t({
@@ -725,21 +732,21 @@ const resultDate = (item: ResultItem) => formatDate(resultTimestamp(item))
                 <div class="history-disclosure__body">
                   <p v-if="item.run.outcome !== 'VIOLATED'" class="board-text-warning">{{ t('app.inconclusiveEvidenceSummary', { counterexamples: item.run.counterexampleCount }) }}</p>
                   <p v-if="tracesForRun(item.run).length" :id="`historical-fix-caveat-${item.run.id}`" :data-testid="`historical-fix-caveat-${item.run.id}`"
-                    class="board-text-muted">{{ comparisonFor(item.run.modelSnapshot, 'verification') === 'UNCHANGED'
-                      ? t('app.historicalFixMayFailIfBoardChanged') : comparisonDetail(comparisonFor(item.run.modelSnapshot, 'verification')) }}</p>
+                    class="board-text-muted">{{ t(verificationRunRepairBlock(item.run.modelSnapshot)
+                      ?? 'app.historicalFixMayFailIfBoardChanged') }}</p>
                   <div v-for="trace in tracesForRun(item.run)" :key="trace.id" class="history-evidence-row board-muted-surface">
                     <p class="font-semibold board-text-strong" :title="traceSpecTitle(trace)">{{ traceSpecTitle(trace) }}</p>
                     <p :class="trace.dataAvailable ? 'board-text-muted' : 'board-text-warning'">{{ trace.dataAvailable
                       ? t('app.statesCount', { count: trace.stateCount || 0 }) : t('app.historyTraceUnavailableDetail') }}</p>
-                    <p v-if="rejectedVerificationRepairTraceIds?.has(trace.id)" :id="`rejected-verification-repair-${trace.id}`"
-                      class="board-text-warning">{{ comparisonDetail('SEMANTICS_CHANGED') }}</p>
+                    <p v-if="verificationTraceRepairBlock(trace)" :id="`blocked-verification-repair-${trace.id}`"
+                      class="board-text-warning">{{ t(verificationTraceRepairBlock(trace)!) }}</p>
                     <div class="history-evidence-actions">
                       <button type="button" :data-testid="`view-verification-trace-${trace.id}`" class="board-action-secondary"
                         :disabled="actionLocked || !trace.dataAvailable" @click="emit('view-verification-trace', trace.id, item.run.id)">{{ t('app.replay') }}</button>
                       <button type="button" :data-testid="`fix-verification-trace-${trace.id}`" class="history-text-action board-text-muted hover:board-text-strong"
-                        :disabled="actionLocked || !trace.dataAvailable || rejectedVerificationRepairTraceIds?.has(trace.id)
-                          || comparisonFor(item.run.modelSnapshot, 'verification') !== 'UNCHANGED'"
-                        :aria-describedby="rejectedVerificationRepairTraceIds?.has(trace.id) ? `rejected-verification-repair-${trace.id}`
+                        :disabled="actionLocked || !trace.dataAvailable || !!verificationTraceRepairBlock(trace)
+                          || !!verificationRunRepairBlock(item.run.modelSnapshot)"
+                        :aria-describedby="verificationTraceRepairBlock(trace) ? `blocked-verification-repair-${trace.id}`
                           : trace.dataAvailable ? `historical-fix-caveat-${item.run.id}` : undefined"
                         @click="emit('fix-verification-trace', trace)">{{ t('app.fixRules') }}</button>
                     </div>

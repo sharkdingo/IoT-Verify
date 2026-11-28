@@ -92,9 +92,7 @@ class NaturalChangeRateParserTest {
     }
 
     @Test
-    void spanAndStaticReportTheDeclarationWithoutOverflowing() {
-        assertTrue(NaturalChangeRateParser.parse("0").isStatic());
-        assertFalse(NaturalChangeRateParser.parse("[0, 1]").isStatic());
+    void spanReportsTheDeclarationWithoutOverflowing() {
         assertEquals(6L, NaturalChangeRateParser.parse("[-3, 3]").span());
         assertEquals((long) Integer.MAX_VALUE - Integer.MIN_VALUE,
                 NaturalChangeRateParser.parse(

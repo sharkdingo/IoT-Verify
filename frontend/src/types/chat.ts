@@ -37,7 +37,8 @@ export interface ChatSessionObservationBaseline {
     reconciliation: Promise<boolean> | null
 }
 
-export type ChatConfirmationKind = 'DESTRUCTIVE' | 'DEFAULT_TEMPLATE_RESET' | 'SCENE_REPLACEMENT'
+export const CHAT_CONFIRMATION_KINDS = ['DESTRUCTIVE', 'DEFAULT_TEMPLATE_RESET', 'SCENE_REPLACEMENT'] as const
+export type ChatConfirmationKind = typeof CHAT_CONFIRMATION_KINDS[number]
 export type ChatConfirmationAction = 'CONFIRM' | 'CANCEL'
 
 export interface ChatConfirmationCommand {
@@ -58,19 +59,18 @@ export interface ChatPendingConfirmation {
     actions: ChatProtectedAction[]
 }
 
-export type ChatExecutionStatus =
-    | 'COMPLETED'
-    | 'AWAITING_CONFIRMATION'
-    | 'PARTIAL'
-    | 'STOPPED'
-    | 'DISCONNECTED'
-    | 'FAILED'
+export const CHAT_EXECUTION_STATUSES = [
+    'COMPLETED', 'AWAITING_CONFIRMATION', 'PARTIAL', 'STOPPED', 'DISCONNECTED', 'FAILED'
+] as const
+export type ChatExecutionStatus = typeof CHAT_EXECUTION_STATUSES[number]
+
+export const CHAT_MESSAGE_ROLES = ['user', 'assistant'] as const
 
 // Matches backend ChatMessageResponseDto.
 export interface ChatMessage {
     id?: number
     sessionId?: string
-    role: 'user' | 'assistant'
+    role: typeof CHAT_MESSAGE_ROLES[number]
     content: string
     turnId?: string
     createdAt?: string
@@ -112,6 +112,9 @@ export const STREAM_REFRESH_TARGETS = [
 ] as const
 
 export type StreamRefreshTarget = typeof STREAM_REFRESH_TARGETS[number]
+
+export const isStreamRefreshTarget = (value: unknown): value is StreamRefreshTarget =>
+    typeof value === 'string' && (STREAM_REFRESH_TARGETS as readonly string[]).includes(value)
 
 export const ASSISTANT_ACTIONS = [
     'DEVICE_ADDED',
@@ -160,14 +163,12 @@ type StreamProgressBase = {
     detail?: string | null
 }
 
-type ToolResultOutcome =
-    | 'USABLE'
-    | 'PARTIAL'
-    | 'FAILED'
-    | 'RESULT_UNAVAILABLE'
-    | 'CONFIRMATION_REQUIRED'
-
-type ExecutionGuardOutcome = 'NO_PROGRESS' | 'EMERGENCY_LIMIT'
+export const STREAM_PROGRESS_STAGES_WITHOUT_OUTCOME = [
+    'CONTEXT_READY', 'TASK_RESUMED', 'PLANNING', 'REASONING', 'TOOL_EXECUTION', 'WRITING_RESPONSE'
+] as const
+export const TOOL_RESULT_OUTCOMES = ['USABLE', 'PARTIAL', 'FAILED', 'RESULT_UNAVAILABLE', 'CONFIRMATION_REQUIRED'] as const
+export const EXECUTION_GUARD_OUTCOMES = ['NO_PROGRESS', 'EMERGENCY_LIMIT'] as const
+export const CLAIM_REVIEW_OUTCOMES = ['REPLACED', 'HIDDEN'] as const
 
 export const CLAIM_REVIEW_REASONS = [
     'MISSING_TOOL_EVIDENCE',
@@ -183,12 +184,12 @@ export interface ClaimReview {
 
 export type StreamProgress = StreamProgressBase & (
     | {
-        stage: 'CONTEXT_READY' | 'TASK_RESUMED' | 'PLANNING' | 'REASONING' | 'TOOL_EXECUTION' | 'WRITING_RESPONSE'
+        stage: typeof STREAM_PROGRESS_STAGES_WITHOUT_OUTCOME[number]
         outcome?: null
       }
-    | { stage: 'TOOL_RESULT'; outcome: ToolResultOutcome }
-    | { stage: 'EXECUTION_GUARD'; outcome: ExecutionGuardOutcome }
-    | { stage: 'CLAIM_REVIEW'; outcome: 'REPLACED' | 'HIDDEN'; claimReview: ClaimReview }
+    | { stage: 'TOOL_RESULT'; outcome: typeof TOOL_RESULT_OUTCOMES[number] }
+    | { stage: 'EXECUTION_GUARD'; outcome: typeof EXECUTION_GUARD_OUTCOMES[number] }
+    | { stage: 'CLAIM_REVIEW'; outcome: typeof CLAIM_REVIEW_OUTCOMES[number]; claimReview: ClaimReview }
 )
 
 export type ChatLogoutPreparation = 'ready' | 'outcome-unknown' | 'reconciliation-failed'

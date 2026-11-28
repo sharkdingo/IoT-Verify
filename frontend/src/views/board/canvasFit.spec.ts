@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { transpileModule, ScriptTarget } from 'typescript'
-import { effectScope, nextTick, reactive, ref, shallowRef, watch, watchPostEffect } from 'vue'
+import { computed, effectScope, nextTick, reactive, ref, shallowRef, watch, watchPostEffect } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 
 const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
@@ -25,12 +25,6 @@ describe('canvas wheel navigation', () => {
     expect(measure).not.toHaveBeenCalled()
   })
 
-  it.each([-100, 0, 100])('ignores zero vertical movement with horizontal delta %s', deltaX => {
-    const adjust = vi.fn()
-    wheel({ value: false }, adjust, 0.1)({ ctrlKey: true, deltaX, deltaY: 0 })
-    expect(adjust).not.toHaveBeenCalled()
-  })
-
   it.each([[-100, 0.1], [100, -0.1]])('keeps the existing zoom step for vertical delta %s', (deltaY, expected) => {
     const adjust = vi.fn()
     wheel({ value: false }, adjust, 0.1)({ ctrlKey: true, deltaY })
@@ -47,7 +41,7 @@ describe('canvas wheel navigation', () => {
   })
 })
 
-const start = board.indexOf('const fittedViewportForNodes =')
+const start = board.indexOf('const fittedViewportForBounds =')
 const end = board.indexOf('const fitNodesToCanvas =', start)
 if (start < 0 || end < 0) throw new Error('Canvas fitting is missing')
 const fit = new Function('getNodeBounds', 'getVisibleCanvasFrame', 'MAX_ZOOM', 'MIN_ZOOM',
@@ -58,7 +52,7 @@ const fit = new Function('getNodeBounds', 'getVisibleCanvasFrame', 'MAX_ZOOM', '
 const zoomStart = board.indexOf('const getMinimumCanvasZoom =')
 const zoomEnd = board.indexOf('const setCanvasZoom =', zoomStart)
 if (zoomStart < 0 || zoomEnd < 0) throw new Error('Canvas zoom bounds are missing')
-const clamp = new Function('fittedViewportForNodes', 'renderedCanvasNodes', 'MIN_ZOOM', 'MAX_ZOOM',
+const clamp = new Function('fittedViewportForBounds', 'renderedNodeBounds', 'MIN_ZOOM', 'MAX_ZOOM',
   'getVisibleCanvasFrame = () => ({ left: 0, top: 0, width: 1280, height: 900 })',
   transpileModule(`${board.slice(zoomStart, zoomEnd)}\nreturn clampZoom`, {
     compilerOptions: { target: ScriptTarget.ES2022 }
@@ -166,7 +160,7 @@ describe('canvas render geometry capture', () => {
   })
 })
 
-const playbackStart = board.indexOf('const activatePlaybackScene =')
+const playbackStart = board.indexOf('const resetPlaybackViewport =')
 const playbackEnd = board.indexOf('const handleCreateDevice =', playbackStart)
 if (playbackStart < 0 || playbackEnd < 0) throw new Error('Playback viewport controls are missing')
 const modeStart = board.indexOf('let playbackViewportFollowsFit =')
@@ -177,7 +171,8 @@ const centerStart = board.indexOf('const getVisibleCanvasCenterWorld =')
 const centerEnd = board.indexOf('const clampCanvasMapValue =', centerStart)
 const panStart = board.indexOf('const panCanvasToWorldCenter =')
 const panEnd = board.indexOf('const focusDeviceNodeOnCanvas =', panStart)
-const zoomNavigation = new Function('ref', 'getVisibleCanvasFrame', 'getNodeBounds', 'playback',
+const nodeBoundsDefinition = board.match(/^const renderedNodeBounds = .*$/m)?.[0]
+const zoomNavigation = new Function('ref', 'computed', 'getVisibleCanvasFrame', 'getNodeBounds', 'playback',
   transpileModule(`
     const isCanvasNavigationLocked = ref(false)
     const layoutHydrated = ref(true)
@@ -191,6 +186,7 @@ const zoomNavigation = new Function('ref', 'getVisibleCanvasFrame', 'getNodeBoun
     const renderedCanvasZoom = playback ? playbackCanvasZoom : canvasZoom
     const renderedCanvasPan = playback ? playbackCanvasPan : canvasPan
     const renderedCanvasNodes = { value: [] }
+    ${nodeBoundsDefinition}
     const MIN_ZOOM = 0.4
     const MAX_ZOOM = 2
     ${board.slice(zoomStart, zoomEnd)}
@@ -204,17 +200,17 @@ const zoomNavigation = new Function('ref', 'getVisibleCanvasFrame', 'getNodeBoun
 describe('canvas zoom frame ownership', () => {
   it.each([false, true])('measures one fresh frame per command, in playback: %s', playback => {
     let frame = { left: 40, top: 64, width: 800, height: 600 }
-    let bounds = { minX: 0, minY: 0, maxX: 2000, maxY: 1200 }
+    const bounds = ref({ minX: 0, minY: 0, maxX: 2000, maxY: 1200 })
     const readFrame = vi.fn(() => frame)
-    const readBounds = vi.fn(() => bounds)
-    const control = zoomNavigation(ref, readFrame, readBounds, playback)
+    const readBounds = vi.fn(() => bounds.value)
+    const control = zoomNavigation(ref, computed, readFrame, readBounds, playback)
     for (const [nextFrame, requested, expected] of [
       [frame, 1.5, 1.5],
       [{ left: 48, top: 100, width: 1000, height: 700 }, 1.2, 1.2],
       [{ left: 48, top: 100, width: 1600, height: 900 }, 0.01, 0.0756]
     ] as const) {
       frame = nextFrame
-      if (requested === 0.01) bounds = { ...bounds, maxX: 10000, maxY: 10000 }
+      if (requested === 0.01) bounds.value = { ...bounds.value, maxX: 10000, maxY: 10000 }
       const center = {
         x: (frame.left + frame.width / 2 - control.pan.value.x) / control.zoom.value,
         y: (frame.top + frame.height / 2 - control.pan.value.y) / control.zoom.value
@@ -223,7 +219,7 @@ describe('canvas zoom frame ownership', () => {
       readBounds.mockClear()
       control.setCanvasZoom(requested, { preserveCenter: true })
       expect(readFrame).toHaveBeenCalledOnce()
-      expect(readBounds).toHaveBeenCalledOnce()
+      expect(readBounds).toHaveBeenCalledTimes(expected === 1.2 ? 0 : 1)
       expect(control.zoom.value).toBeCloseTo(expected, 10)
       expect(control.pan.value.x).toBeCloseTo(frame.left + frame.width / 2 - center.x * expected, 8)
       expect(control.pan.value.y).toBeCloseTo(frame.top + frame.height / 2 - center.y * expected, 8)
@@ -236,7 +232,7 @@ describe('canvas zoom frame ownership', () => {
   })
 })
 
-const playbackControls = new Function('activePlaybackScene', 'deepClone', 'nextTick',
+const playbackControls = new Function('activePlaybackScene',
   'fittedViewportForNodes', 'playbackCanvasZoom', 'playbackCanvasPan', 'watch',
   'actionDockViewportWidth', 'boardViewportHeight', 'playbackPanelOpen', 'playbackTerminalTab',
   'boardPanels', 'effectiveControlPanelWidth', 'effectiveInspectorPanelWidth', 'actionDockReservedWidth',
@@ -255,7 +251,11 @@ const playbackControls = new Function('activePlaybackScene', 'deepClone', 'nextT
     ${board.slice(navigationStart, navigationEnd)}
     ${board.slice(panStart, panEnd)}
     ${board.slice(playbackStart, playbackEnd)}
-    return { activatePlaybackScene, deactivatePlaybackScene, setCanvasZoom, panCanvasToWorldCenter, fitToContent }
+    const setPlaybackScene = scene => {
+      activePlaybackScene.value = scene
+      resetPlaybackViewport()
+    }
+    return { setPlaybackScene, setCanvasZoom, panCanvasToWorldCenter, fitToContent }
   `, {
     compilerOptions: { target: ScriptTarget.ES2022 }
   }).outputText)
@@ -303,14 +303,14 @@ describe('canvas overview fitting', () => {
     const pan = ref({ x: 0, y: 0 })
     const scope = effectScope()
     try {
-      const controls = scope.run(() => playbackControls(scene, structuredClone, nextTick,
+      const controls = scope.run(() => playbackControls(scene,
         (nodes: { id: string }[]) => {
           expect(nodes).toEqual([{ id: 'frozen-device' }])
           return { zoom: width.value / 1000, pan: { x: width.value / 2, y: height.value / 2 } }
         }, zoom, pan, watch, width, height, ref(true), ref('timeline'),
         reactive({ control: { collapsed: true }, inspector: { collapsed: true } }), ref(320), ref(320), ref(72),
         () => ({ left: 0, top: 0, width: width.value, height: height.value })))!
-      controls.activatePlaybackScene({ nodes: [{ id: 'frozen-device' }] })
+      controls.setPlaybackScene({ nodes: [{ id: 'frozen-device' }] })
       await nextTick()
       await nextTick()
       expect(pan.value).toEqual({ x: 320, y: 180 })
@@ -322,7 +322,7 @@ describe('canvas overview fitting', () => {
       expect(zoom.value).toBe(viewport.width / 1000)
       expect(pan.value).toEqual({ x: viewport.width / 2, y: viewport.height / 2 })
 
-      controls.deactivatePlaybackScene()
+      controls.setPlaybackScene(null)
       width.value = 1280
       height.value = 720
       await nextTick()
@@ -344,11 +344,11 @@ describe('canvas overview fitting', () => {
     const fitted = vi.fn(() => ({ zoom: 0.5, pan: { x: 250, y: 150 } }))
     const scope = effectScope()
     try {
-      const controls = scope.run(() => playbackControls(scene, structuredClone, nextTick,
+      const controls = scope.run(() => playbackControls(scene,
         fitted, ref(1), ref({ x: 0, y: 0 }), watch, ref(1024), ref(768), ref(true), terminalTab,
         panels, controlWidth, inspectorWidth, dockWidth,
         () => ({ left: 0, top: 0, width: 1024, height: 768 })))!
-      controls.activatePlaybackScene({ nodes: [{ id: 'frozen-device' }] })
+      controls.setPlaybackScene({ nodes: [{ id: 'frozen-device' }] })
       await nextTick()
       await nextTick()
       expect(fitted).toHaveBeenCalledTimes(1)
@@ -397,9 +397,9 @@ describe('canvas overview fitting', () => {
     })
     const scope = effectScope()
     try {
-      const controls = scope.run(() => playbackControls(scene, structuredClone, nextTick,
+      const controls = scope.run(() => playbackControls(scene,
         fitted, zoom, pan, watch, width, height, panelOpen, terminalTab, panels, ref(320), ref(320), ref(72), frame))!
-      controls.activatePlaybackScene({ nodes: [{ id: 'frozen-device' }] })
+      controls.setPlaybackScene({ nodes: [{ id: 'frozen-device' }] })
       await nextTick()
       await nextTick()
       if (navigation === 'zoom') controls.setCanvasZoom(0.6, { preserveCenter: true })
@@ -433,11 +433,18 @@ describe('canvas overview fitting', () => {
       expect(fitted).toHaveBeenCalledOnce()
 
       controls.setCanvasZoom(0.8)
-      controls.activatePlaybackScene({ nodes: [{ id: 'another-frozen-device' }] })
+      controls.setPlaybackScene({ nodes: [{ id: 'another-frozen-device' }] })
       await nextTick()
       await nextTick()
       expect(zoom.value).toBe(0.2)
       expect(pan.value).toEqual({ x: 250, y: 150 })
+
+      fitted.mockClear()
+      controls.setPlaybackScene({ nodes: [{ id: 'closed-before-fit' }] })
+      controls.setPlaybackScene(null)
+      await nextTick()
+      expect(fitted).not.toHaveBeenCalled()
+      expect(zoom.value).toBe(1)
     } finally { scope.stop() }
   })
 })

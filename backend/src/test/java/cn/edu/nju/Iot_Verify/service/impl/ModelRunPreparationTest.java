@@ -3,6 +3,7 @@ package cn.edu.nju.Iot_Verify.service.impl;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.EnvironmentProvenanceCollector;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
+import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
@@ -108,6 +109,28 @@ class ModelRunPreparationTest {
         assertNull(prepared.modelSnapshot());
         verify(generator).captureDeviceModelFromTemplateSnapshots(devices, templates);
         verifyNoMoreInteractions(generator);
+        verifyNoInteractions(provenance);
+    }
+
+    @Test
+    void invalidEnvironmentOverridesAreRejectedBeforeDefaultsHideThem() {
+        stubCapturedSensor();
+        Map<String, String> errors = NusmvRequestValidator.newErrors();
+
+        var prepared = ModelRunPreparation.prepare(generator, provenance, devices, List.of(), List.of(),
+                List.of(new BoardEnvironmentVariableDto("temperature", " ", " ", ""),
+                        new BoardEnvironmentVariableDto("temperature", "30", "untrusted", "private")),
+                false, templates, errors);
+
+        assertIterableEquals(List.of("environmentVariables[0].trust", "environmentVariables[0].privacy",
+                "environmentVariables[0].value", "environmentVariables[1].name"), errors.keySet());
+        assertTrue(errors.get("environmentVariables[0].trust").contains("trusted or untrusted"));
+        assertTrue(errors.get("environmentVariables[0].privacy").contains("public or private"));
+        assertEquals("Environment variable value cannot be blank when provided",
+                errors.get("environmentVariables[0].value"));
+        assertEquals("Duplicate environment variable: temperature", errors.get("environmentVariables[1].name"));
+        assertEquals("15", prepared.environmentVariables().get(0).getValue());
+        assertNull(prepared.modelSnapshot());
         verifyNoInteractions(provenance);
     }
 

@@ -131,10 +131,14 @@ class EnvironmentProvenanceCollectorTest {
 
     @Test
     void aDeviceReadingTheValueIsListedAsAReaderAndNotAsAWriter() {
+        var local = sharedNumeric("temperature", 90, 99, null, true);
+        local.setIsInside(true);
         List<EnvironmentValueProvenanceDto> provenance = collect(
+                smv("local_1", "Local Temperature", local, List.of()),
                 numericSensor("temp_1", "Temperature Sensor", "temperature", 15, 35, "[-1, 1]"));
 
         EnvironmentValueProvenanceDto temperature = single(provenance);
+        assertEquals(15, temperature.getLowerBound(), "the earlier local declaration cannot define the shared domain");
         assertEquals(1, temperature.getReaders().size());
         assertEquals("temp_1", temperature.getReaders().get(0).getDeviceVarName());
         assertTrue(temperature.getWriters().isEmpty(),

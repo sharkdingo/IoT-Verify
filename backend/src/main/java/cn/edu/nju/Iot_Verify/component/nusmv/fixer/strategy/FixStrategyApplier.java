@@ -34,32 +34,12 @@ public final class FixStrategyApplier {
     private FixStrategyApplier() {}
 
     /**
-     * Apply the suggestion to a deep copy of {@code rules} and return the modified list.
-     * The input list is not mutated.
+     * Applies the suggestion to a deep copy of {@code rules}. {@code persistenceDeviceRefs} translates
+     * newly added conditions from SMV names to stable Board ids. {@code displayDeviceNames} supplies
+     * current user-facing labels for rule text.
      */
     public static List<RuleDto> apply(String strategy, FixSuggestionDto suggestion,
-                                      List<RuleDto> rules, Map<String, DeviceSmvData> deviceSmvMap) {
-        return apply(strategy, suggestion, rules, deviceSmvMap, Map.of(), Map.of());
-    }
-
-    /**
-     * Apply the suggestion, translating newly-added condition device references through
-     * {@code persistenceDeviceRefs} when provided. Verified suggestions are computed against SMV
-     * varNames, while persisted rules should keep the board's raw {@code DeviceNode.id} references so
-     * the UI and storage layer keep using the same stable identity.
-     */
-    public static List<RuleDto> apply(String strategy, FixSuggestionDto suggestion,
-                                      List<RuleDto> rules, Map<String, DeviceSmvData> deviceSmvMap,
-                                      Map<String, String> persistenceDeviceRefs) {
-        return apply(strategy, suggestion, rules, deviceSmvMap, persistenceDeviceRefs, Map.of());
-    }
-
-    /**
-     * {@code displayDeviceNames} maps persisted and normalized device references to current user-facing
-     * labels. It affects only regenerated rule text; typed rule references remain unchanged.
-     */
-    public static List<RuleDto> apply(String strategy, FixSuggestionDto suggestion,
-                                      List<RuleDto> rules, Map<String, DeviceSmvData> deviceSmvMap,
+                                      List<RuleDto> rules,
                                       Map<String, String> persistenceDeviceRefs,
                                       Map<String, String> displayDeviceNames) {
         List<RuleDto> working = FixStrategyUtils.deepCopyRules(rules);

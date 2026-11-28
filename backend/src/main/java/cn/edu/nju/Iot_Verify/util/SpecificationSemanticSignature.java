@@ -5,10 +5,10 @@ import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.TreeMap;
 import java.util.function.ToIntFunction;
 
@@ -68,7 +68,7 @@ public final class SpecificationSemanticSignature {
                 continue;
             }
             String targetType = normalize(condition.getTargetType()).toLowerCase(Locale.ROOT);
-            String relation = normalizeRelation(condition.getRelation());
+            String relation = Objects.toString(SmvRelationUtils.normalizeRelation(condition.getRelation()), "");
             String device = normalize(condition.getDeviceId());
             String value = modeCountForDevice == null ? null : SmvRelationUtils.canonicalStateMembershipValue(
                     condition.getValue(), relation, targetType, modeCountForDevice.applyAsInt(device));
@@ -91,40 +91,8 @@ public final class SpecificationSemanticSignature {
 
     /** Canonical value for a comparison key, with an already normalized relation and target type. */
     public static String canonicalConditionValue(String value, String relation, String targetType) {
-        String normalized = normalize(value);
-        if ("api".equals(targetType)) {
-            normalized = ManifestConditionSemantics.canonicalApiSignalValue(normalized);
-        }
-        if (!"in".equals(relation) && !"not in".equals(relation)) {
-            return normalized;
-        }
-        String delimiter = "state".equals(targetType) ? "[,|]" : "[,;|]";
-        return Arrays.stream(normalized.split(delimiter))
-                .map(String::trim)
-                .filter(part -> !part.isBlank())
-                .sorted()
-                .reduce((left, right) -> left + "," + right)
-                .orElse("");
-    }
-
-    /**
-     * One owner for relation aliases: {@link SmvRelationUtils#normalizeRelation}.
-     *
-     * This was a private copy of that switch, and it had already drifted — its `NEQ` case omitted the `"!="`
-     * alias the canonical version carries. The two agreed only by accident, through the passthrough default, so
-     * adding an alias to the generator alone would have made a signature disagree with the model without any test
-     * noticing.
-     *
-     * That matters more here than in most places. This signature gates duplicate detection, delete-if-unchanged
-     * (`BoardStorageServiceImpl:1160`, `:4027`) and fix conflict detection (`FixStrategyUtils:152`) — so a
-     * mismatch lands a delete or an undo on a record the user never reviewed.
-     *
-     * The empty-string contract is kept: a signature is a string key, and a `null` inside one would compare
-     * unequal to an absent relation rather than equal to it.
-     */
-    private static String normalizeRelation(String relation) {
-        String canonical = SmvRelationUtils.normalizeRelation(relation);
-        return canonical == null ? "" : canonical;
+        String operand = "api".equals(targetType) ? ManifestConditionSemantics.canonicalApiSignalValue(value) : value;
+        return SmvRelationUtils.canonicalComparisonValue(operand, relation, targetType);
     }
 
     private static String normalize(String value) {

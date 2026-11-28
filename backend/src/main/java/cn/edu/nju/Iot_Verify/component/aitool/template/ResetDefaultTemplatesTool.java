@@ -75,8 +75,7 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
                 return readOnlySuccessJson(Map.of(
                         "message", "No changes were made. The current board is incompatible with the bundled default definitions; resolve the listed blockers first.",
                         "requiresUserConfirmation", false,
-                        "preview", previewView),
-                        "Default-template reset preview unavailable.");
+                        "preview", previewView));
             }
             if (domainImpactToken == null) {
                 return errorJson("The reset preview did not provide an impact token. No changes were made.",
@@ -94,8 +93,7 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
                 return readOnlySuccessJson(Map.of(
                         "message", "No changes were made. Confirm this exact preview to refresh the bundled default templates.",
                         "requiresUserConfirmation", true,
-                        "preview", previewView),
-                        "Default-template reset preview unavailable.");
+                        "preview", previewView));
             }
 
             String suppliedToken = requiredTextField(args, "impactToken", "arguments");
@@ -120,9 +118,7 @@ public class ResetDefaultTemplatesTool extends AbstractAiTool {
             response.put("affectedDeviceCount", safeList(result.getAffectedDevices()).size());
             response.put("environmentChangeCount", safeList(result.getEnvironmentChanges()).size());
             response.put("verificationStatus", "NOT_VERIFIED");
-            return successJson(response, "Default templates refreshed.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return successJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

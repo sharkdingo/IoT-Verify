@@ -1,14 +1,7 @@
-import type { APIResponse } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
-
-const unwrap = async (response: Pick<APIResponse, 'ok' | 'text' | 'json'>) => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data
-}
 
 const specialIds = ['slash/id', 'percent%2F', '.', '..', 'comma,id']
 

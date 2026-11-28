@@ -75,8 +75,8 @@ class RuleFixerTest {
 
         RuleDto rule = RuleDto.builder().build();
 
-        fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null);
+        fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null, () -> { });
 
         // All three strategies should have tryFix called
         verify(paramStrategy).tryFix(any(FixContext.class));
@@ -98,8 +98,8 @@ class RuleFixerTest {
         RuleDto rule = RuleDto.builder().build();
 
         assertThrows(IllegalArgumentException.class, () ->
-                fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(spec),
-                        Map.of(), 1L, AttackScenarioDto.none(), false, List.of(), 20, null));
+                fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(), List.of(spec),
+                        Map.of(), 1L, AttackScenarioDto.none(), false, List.of(), 20, null, () -> { }));
 
         verify(paramStrategy, never()).tryFix(any(FixContext.class));
         verify(condStrategy, never()).tryFix(any(FixContext.class));
@@ -122,8 +122,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
         RuleDto rule = RuleDto.builder().build();
 
-        fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("remove"), 20, null);
+        fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("remove"), 20, null, () -> { });
 
         verify(paramStrategy, never()).tryFix(any());
         verify(condStrategy, never()).tryFix(any());
@@ -140,8 +140,8 @@ class RuleFixerTest {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("real-spec-id");
         FixResultDto result = fixer.fix(1L, "0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null, () -> { });
 
         verify(paramStrategy, never()).tryFix(any());
         assertEquals("SKIPPED_NO_SPEC", result.getStrategyAttempts().get(0).getStatus());
@@ -166,8 +166,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null, () -> { });
 
         assertEquals("FAILED_MODEL_GENERATION", result.getStrategyAttempts().get(0).getStatus());
         assertEquals("The counterexample initial state is incomplete.",
@@ -189,8 +189,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 7, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 7, null, () -> { });
 
         assertEquals("FAILED_SOLVER_EXECUTION", result.getStrategyAttempts().get(0).getStatus());
         assertEquals("NuSMV returned incomplete output.", result.getStrategyAttempts().get(0).getReason());
@@ -216,8 +216,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null, () -> { });
 
         assertEquals(List.of("p1", "p2", "r1"),
                 result.getSuggestions().stream().map(FixSuggestionDto::getDescription).toList());
@@ -260,8 +260,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter", "remove"), 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter", "remove"), 20, null, () -> { });
 
         verify(removeStrategy).tryFix(any(FixContext.class));
         assertNotEquals("SKIPPED_TIMEOUT", result.getStrategyAttempts().get(1).getStatus());
@@ -283,8 +283,8 @@ class RuleFixerTest {
                 .thenReturn(List.of(FaultRuleDto.builder().ruleIndex(0).build()));
 
         FixResultDto result = fixer.fix(1L, "UNKNOWN_SPEC", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("remove"), 2, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("remove"), 2, null, () -> { });
 
         assertEquals("SEARCH_BUDGET_EXHAUSTED", result.getStrategyAttempts().get(0).getStatus());
         assertEquals("Unchecked combinations remain.", result.getStrategyAttempts().get(0).getReason());
@@ -315,9 +315,9 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
                 Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20,
-                Map.of(targetId, new PreferredRange(20, 40)));
+                Map.of(targetId, new PreferredRange(20, 40)), () -> { });
 
         assertTrue(result.getUnusedPreferredRangeSelections().isEmpty());
         assertEquals(1, result.getParameterTargets().size());
@@ -355,8 +355,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
         RuleDto rule = RuleDto.builder().build();
 
-        FixResultDto result = fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null);
+        FixResultDto result = fixer.fix(1L, "spec_0", List.of(), List.of(rule), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, null, 20, null, () -> { });
 
         // After paramStrategy sleeps past deadline, remaining strategies should be skipped
         verify(paramStrategy).tryFix(any(FixContext.class));
@@ -384,8 +384,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null, () -> { });
 
         assertEquals("TIMED_OUT", result.getStrategyAttempts().get(0).getStatus());
         assertTrue(result.getWarnings().stream().noneMatch(w -> w.contains("not attempted")),
@@ -411,8 +411,8 @@ class RuleFixerTest {
         spec.setId("spec_0");
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(),
-                List.of(RuleDto.builder().build()), List.of(), List.of(spec),
-                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+                List.of(RuleDto.builder().build()), List.of(), List.of(), List.of(spec),
+                Map.of(), 1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null, () -> { });
 
         assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", result.getStrategyAttempts().get(0).getStatus());
         assertFalse(result.getSummary().contains("time limit"), result.getSummary());
@@ -441,8 +441,8 @@ class RuleFixerTest {
         when(faultLocalizer.localize(any(), any(), any()))
                 .thenReturn(List.of(FaultRuleDto.builder().ruleIndex(0).build()));
         FixResultDto unrelated = fixer.fix(1L, "spec_0", List.of(), rules,
-                List.of(), List.of(spec), devices, 1L, AttackScenarioDto.none(), false,
-                List.of("parameter"), 20, null);
+                List.of(), List.of(), List.of(spec), devices, 1L, AttackScenarioDto.none(), false,
+                List.of("parameter"), 20, null, () -> { });
 
         verify(paramStrategy, never()).tryFix(any());
         assertTrue(unrelated.getFaultRules().isEmpty());
@@ -459,8 +459,8 @@ class RuleFixerTest {
             return FixStrategy.StrategyOutcome.none();
         });
         FixResultDto related = fixer.fix(1L, "spec_0", List.of(), rules,
-                List.of(), List.of(spec), devices, 1L, AttackScenarioDto.none(), false,
-                List.of("parameter"), 20, null);
+                List.of(), List.of(), List.of(spec), devices, 1L, AttackScenarioDto.none(), false,
+                List.of("parameter"), 20, null, () -> { });
 
         assertEquals(List.of(1), related.getFaultRules().stream().map(FaultRuleDto::getRuleIndex).toList());
         // Fault rule first, then the dormant rule that can also change the lamp; the fan rule stays out.
@@ -486,8 +486,8 @@ class RuleFixerTest {
         });
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(new TraceStateDto(), new TraceStateDto()),
-                rules, List.of(), List.of(lampSpec()), Map.of("fan", device("fan"), "lamp", device("lamp")),
-                1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null);
+                rules, List.of(), List.of(), List.of(lampSpec()), Map.of("fan", device("fan"), "lamp", device("lamp")),
+                1L, AttackScenarioDto.none(), false, List.of("parameter"), 20, null, () -> { });
 
         assertEquals(List.of(List.of(1)), scopes, "Search the idle relevant rule, not the unrelated fired one");
         assertEquals("INCONCLUSIVE", result.getStrategyAttempts().get(0).getStatus());
@@ -506,8 +506,8 @@ class RuleFixerTest {
                 .command(RuleDto.Command.builder().deviceName("lamp").action("on").build()).build();
 
         FixResultDto result = fixer.fix(1L, "spec_0", List.of(new TraceStateDto()),
-                List.of(rule), List.of(), List.of(spec), Map.of("lamp", device("lamp")),
-                1L, AttackScenarioDto.none(), false, null, 20, null);
+                List.of(rule), List.of(), List.of(), List.of(spec), Map.of("lamp", device("lamp")),
+                1L, AttackScenarioDto.none(), false, null, 20, null, () -> { });
 
         assertFalse(result.isFixable());
         assertTrue(result.isSourceModelComplete());
@@ -531,9 +531,9 @@ class RuleFixerTest {
         RuleDto rule = RuleDto.builder()
                 .command(RuleDto.Command.builder().deviceName("lamp").action("on").build()).build();
 
-        FixResultDto result = fixer.fix(1L, "spec_0", List.of(state), List.of(rule), List.of(), List.of(spec),
+        FixResultDto result = fixer.fix(1L, "spec_0", List.of(state), List.of(rule), List.of(), List.of(), List.of(spec),
                 Map.of("lamp", device("lamp")), 1L, AttackScenarioDto.none(), false,
-                List.of("condition"), 20, null);
+                List.of("condition"), 20, null, () -> { });
 
         verify(strategy).tryFix(argThat(context -> context.getRepairRuleIndices().equals(List.of(0))));
         assertEquals("INCONCLUSIVE", result.getStrategyAttempts().get(0).getStatus());

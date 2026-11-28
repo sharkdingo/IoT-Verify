@@ -1,15 +1,9 @@
 import { expandCreation } from './support/controlCenter'
-import type { APIResponse, Locator, Page, Response } from '@playwright/test'
+import type { Locator, Page, Request } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
-
-const unwrap = async (response: APIResponse | Response) => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code).toBe(200)
-  return body.data
-}
 
 const addModeCondition = async (page: Page) => {
   await page.getByTestId('spec-add-condition-a').click()
@@ -61,6 +55,9 @@ test('narrow rule creation clears its saved draft after the inspector takes focu
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
   const control = page.getByTestId('control-center')
   await control.getByRole('button', { name: 'Expand Control Center', exact: true }).click()
+  const background = page.getByTestId('board-narrow-background')
+  await expect(background).toHaveJSProperty('inert', true)
+  await expect(background).toHaveAttribute('aria-hidden', 'true')
   await page.getByTestId('control-tab-rules').click()
   await expandCreation(page, 'rules')
   await page.locator('#rule-builder-name').fill('Hall automation')
@@ -77,6 +74,9 @@ test('narrow rule creation clears its saved draft after the inspector takes focu
   await expect(page.getByTestId('inspector-tab-rules')).toBeVisible()
   await expect(control.locator('.board-panel-body')).toBeHidden()
   await page.getByTestId('system-inspector').getByRole('button', { name: 'Collapse System Inspector', exact: true }).click()
+  await expect.poll(() => background.evaluate(element => ({
+    inert: (element as HTMLElement).inert, ariaHidden: element.getAttribute('aria-hidden')
+  }))).toEqual({ inert: false, ariaHidden: null })
   await control.getByRole('button', { name: 'Expand Control Center', exact: true }).click()
   await expect(page.locator('#rule-builder-name')).toHaveValue('')
   await expect(page.locator('#rule-builder-name')).toBeEditable()
@@ -87,7 +87,12 @@ test('narrow rule creation clears its saved draft after the inspector takes focu
   expect(rules[0].ruleString).toBe('Hall automation')
 })
 
-test('Chinese editors retain real concurrent duplicate diagnostics and reconcile only the affected collections', async ({ page, request }, testInfo) => {
+const duplicateRecoveryCases = [
+  ['Chinese editors retain real concurrent duplicate diagnostics after snapshot recovery', false],
+  ['Chinese editors retain real concurrent duplicate diagnostics while Board snapshot recovery fails', true]
+] as const
+
+for (const [title, snapshotUnavailable] of duplicateRecoveryCases) test(title, async ({ page, request }, testInfo) => {
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'editorConflict' })
   const headers = { Authorization: `Bearer ${auth.token}` }
   const snapshot = () => request.get(`${apiBaseURL}/api/board/snapshot`, { headers }).then(unwrap)
@@ -139,6 +144,10 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
     let heldPosts = 0
+    let recoveryReads = 0
+    const recordRecoveryRead = (outgoing: Request) => {
+      if (outgoing.method() === 'GET' && new URL(outgoing.url()).pathname === '/api/board/snapshot') recoveryReads += 1
+    }
     const routeURL = `**/api/board/${endpoint}`
     // Delay only this editor's first POST. A real second API caller wins the race after pre-check;
     // the editor POST and all response bodies still come from the real backend unchanged.
@@ -161,6 +170,12 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       const externalId = String(external.affectedItem.id)
       const before = await snapshot()
       const historyBefore = await history()
+      if (snapshotUnavailable) {
+        await page.route('**/api/board/snapshot', route => route.fulfill({
+          status: 503, json: { code: 503, message: 'Snapshot unavailable' }
+        }), { times: 1 })
+      }
+      page.on('request', recordRecoveryRead)
       release()
       const response = await rejection
       const body = await response.json()
@@ -174,6 +189,10 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       expect(body.message).not.toMatch(/[\u3400-\u9fff]/)
       const failure = page.getByTestId(`${kind}-save-failure`)
       await expect(failure).toBeVisible()
+      expect(recoveryReads, `${kind} duplicate must read one Board snapshot`).toBe(1)
+      page.off('request', recordRecoveryRead)
+      await expect(failure.getByTestId('failure-fields'), `${kind} duplicate keeps field diagnostics in its editor`).toBeVisible()
+      await expect(page.locator('.el-message--error'), `${kind} duplicate has one inline failure`).toHaveCount(0)
       await expectExactFields(failure, body)
       await expect(failure.getByTestId('failure-next-step')).toContainText(kind === 'rule' ? '目标动作' : '检查条件')
       await expect(failure.getByTestId('failure-fields')).toBeInViewport({ ratio: 1 })
@@ -181,7 +200,19 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       await testInfo.attach(`${kind}-editor-duplicate-guidance`, {
         contentType: 'image/png', body: await page.screenshot()
       })
-      await expect(page.getByTestId('system-inspector').locator(`[data-${kind}-id="${externalId}"]`)).toHaveCount(1)
+      const persistedItem = page.getByTestId('system-inspector').locator(`[data-${kind}-id="${externalId}"]`)
+      if (snapshotUnavailable) {
+        const boardFailure = page.getByTestId('board-data-load-error')
+        await expect(boardFailure).toBeVisible()
+        await expect(persistedItem).toHaveCount(0)
+        const recovered = page.waitForResponse(response => response.request().method() === 'GET'
+          && new URL(response.url()).pathname === '/api/board/snapshot' && response.status() === 200)
+        await boardFailure.getByRole('button', { name: '重试', exact: true }).click()
+        await recovered
+        await expect(boardFailure).toBeHidden()
+        await expect(failure).toBeVisible()
+      }
+      await expect(persistedItem).toHaveCount(1)
       await expect(page.getByTestId('board-undo')).toBeEnabled()
       expect(rejectedSnapshot).toEqual(before)
       expect(rejectedHistory).toEqual(historyBefore)
@@ -212,8 +243,9 @@ test('Chinese editors retain real concurrent duplicate diagnostics and reconcile
       expect(heldPosts).toBe(1)
       evidence.push({ kind, race: 'Real API write between completed pre-check and delayed real editor POST',
         rejection: { status: response.status(), message: body.message, ...body.data },
-        before, after, rejectedWriteAndHistoryUnchanged: true, onlySpecifiedCollectionAppended: true })
+        before, after, recoveryReads, snapshotUnavailable, rejectedWriteAndHistoryUnchanged: true, onlySpecifiedCollectionAppended: true })
     } finally {
+      page.off('request', recordRecoveryRead)
       release()
       await page.unrouteAll({ behavior: 'wait' })
     }

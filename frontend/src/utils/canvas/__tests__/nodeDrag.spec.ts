@@ -6,8 +6,7 @@ import {
   cancelNodeDrag,
   createNodeDragState,
   endNodeDrag,
-  updateNodeDrag,
-  getNodeDragPosition
+  updateNodeDrag
 } from '../nodeDrag'
 
 const node = (): DeviceNode => ({
@@ -27,10 +26,8 @@ describe('node drag cancellation', () => {
     beginNodeDrag({ clientX: 100, clientY: 80 } as PointerEvent, target, state)
 
     updateNodeDrag({ clientX: 160, clientY: 140 } as PointerEvent, state, 2)
-    // Position should NOT change during drag (uses tempPosition instead)
     expect(target.position).toEqual({ x: 40, y: 60 })
-    // But getNodeDragPosition should return the dragged position
-    expect(getNodeDragPosition(target, state)).toEqual({ x: 70, y: 90 })
+    expect(state.tempPosition).toEqual({ x: 70, y: 90 })
 
     expect(cancelNodeDrag(state)).toBe(target)
     // Position remains unchanged after cancel

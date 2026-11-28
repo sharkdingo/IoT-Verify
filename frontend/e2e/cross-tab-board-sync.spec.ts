@@ -1,41 +1,12 @@
+import { openBoardWorkspace } from './support/boardWorkspace'
 import { expandCreation } from './support/controlCenter'
 import { type Page } from '@playwright/test'
 import path from 'node:path'
-import { createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { createAuthenticatedUser, expect, test } from './support/auth'
 
 test.describe.configure({ timeout: 120_000 })
 
-const openWorkspace = async (page: Page, auth: AuthUser) => {
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.addInitScript(({ token, user }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', 'light')
-    window.localStorage.setItem('locale', 'en')
-  }, {
-    token: auth.token,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
-  await page.goto('/#/board')
-  // 30s, matching the other fifteen board-root assertions in the suite.
-  //
-  // This helper carried 60s justified by "the development server's eager icon URL modules". That reason does
-  // not apply: playwright.config.ts runs `npm run build && npm run preview`, so an E2E run never touches the
-  // dev server. Measured against the real preview build with all eight of this spec's contexts held open,
-  // mount cost is flat — 6.2–7.2s, growth 1.00x, no degradation as contexts accumulate.
-  //
-  // So the doubled allowance bought nothing, and an outlier timeout is worse than useless: it hides a genuine
-  // slowdown in the one spec most likely to expose one. A single suite-level failure here was contention for a
-  // shared machine, which 60s did not prevent and 120s would only postpone.
-  await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
-}
-
-const createDevice = async (page: Page, label: string) => {
+const submitDevice = async (page: Page, label: string) => {
   await page.getByTestId('control-tab-devices').click()
   await expandCreation(page, 'devices')
   await expect(page.getByTestId('control-section-devices')).toBeVisible()
@@ -47,6 +18,10 @@ const createDevice = async (page: Page, label: string) => {
   await templateSelect.selectOption(templateName)
   await page.getByTestId('single-device-name').fill(label)
   await page.getByTestId('single-device-create').click()
+}
+
+const createDevice = async (page: Page, label: string) => {
+  await submitDevice(page, label)
   await expect(page.locator('.device-node').filter({ hasText: label })).toBeVisible({ timeout: 15_000 })
 }
 
@@ -54,9 +29,9 @@ test('a successful Board mutation actively refreshes another visible tab', { tag
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsync' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
   const observer = await context.newPage()
-  await openWorkspace(observer, auth)
+  await openBoardWorkspace(observer, auth)
 
   try {
     const label = `Cross tab ${Date.now()}`
@@ -81,11 +56,11 @@ test('a deletion preview is single-flight and closes when another tab deletes th
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabdelete' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
   const label = `Cross tab delete ${Date.now()}`
   await createDevice(writer, label)
   const observer = await context.newPage()
-  await openWorkspace(observer, auth)
+  await openBoardWorkspace(observer, auth)
 
   let previewRequestCount = 0
   let snapshotRequestCount = 0
@@ -176,11 +151,11 @@ test('a deletion confirmation closes when another tab changes the target device'
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabdeletestale' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
   const label = `Cross tab stale ${Date.now()}`
   await createDevice(writer, label)
   const observer = await context.newPage()
-  await openWorkspace(observer, auth)
+  await openBoardWorkspace(observer, auth)
 
   try {
     await observer.locator('.device-node').filter({ hasText: label }).click()
@@ -216,7 +191,7 @@ test('a delayed initial snapshot cannot suppress a newer cross-tab invalidation'
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsyncrace' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
   const observer = await context.newPage()
 
   let snapshotRequestCount = 0
@@ -243,7 +218,7 @@ test('a delayed initial snapshot cannot suppress a newer cross-tab invalidation'
     }
   })
 
-  const openingObserver = openWorkspace(observer, auth)
+  const openingObserver = openBoardWorkspace(observer, auth)
   await initialCaptured
 
   try {
@@ -262,13 +237,109 @@ test('a delayed initial snapshot cannot suppress a newer cross-tab invalidation'
   }
 })
 
+test('leaving the Board retires a queued foreground refresh without an uncaught error', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsyncleave' })
+  await openBoardWorkspace(page, auth)
+  const pageErrors: string[] = []
+  page.on('pageerror', error => pageErrors.push(error.message))
+  let markWriteStarted!: () => void
+  const writeStarted = new Promise<void>(resolve => { markWriteStarted = resolve })
+  let releaseWrite!: () => void
+  const writeReleased = new Promise<void>(resolve => { releaseWrite = resolve })
+  await page.route('**/api/board/nodes', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    markWriteStarted()
+    await writeReleased
+    await route.fulfill({ status: 422, json: { code: 422, message: 'Rejected test write' } })
+  })
+  try {
+    await submitDevice(page, 'Pending write')
+    await writeStarted
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('focus'))
+      window.location.hash = '/404'
+    })
+    await expect(page.getByTestId('board-root')).toHaveCount(0)
+    const finished = page.waitForEvent('requestfinished', {
+      predicate: networkRequest => networkRequest.method() === 'POST'
+        && new URL(networkRequest.url()).pathname === '/api/board/nodes'
+    })
+    releaseWrite()
+    await finished
+    await page.evaluate(() => { window.location.hash = '/board' })
+    await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
+    expect(pageErrors).toEqual([])
+  } finally {
+    releaseWrite()
+  }
+})
+
+test('an unchanged background snapshot keeps pan and zoom available without rereading fingerprints', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsyncviewport' })
+  const initialComparison = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/board/model-fingerprints')
+  await openBoardWorkspace(page, auth)
+  await (await initialComparison).finished()
+
+  let snapshots = 0
+  let comparisons = 0
+  page.on('request', read => {
+    const pathname = new URL(read.url()).pathname
+    if (pathname === '/api/board/snapshot') snapshots++
+    if (pathname === '/api/board/model-fingerprints') comparisons++
+  })
+  let markHeld!: () => void
+  const held = new Promise<void>(resolve => { markHeld = resolve })
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/board/snapshot', async route => {
+    const response = await route.fetch()
+    markHeld()
+    await gate
+    await route.fulfill({ response })
+  }, { times: 1 })
+
+  const canvas = page.getByTestId('canvas-board')
+  const viewport = () => page.locator('.canvas-inner').evaluate(element => {
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform)
+    return { x: matrix.e, y: matrix.f, zoom: matrix.a }
+  })
+  try {
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await held
+    await expect(page.getByTestId('scene-import')).toBeDisabled()
+    await expect(page.getByTestId('board-data-loading')).toHaveCount(0)
+    const before = await viewport()
+    await canvas.dispatchEvent('wheel', { ctrlKey: true, deltaY: -120 })
+    await expect.poll(async () => (await viewport()).zoom).toBeGreaterThan(before.zoom)
+
+    const zoomed = await viewport()
+    const box = (await canvas.boundingBox())!
+    const pointer = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 4) }
+    await page.mouse.move(pointer.x, pointer.y)
+    await page.mouse.down()
+    await page.mouse.move(pointer.x + 32, pointer.y + 24)
+    await page.mouse.up()
+    await expect.poll(async () => (await viewport()).x).toBe(zoomed.x + 32)
+    const duringRefresh = await viewport()
+
+    release()
+    await expect(page.getByTestId('scene-import')).toBeEnabled()
+    expect(await viewport()).toEqual(duringRefresh)
+    expect(snapshots).toBe(1)
+    expect(comparisons).toBe(0)
+  } finally {
+    release()
+  }
+})
+
 test('a hidden-tab invalidation is consumed by one foreground snapshot refresh', async ({ browser, request }) => {
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabsynchidden' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
   const observer = await context.newPage()
-  await openWorkspace(observer, auth)
+  await openBoardWorkspace(observer, auth)
 
   let snapshotRequestCount = 0
   observer.on('request', request => {
@@ -319,7 +390,7 @@ test('switching accounts remounts the workspace and rebinds board invalidations'
   const bob = await createAuthenticatedUser(request, { usernamePrefix: 'tabsyncbob' })
   const context = await browser.newContext()
   const observer = await context.newPage()
-  await openWorkspace(observer, alice)
+  await openBoardWorkspace(observer, alice)
   const storageController = await context.newPage()
   await storageController.goto('/')
 
@@ -352,7 +423,7 @@ test('switching accounts remounts the workspace and rebinds board invalidations'
     await expect(observer.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
 
     const writer = await context.newPage()
-    await openWorkspace(writer, bob)
+    await openBoardWorkspace(writer, bob)
     const bobLabel = `Bob synchronized ${Date.now()}`
     const observerRefresh = observer.waitForResponse(response =>
       response.request().method() === 'GET'
@@ -375,9 +446,9 @@ test('a cross-tab board change marks an open verification verdict stale', async 
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'staleverdict' })
   const context = await browser.newContext()
   const viewer = await context.newPage()
-  await openWorkspace(viewer, auth)
+  await openBoardWorkspace(viewer, auth)
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
 
   try {
     // Build the smallest board that yields a violated verdict with a replayable counterexample.
@@ -421,7 +492,7 @@ test('an undo refreshes another visible tab like any other board mutation', asyn
   const auth = await createAuthenticatedUser(request, { usernamePrefix: 'tabundo' })
   const context = await browser.newContext()
   const writer = await context.newPage()
-  await openWorkspace(writer, auth)
+  await openBoardWorkspace(writer, auth)
 
   try {
     // A scene gives both tabs real rules, so the deletion and its undo are observable.
@@ -441,7 +512,7 @@ test('an undo refreshes another visible tab like any other board mutation', asyn
     await expect(writer.getByTestId('board-undo')).toBeEnabled({ timeout: 30_000 })
 
     const observer = await context.newPage()
-    await openWorkspace(observer, auth)
+    await openBoardWorkspace(observer, auth)
     await observer.getByTestId('inspector-tab-rules').click()
     const observedRules = observer.getByRole('button', { name: 'Delete Rule' })
     // Wait for the freshly opened tab's rule list to render before baselining. Counting immediately

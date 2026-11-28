@@ -23,17 +23,7 @@ public final class SmvRelationUtils {
      * Supports: EQ/== → =, NEQ/!= → !=, GT → >, GTE → >=, LT → <, LTE → <=
      */
     public static String normalizeTriggerRelation(String relation) {
-        if (relation == null) return null;
-        String normalized = relation.trim();
-        return switch (normalized.toUpperCase(Locale.ROOT)) {
-            case "EQ", "==" -> "=";
-            case "NEQ", "!=" -> "!=";
-            case "GT" -> ">";
-            case "GTE" -> ">=";
-            case "LT" -> "<";
-            case "LTE" -> "<=";
-            default -> normalized;
-        };
+        return normalizeRelation(relation, false);
     }
 
     /**
@@ -53,6 +43,10 @@ public final class SmvRelationUtils {
      * Returns null for null input (consistent with normalizeTriggerRelation).
      */
     public static String normalizeRelation(String relation) {
+        return normalizeRelation(relation, true);
+    }
+
+    private static String normalizeRelation(String relation, boolean allowMembership) {
         if (relation == null) return null;
         String normalized = relation.trim();
         return switch (normalized.toUpperCase(Locale.ROOT)) {
@@ -62,8 +56,8 @@ public final class SmvRelationUtils {
             case "GTE" -> ">=";
             case "LT" -> "<";
             case "LTE" -> "<=";
-            case "IN" -> "in";
-            case "NOT_IN", "NOT IN" -> "not in";
+            case "IN" -> allowMembership ? "in" : normalized;
+            case "NOT_IN", "NOT IN" -> allowMembership ? "not in" : normalized;
             default -> normalized;
         };
     }
@@ -72,20 +66,16 @@ public final class SmvRelationUtils {
      * Check whether a (already-normalized) rule/spec relation is supported.
      */
     public static boolean isSupportedRelation(String relation) {
-        return "=".equals(relation)
-                || "!=".equals(relation)
-                || ">".equals(relation)
-                || ">=".equals(relation)
-                || "<".equals(relation)
-                || "<=".equals(relation)
-                || "in".equals(relation)
-                || "not in".equals(relation);
+        return isSupportedTriggerRelation(relation) || isMembershipRelation(relation);
     }
 
     /** Enumeration conditions have no ordering; callers supply a normalized relation. */
     public static boolean isEnumRelation(String relation) {
-        return "=".equals(relation) || "!=".equals(relation)
-                || "in".equals(relation) || "not in".equals(relation);
+        return "=".equals(relation) || "!=".equals(relation) || isMembershipRelation(relation);
+    }
+
+    private static boolean isMembershipRelation(String relation) {
+        return "in".equals(relation) || "not in".equals(relation);
     }
 
     /**
@@ -98,7 +88,7 @@ public final class SmvRelationUtils {
      * cannot drift from the guard NuSMV actually evaluates.
      */
     public static String ruleRelationExpression(String left, String relation, String value) {
-        if ("in".equals(relation) || "not in".equals(relation)) {
+        if (isMembershipRelation(relation)) {
             List<String> cleaned = splitRuleValues(value);
             if (cleaned.isEmpty()) {
                 return null;
@@ -120,21 +110,11 @@ public final class SmvRelationUtils {
     }
 
     /**
-     * Split value by ,;| delimiters for IN/NOT_IN; for other relations return the value as single-element list.
-     * <p><b>Note:</b> For multi-mode devices where `;` is used inside tuple values (e.g. "cool;off"),
-     * use {@link #splitStateRuleValues(String, int)} instead to avoid splitting within tuples.</p>
+     * Split operands at commas, semicolons or pipes, preserving authored order.
+     * For whole-state tuples use {@link #splitStateRuleValues(String, int)}.
      */
     public static List<String> splitRuleValues(String value) {
-        if (value == null) return List.of();
-        String[] parts = value.split("[,;|]");
-        List<String> result = new ArrayList<>();
-        for (String p : parts) {
-            String trimmed = p.trim();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
-        }
-        return result;
+        return splitValues(value, "[,;|]");
     }
 
     /**
@@ -143,9 +123,12 @@ public final class SmvRelationUtils {
      * so only split by [,|]. Single-mode devices split by [,;|].
      */
     public static List<String> splitStateRuleValues(String value, int modeCount) {
+        return splitValues(value, modeCount > 1 ? "[,|]" : "[,;|]");
+    }
+
+    private static List<String> splitValues(String value, String delimiter) {
         if (value == null) return List.of();
-        String splitRegex = (modeCount > 1) ? "[,|]" : "[,;|]";
-        String[] parts = value.split(splitRegex);
+        String[] parts = value.split(delimiter);
         List<String> result = new ArrayList<>();
         for (String p : parts) {
             String trimmed = p.trim();
@@ -176,7 +159,7 @@ public final class SmvRelationUtils {
      */
     public static String canonicalStateMembershipValue(
             String value, String normalizedRelation, String targetType, int stateModeCount) {
-        if (!"in".equals(normalizedRelation) && !"not in".equals(normalizedRelation)) return null;
+        if (!isMembershipRelation(normalizedRelation)) return null;
         if ("mode".equals(targetType)) return canonicalStateMembershipValue(value, 1);
         if ("state".equals(targetType) && stateModeCount > 0) {
             return canonicalStateMembershipValue(value, stateModeCount);
@@ -184,29 +167,36 @@ public final class SmvRelationUtils {
         return null;
     }
 
+    /** Compare authored operands when template-specific membership normalization does not apply. */
+    public static String canonicalComparisonValue(String value, String normalizedRelation, String targetType) {
+        String normalized = value == null ? "" : value.trim();
+        if (!isMembershipRelation(normalizedRelation)) {
+            return normalized;
+        }
+        // Whole-state operands can still contain positional tuples when their mode count is unknown.
+        String delimiter = "state".equals(targetType) ? "[,|]" : "[,;|]";
+        return Arrays.stream(normalized.split(delimiter))
+                .map(String::trim)
+                .filter(part -> !part.isBlank())
+                .sorted()
+                .collect(Collectors.joining(","));
+    }
+
     /** Preserve an equality operand as one pattern, including its positional wildcards. */
     public static List<String> stateConditionValues(String value, String normalizedRelation, int modeCount) {
-        if ("in".equals(normalizedRelation) || "not in".equals(normalizedRelation)) {
+        if (isMembershipRelation(normalizedRelation)) {
             return splitStateRuleValues(value, modeCount);
         }
         return value == null || value.isBlank() ? List.of() : List.of(value.trim());
     }
 
     /**
-     * Clean state value via cleanStateName; for IN/NOT_IN, clean each segment individually.
-     * Matches the normalization semantics used by SmvMainModuleBuilder during SMV generation.
-     */
-    public static String cleanRuleValueByRelation(String normalizedRelation, String value) {
-        return cleanRuleValueByRelation(normalizedRelation, value, 1);
-    }
-
-    /**
-     * Mode-aware variant: for IN/NOT_IN with multi-mode devices, splits by [,|] only
-     * (preserving ; within tuple values). For single-mode or non-IN relations, behaves identically.
+     * Clean state literals as the main module builder does. Multi-mode membership uses commas and
+     * pipes as list separators so semicolons inside a state tuple stay intact.
      */
     public static String cleanRuleValueByRelation(String normalizedRelation, String value, int modeCount) {
         if (value == null) return null;
-        if ("in".equals(normalizedRelation) || "not in".equals(normalizedRelation)) {
+        if (isMembershipRelation(normalizedRelation)) {
             List<String> parts = splitStateRuleValues(value, modeCount);
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < parts.size(); i++) {

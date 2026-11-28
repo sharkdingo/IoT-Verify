@@ -1,16 +1,10 @@
-import type { APIRequestContext, APIResponse, Page, Response } from '@playwright/test'
+import type { APIRequestContext, Page } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import { readFileSync } from 'node:fs'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
 import { clickUnderTooltip } from './support/tooltips'
 
 const headers = (auth: AuthUser) => ({ Authorization: `Bearer ${auth.token}` })
-const unwrap = async <T = any>(response: APIResponse | Response): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code).toBe(200)
-  return body.data
-}
-
 const seedBoard = async (request: APIRequestContext, auth: AuthUser) => {
   await unwrap(await request.post(`${apiBaseURL}/api/board/nodes`, {
     headers: headers(auth), data: { devices: [{ id: 'task_light', templateName: 'Light',
@@ -67,6 +61,172 @@ const startWorkspace = async (page: Page, auth: AuthUser, locale: string, width:
 
 const explorationBudget = { explorationMode: 'BOARD_SNAPSHOT', targetSpecIds: ['never_on'],
   maxIterations: 3333, pathLength: 50, populationSize: 10, seed: 17 }
+
+test('resumes the verification named in an unconfirmed dispatch response', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  await startWorkspace(page, auth, 'en', 1440)
+  await openTool(page, 'verification')
+  await page.getByTestId('verification-mode-async').click()
+
+  let submissions = 0
+  let taskId: number | undefined
+  await page.route('**/api/verify/async', async route => {
+    submissions += 1
+    const accepted = await unwrap<{ id: number }>(await route.fetch())
+    taskId = accepted.id
+    await route.fulfill({ status: 503, json: { code: 503, message: 'Task dispatch outcome is unknown',
+      data: { reasonCode: 'TASK_DISPATCH_OUTCOME_UNKNOWN', taskKind: 'verification', taskId } } })
+  })
+  let release!: () => void
+  const paused = new Promise<void>(resolve => { release = resolve })
+  const checkedIds: number[] = []
+  await page.route('**/api/verify/tasks/*', async route => {
+    const match = /\/api\/verify\/tasks\/(\d+)$/.exec(new URL(route.request().url()).pathname)
+    if (route.request().method() === 'GET' && match) {
+      checkedIds.push(Number(match[1]))
+      if (checkedIds.length === 1) await paused
+    }
+    await route.continue()
+  })
+
+  try {
+    await page.getByTestId('run-verification').click()
+    const panel = page.getByTestId('verification-panel')
+    await expect(panel.getByText('Checking task status…')).toBeVisible()
+    await expect(panel.getByTestId('run-verification')).toBeDisabled()
+    await expect.poll(() => checkedIds).toEqual([taskId])
+    expect(submissions).toBe(1)
+  } finally {
+    release()
+  }
+
+  await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => page.url()).toContain(`run=verification:${taskId}`)
+  expect(checkedIds.every(id => id === taskId)).toBe(true)
+  expect(submissions).toBe(1)
+})
+
+test('reconciles a lost or concurrent task dismissal without retrying the delete', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  const taskIds: number[] = []
+  for (let index = 0; index < 3; index++) {
+    const task = await unwrap(await request.post(`${apiBaseURL}/api/fuzz/async`, {
+      headers: headers(auth), data: explorationBudget
+    }))
+    const cancelled = await unwrap(await request.post(`${apiBaseURL}/api/fuzz/tasks/${task.id}/cancel`, { headers: headers(auth) }))
+    expect(cancelled.taskStatus).toBe('CANCELLED')
+    taskIds.push(task.id)
+  }
+
+  const taskRow = (tab: Page, id: number) => tab.getByTestId(`history-task-fuzzing-${id}`)
+  const observer = await page.context().newPage()
+  try {
+    for (const tab of [page, observer]) {
+      await startWorkspace(tab, auth, 'en', 1440)
+      await openTool(tab, 'history')
+      await tab.getByTestId('history-layer-tasks').click()
+      for (const id of taskIds) await expect(taskRow(tab, id)).toBeVisible()
+    }
+
+    const [lost, concurrent, unaffected] = taskIds
+    await page.route(`**/api/fuzz/tasks/${lost}`, async route => {
+      if (route.request().method() !== 'DELETE') return route.continue()
+      const committed = await route.fetch()
+      expect(committed.ok(), await committed.text()).toBe(true)
+      await route.abort()
+    })
+
+    let writes = 0
+    let checks = 0
+    let listReads = 0
+    page.on('request', outgoing => {
+      const path = new URL(outgoing.url()).pathname
+      if (/^\/api\/(verify|simulate|fuzz)\/tasks$/.test(path)) listReads += 1
+      if (path !== `/api/fuzz/tasks/${lost}` && path !== `/api/fuzz/tasks/${concurrent}`) return
+      if (outgoing.method() === 'DELETE') writes += 1
+      if (outgoing.method() === 'GET') checks += 1
+    })
+
+    for (const id of [lost, concurrent]) {
+      if (id === concurrent) {
+        const removed = await request.delete(`${apiBaseURL}/api/fuzz/tasks/${id}`, { headers: headers(auth) })
+        expect(removed.ok(), await removed.text()).toBe(true)
+      }
+      const checked = page.waitForResponse(response => response.request().method() === 'GET'
+        && new URL(response.url()).pathname === `/api/fuzz/tasks/${id}`)
+      await taskRow(page, id).getByRole('button', { name: 'Dismiss', exact: true }).click()
+      expect((await checked).status()).toBe(404)
+      await expect(page.getByText('Dismissal is unconfirmed. This task record is no longer on the server.').last()).toBeVisible()
+      await expect(taskRow(page, id)).toHaveCount(0)
+      await expect(taskRow(observer, id)).toHaveCount(0)
+    }
+
+    await expect(taskRow(page, unaffected)).toBeVisible()
+    await expect(taskRow(observer, unaffected)).toBeVisible()
+    expect(writes).toBe(2)
+    expect(checks).toBe(2)
+    expect(listReads).toBe(0)
+  } finally {
+    await observer.close()
+  }
+})
+
+test('shares lost cancellation feedback across the task list and progress and adopts available task lists', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedBoard(request, auth)
+  const task = await unwrap(await request.post(`${apiBaseURL}/api/verify/async`, {
+    headers: headers(auth), data: { attackScenario: { mode: 'NONE' }, enablePrivacy: false }
+  }))
+  const taskUrl = `${apiBaseURL}/api/verify/tasks/${task.id}`
+  let completed: any
+  await expect.poll(async () => {
+    completed = await unwrap(await request.get(taskUrl, { headers: headers(auth) }))
+    return completed.status
+  }).toBe('COMPLETED')
+  const active = { ...task, status: 'RUNNING', progress: 31, progressStage: 'EXECUTING_MODEL_CHECKER', startedAt: completed.startedAt }
+  let cancelPosts = 0
+  let detailReads = 0
+  await page.route(`**/api/verify/tasks/${task.id}/cancel`, route => {
+    cancelPosts += 1
+    return route.abort('failed')
+  })
+  await page.route(`**/api/verify/tasks/${task.id}`, route => {
+    detailReads += 1
+    return cancelPosts === 3 ? route.continue() : route.fulfill({ json: { code: 200, message: 'Success', data: active } })
+  })
+  await page.route(/\/api\/verify\/tasks(?:\?.*)?$/, route => cancelPosts === 3 ? route.continue()
+    : route.fulfill({ json: { code: 200, message: 'Success', data: [active] } }))
+  await page.route(/\/api\/simulate\/tasks(?:\?.*)?$/, route => route.fulfill({
+    status: 503, json: { code: 503, message: 'Simulation task read unavailable' }
+  }))
+
+  await startWorkspace(page, auth, 'en', 1440)
+  await openTool(page, 'history')
+  await page.getByTestId('history-layer-tasks').click()
+  const row = page.getByTestId(`history-task-verification-${task.id}`)
+  await expect(page.getByTestId('history-tasks-load-error')).toBeVisible()
+  await expect(row).toContainText('31%')
+  const initialDetailReads = detailReads
+  const unknown = page.getByRole('dialog').filter({ hasText: 'Task cancellation unconfirmed' })
+  await row.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(unknown).toBeVisible()
+  expect(detailReads).toBeGreaterThan(initialDetailReads)
+  await unknown.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await row.getByRole('button', { name: 'Watch', exact: true }).click()
+
+  const progress = page.getByTestId('verification-panel')
+  const cancel = progress.getByRole('button', { name: 'Cancel verification task', exact: true })
+  await cancel.click()
+  await expect(unknown).toBeVisible()
+  await unknown.getByRole('button', { name: 'Confirm', exact: true }).click()
+  await expect(cancel).toBeEnabled()
+  await cancel.click()
+  await expect(page.getByTestId('verification-result-dialog')).toBeVisible({ timeout: 15_000 })
+  await expect(unknown).toHaveCount(0)
+  expect(cancelPosts).toBe(3)
+})
 
 // Each lifecycle journey switches language and viewport before checking recovery.
 for (const locale of ['en']) {

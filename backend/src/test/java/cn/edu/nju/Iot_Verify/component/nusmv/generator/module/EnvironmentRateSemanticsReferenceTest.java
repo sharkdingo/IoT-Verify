@@ -1,20 +1,16 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator.module;
 
 import cn.edu.nju.Iot_Verify.util.NaturalChangeRateParser;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.assumeAvailableNusmvPath;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.module.RateSemanticsTestSupport.transitionCandidates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -28,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * is exact.
  */
 class EnvironmentRateSemanticsReferenceTest {
+
+    private static final RateSemanticsTestSupport NUSMV = new RateSemanticsTestSupport("rate-reference", 180);
 
     private static final int LOWER = 0;
     private static final int UPPER = 8;
@@ -46,17 +44,6 @@ class EnvironmentRateSemanticsReferenceTest {
             frontier = next;
         }
         return frontier;
-    }
-
-    private static String transition(String declaration, String varRef) {
-        return NaturalChangeRateParser.parse(declaration).admissibleDeltas().stream()
-                .map(delta -> {
-                    String shifted = delta == 0 ? varRef
-                            : delta > 0 ? varRef + " + " + delta
-                            : varRef + " - " + Math.abs(delta);
-                    return "max(" + LOWER + ", min(" + UPPER + ", " + shifted + "))";
-                })
-                .collect(Collectors.joining(", "));
     }
 
     /**
@@ -104,9 +91,7 @@ class EnvironmentRateSemanticsReferenceTest {
      */
     @Test
     void nusmvReachabilityMatchesTheExhaustiveReferenceModel() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this reference comparison");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this reference comparison");
 
         int start = 4;
         for (String declaration : new String[]{"[-1, 1]", "0", "[0, 2]", "[2, 3]", "[-3, -1]",
@@ -117,13 +102,13 @@ class EnvironmentRateSemanticsReferenceTest {
             // Ask NuSMV, for every value in the domain, whether it is reachable in exactly one step.
             StringBuilder model = new StringBuilder("MODULE main\nVAR\n  v : ")
                     .append(LOWER).append("..").append(UPPER).append(";\nASSIGN\n  init(v) := ")
-                    .append(start).append(";\n  next(v) := {").append(transition(declaration, "v"))
+                    .append(start).append(";\n  next(v) := {").append(transitionCandidates(declaration, "v", LOWER, UPPER))
                     .append("};\n");
             for (int value = LOWER; value <= UPPER; value++) {
                 model.append("CTLSPEC AX (v != ").append(value).append(")\n");
             }
 
-            List<String> results = runNusmv(nusmv, model.toString());
+            List<String> results = NUSMV.runNusmv(nusmv, model.toString());
             Set<Integer> nusmvReachable = new LinkedHashSet<>();
             for (int value = LOWER; value <= UPPER; value++) {
                 final int probed = value;
@@ -176,9 +161,8 @@ class EnvironmentRateSemanticsReferenceTest {
     @Test
     void anExplicitZeroRateIsStaticAndAdmitsOnlyHolding() {
         NaturalChangeRateParser.RateRange zero = NaturalChangeRateParser.parse("0");
-        assertTrue(zero.isStatic());
         assertEquals(List.of(0), zero.admissibleDeltas());
-        assertFalse(NaturalChangeRateParser.parse("[0, 1]").isStatic());
+        assertEquals(List.of(0, 1), NaturalChangeRateParser.parse("[0, 1]").admissibleDeltas());
     }
 
     /**
@@ -192,9 +176,7 @@ class EnvironmentRateSemanticsReferenceTest {
      */
     @Test
     void aDeviceWrittenEnumHoldsWhileAnExogenousOneMayChooseFreely() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this comparison");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this comparison");
 
         String property = "CTLSPEC AG ((humidifier = off & airQuality = poor)"
                 + " -> AX (humidifier = off -> airQuality = poor))\n";
@@ -204,43 +186,14 @@ class EnvironmentRateSemanticsReferenceTest {
                 + "  next(humidifier) := {off, on};\n"
                 + "  next(airQuality) := case\n    humidifier = on : good;\n    TRUE : ";
 
-        List<String> written = runNusmv(nusmv,
+        List<String> written = NUSMV.runNusmv(nusmv,
                 prefix + "airQuality;\n  esac;\n" + property);
         assertTrue(written.stream().anyMatch(line -> line.contains("is true")),
                 () -> "a device-written enum must hold when nothing writes it: " + written);
 
-        List<String> exogenous = runNusmv(nusmv,
+        List<String> exogenous = NUSMV.runNusmv(nusmv,
                 prefix + "{poor, good};\n  esac;\n" + property);
         assertTrue(exogenous.stream().anyMatch(line -> line.contains("is false")),
                 () -> "free choice must be shown to invent an uncaused change: " + exogenous);
-    }
-
-    private static List<String> runNusmv(String nusmv, String model) throws Exception {
-        Path modelFile = Files.createTempFile("rate-reference", ".smv");
-        try {
-            Files.writeString(modelFile, model);
-            Process process = new ProcessBuilder(nusmv, modelFile.toAbsolutePath().toString())
-                    .redirectErrorStream(true)
-                    .start();
-            List<String> specLines = new ArrayList<>();
-            try (var reader = process.inputReader()) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.contains("specification")) specLines.add(line);
-                }
-            }
-            assertTrue(process.waitFor(180, TimeUnit.SECONDS), "NuSMV did not terminate");
-            assertFalse(specLines.isEmpty(), "NuSMV reported no specification results");
-            return specLines;
-        } finally {
-            Files.deleteIfExists(modelFile);
-        }
-    }
-
-    private static String resolveNusmvPath() {
-        String env = System.getenv("NUSMV_PATH");
-        if (env != null && !env.isBlank()) return env;
-        Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
-        return Files.exists(bundled) ? bundled.toString() : "NuSMV";
     }
 }

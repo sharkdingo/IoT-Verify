@@ -2,19 +2,17 @@ package cn.edu.nju.Iot_Verify.service.recommendation;
 
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.component.aitool.BoardSemanticValidator;
-import cn.edu.nju.Iot_Verify.component.aitool.RecommendationCapabilityView;
 import cn.edu.nju.Iot_Verify.component.aitool.RecommendationAdjustmentItem;
-import cn.edu.nju.Iot_Verify.component.aitool.RecommendationFilterItem;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RecommendationResponseDto;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RuleRecommendationDto;
-import cn.edu.nju.Iot_Verify.util.EnumLiteralResolver;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationProviderOutput.CandidateDiagnostics;
+import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationProviderOutput.RecommendationValidation;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,6 +22,15 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findConditionVariable;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.asTrimmedString;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.canonicalModeValues;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.canonicalStateValues;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.canonicalVariableValue;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.findMode;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.findVariable;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.isEnumRelation;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationConditionValues.normalizeRelation;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationProviderOutput.hasOnlyFields;
 
 /**
  * 智能规则推荐服务
@@ -149,20 +156,9 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
 
         if (devices.isEmpty()) {
             log.warn("No devices found on board for user {}", userId);
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("message", recommendationMessage(language, "noDevices", 0));
-            result.put("count", 0);
-            result.put("requestedCount", maxRecommendations);
-            result.put("validatedCount", 0);
-            result.put("filteredCount", 0);
-            result.put("filteredItems", Collections.emptyList());
-            result.put("adjustedCount", 0);
-            result.put("adjustedItems", Collections.emptyList());
-            result.put("rawCandidateCount", 0);
-            result.put("inspectedCount", 0);
-            result.put("truncatedCount", 0);
-            result.put("recommendations", Collections.emptyList());
-            return resultParser.parseRecommendationResponse(result, RuleRecommendationDto.class, true, "AI rule recommendation");
+            return resultParser.standaloneResponse(RuleRecommendationDto.class, "AI rule recommendation",
+                    recommendationMessage(language, "noDevices", 0), maxRecommendations,
+                    List.of(), List.of(), List.of(), 0, 0);
         }
 
         // 获取现有规则，避免推荐重复的
@@ -173,18 +169,17 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
                 userId, devices.size(), maxRecommendations);
 
         // 构建现有规则的简要信息
-        String existingRulesInfo = buildExistingRulesInfo(existingRules);
+        String existingRulesInfo = RecommendationPromptContext.existingRules(objectMapper, existingRules);
 
         // 调用配置的 LLM 生成智能推荐
-        String aiResponse = generateRecommendationsWithAI(
-                devices,
-                templates,
-                environmentVariables,
-                existingRulesInfo,
-                maxRecommendations,
-                language,
-                userRequirement
-        );
+        String deviceInfoJson = RecommendationPromptContext.deviceInfoJson(
+                objectMapper, devices, templates, environmentVariables, log,
+                this::appendDeviceFields);
+        String userPrompt = buildUserPrompt(
+                deviceInfoJson, existingRulesInfo, maxRecommendations, language, userRequirement);
+        log.info("Calling LLM for rule recommendations...");
+        String aiResponse = RecommendationProviderOutput.completeRecommendation(
+                promptCompletionService, SYSTEM_PROMPT, userPrompt, TEMPERATURE, MAX_TOKENS, log);
 
         log.info("Validating AI rule recommendations: userId={}, outputChars={}", userId, aiResponse.length());
 
@@ -198,34 +193,6 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         log.info("AI rule recommendations validated: userId={}, kept={}, filtered={}",
                 userId, result.getCount(), result.getFilteredCount());
         return result;
-    }
-
-    /**
-     * 调用配置的 LLM 生成智能推荐
-     */
-    private String generateRecommendationsWithAI(
-            List<DeviceInfoHelper.DeviceInfo> devices,
-            List<DeviceTemplateDto> templates,
-            List<BoardEnvironmentVariableDto> environmentVariables,
-            String existingRulesInfo,
-            int maxRecommendations,
-            String language,
-            String userRequirement) {
-
-        String deviceInfoJson = buildDeviceInfoJson(devices, templates, environmentVariables);
-        String userPrompt = buildUserPrompt(deviceInfoJson, existingRulesInfo, maxRecommendations, language, userRequirement);
-
-        log.info("Calling LLM for rule recommendations...");
-        String content = promptCompletionService.completeRecommendation(
-                SYSTEM_PROMPT, userPrompt, TEMPERATURE, MAX_TOKENS);
-
-        if (content == null || content.isBlank()) {
-            log.warn("AI returned empty content");
-            return "";
-        }
-
-        log.debug("AI response content length: {}", content.length());
-        return content;
     }
 
     /**
@@ -291,244 +258,79 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
     /**
      * 构建设备详细信息 JSON，用于 AI 分析
      */
-    private String buildDeviceInfoJson(List<DeviceInfoHelper.DeviceInfo> devices,
-                                       List<DeviceTemplateDto> templates,
-                                       List<BoardEnvironmentVariableDto> environmentVariables) {
-        try {
-            List<Map<String, Object>> deviceList = new ArrayList<>();
-            Map<String, DeviceTemplateDto> templatesByName =
-                    RecommendationCapabilityView.indexTemplates(templates);
-
-            for (DeviceInfoHelper.DeviceInfo device : devices) {
-                Map<String, Object> deviceMap = new LinkedHashMap<>();
-                deviceMap.put("deviceId", device.nodeId());
-                deviceMap.put("label", device.label());
-                deviceMap.put("templateName", device.templateName());
-                deviceMap.put("currentState", device.currentState());
-                deviceMap.put("currentStateTrust", device.currentStateTrust());
-                deviceMap.put("currentStatePrivacy", device.currentStatePrivacy());
-                deviceMap.put("initialVariables", device.instanceVariables() != null ? device.instanceVariables() : Collections.emptyList());
-                deviceMap.put("initialPrivacies", device.instancePrivacies() != null ? device.instancePrivacies() : Collections.emptyList());
-                DeviceTemplateDto template = RecommendationCapabilityView.resolveTemplate(
-                        templatesByName, device.templateName());
-                deviceMap.put("capabilities", RecommendationCapabilityView.fromManifest(
-                        template == null ? null : template.getManifest()));
-
-                // Only observable values can trigger rules; declared labels remain in capabilities.
-                List<String> triggerableAttributes = new ArrayList<>();
-                if (device.variables() != null) {
-                    for (DeviceInfoHelper.VariableInfo var : device.variables()) {
-                        if (findConditionVariable(template == null ? null : template.getManifest(), var.name()) != null) {
-                            triggerableAttributes.add(var.name());
-                        }
-                    }
+    private void appendDeviceFields(DeviceInfoHelper.DeviceInfo device, DeviceTemplateDto template,
+                                    Map<String, Object> deviceMap) {
+        // Only observable values can trigger rules; declared labels remain in capabilities.
+        List<String> triggerableAttributes = new ArrayList<>();
+        if (device.variables() != null) {
+            for (DeviceInfoHelper.VariableInfo var : device.variables()) {
+                if (findConditionVariable(template == null ? null : template.getManifest(), var.name()) != null) {
+                    triggerableAttributes.add(var.name());
                 }
-                if (device.modes() != null) {
-                    for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-                        triggerableAttributes.add(mode.name());
-                    }
-                    if (!device.modes().isEmpty()) {
-                        triggerableAttributes.add("state");
-                    }
-                }
-                List<String> apiSignals = new ArrayList<>();
-                if (device.apis() != null) {
-                    for (DeviceInfoHelper.ApiInfo api : device.apis()) {
-                        if (Boolean.TRUE.equals(api.signal()) && api.name() != null) {
-                            apiSignals.add(api.name());
-                            triggerableAttributes.add(api.name());
-                        }
-                    }
-                }
-                deviceMap.put("triggerableAttributes", triggerableAttributes);
-                deviceMap.put("apiSignals", apiSignals);
-
-                List<Map<String, Object>> modes = new ArrayList<>();
-                if (device.modes() != null) {
-                    for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-                        Map<String, Object> modeMap = new LinkedHashMap<>();
-                        modeMap.put("name", mode.name());
-                        modeMap.put("values", mode.values() != null ? mode.values() : Collections.emptyList());
-                        modes.add(modeMap);
-                    }
-                }
-                deviceMap.put("modes", modes);
-
-                // 提取可用的 API（可执行的动作为"控制"）
-                List<Map<String, Object>> actionableApis = new ArrayList<>();
-                if (device.apis() != null) {
-                    for (DeviceInfoHelper.ApiInfo api : device.apis()) {
-                        Map<String, Object> apiMap = new LinkedHashMap<>();
-                        apiMap.put("name", api.name());
-                        apiMap.put("description", api.description());
-                        apiMap.put("signal", Boolean.TRUE.equals(api.signal()));
-                        apiMap.put("acceptsContent", Boolean.TRUE.equals(api.acceptsContent()));
-                        apiMap.put("startState", api.startState());
-                        apiMap.put("endState", api.endState());
-                        actionableApis.add(apiMap);
-                    }
-                }
-                deviceMap.put("actionableApis", actionableApis);
-
-                // 可用的工作状态
-                deviceMap.put("workingStates", device.workingStates() != null ? device.workingStates() : Collections.emptyList());
-                deviceMap.put("contents", device.contents() != null ? device.contents() : Collections.emptyList());
-
-                deviceList.add(deviceMap);
             }
-
-            Map<String, Object> context = new LinkedHashMap<>();
-            context.put("devices", deviceList);
-            context.put("environmentVariables", environmentVariables == null
-                    ? Collections.emptyList() : environmentVariables);
-            return objectMapper.writeValueAsString(context);
-        } catch (Exception e) {
-            log.error("Failed to build device info JSON", e);
-            throw new IllegalStateException("Could not serialize current device capabilities for recommendation", e);
         }
-    }
-
-    /**
-     * 构建现有规则的简要信息
-     */
-    private String buildExistingRulesInfo(List<cn.edu.nju.Iot_Verify.dto.rule.RuleDto> existingRules) {
-        if (existingRules == null || existingRules.isEmpty()) {
-            return "无现有规则";
-        }
-
-        try {
-            List<Map<String, Object>> rulesInfo = new ArrayList<>();
-            for (var rule : existingRules) {
-                Map<String, Object> ruleInfo = new LinkedHashMap<>();
-                ruleInfo.put("description", rule.getRuleString());
-                ruleInfo.put("conditions", safeList(rule.getConditions()).stream().map(cond -> {
-                    Map<String, Object> condition = new LinkedHashMap<>();
-                    condition.put("deviceId", cond.getDeviceName());
-                    condition.put("targetType", cond.getTargetType());
-                    condition.put("attribute", cond.getAttribute());
-                    condition.put("relation", cond.getRelation());
-                    condition.put("value", cond.getValue());
-                    return condition;
-                }).toList());
-                if (rule.getCommand() != null) {
-                    Map<String, Object> command = new LinkedHashMap<>();
-                    command.put("deviceId", rule.getCommand().getDeviceName());
-                    command.put("action", rule.getCommand().getAction());
-                    command.put("contentDevice", rule.getCommand().getContentDevice());
-                    command.put("content", rule.getCommand().getContent());
-                    ruleInfo.put("command", command);
-                }
-                rulesInfo.add(ruleInfo);
+        if (device.modes() != null) {
+            for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
+                triggerableAttributes.add(mode.name());
             }
-            return objectMapper.writeValueAsString(rulesInfo);
-        } catch (Exception e) {
-            log.error("Failed to build existing rules info", e);
-            throw new IllegalStateException("Could not serialize existing rules for recommendation", e);
+            if (!device.modes().isEmpty()) {
+                triggerableAttributes.add("state");
+            }
         }
+        List<String> apiSignals = RecommendationPromptContext.apiSignals(device).stream()
+                .map(DeviceInfoHelper.ApiInfo::name).toList();
+        triggerableAttributes.addAll(apiSignals);
+        deviceMap.put("triggerableAttributes", triggerableAttributes);
+        deviceMap.put("apiSignals", apiSignals);
+
+        deviceMap.put("modes", RecommendationPromptContext.modes(device.modes()));
+
+        // 提取可用的 API（可执行的动作为"控制"）
+        List<Map<String, Object>> actionableApis = new ArrayList<>();
+        if (device.apis() != null) {
+            for (DeviceInfoHelper.ApiInfo api : device.apis()) {
+                Map<String, Object> apiMap = new LinkedHashMap<>();
+                apiMap.put("name", api.name());
+                apiMap.put("description", api.description());
+                apiMap.put("signal", Boolean.TRUE.equals(api.signal()));
+                apiMap.put("acceptsContent", Boolean.TRUE.equals(api.acceptsContent()));
+                apiMap.put("startState", api.startState());
+                apiMap.put("endState", api.endState());
+                actionableApis.add(apiMap);
+            }
+        }
+        deviceMap.put("actionableApis", actionableApis);
+
+        // 可用的工作状态
+        deviceMap.put("workingStates", device.workingStates() != null ? device.workingStates() : Collections.emptyList());
+        deviceMap.put("contents", device.contents() != null ? device.contents() : Collections.emptyList());
     }
 
     /**
      * 解析 AI 响应并验证设备变量和API
      */
-    @SuppressWarnings("unchecked")
     private RecommendationResponseDto<RuleRecommendationDto> parseAiResponse(String aiResponse,
                                    List<DeviceInfoHelper.DeviceInfo> devices,
                                    BoardSemanticValidator.BoardContext semanticContext,
                                    int maxRecommendations,
                                    String language) {
         try {
-            // 清理 AI 返回的内容，去除 Markdown 代码块标记
-            String cleanedResponse = aiResponse.trim();
-            if (cleanedResponse.startsWith("```")) {
-                // 去除开头的 ```json 或 ```
-                int firstNewline = cleanedResponse.indexOf('\n');
-                if (firstNewline > 0) {
-                    cleanedResponse = cleanedResponse.substring(firstNewline).trim();
-                }
-            }
-            if (cleanedResponse.endsWith("```")) {
-                cleanedResponse = cleanedResponse.substring(0, cleanedResponse.lastIndexOf("```")).trim();
-            }
+            String cleanedResponse = RecommendationProviderOutput.stripCodeFence(aiResponse);
 
-            // 构建设备能力映射，用于验证
-            Map<String, DeviceInfoHelper.DeviceInfo> deviceMap = new HashMap<>();
-            for (DeviceInfoHelper.DeviceInfo device : devices) {
-                deviceMap.put(device.nodeId(), device);
-            }
+            Map<String, DeviceInfoHelper.DeviceInfo> deviceMap =
+                    RecommendationProviderOutput.indexDevices(devices);
 
-            // 尝试解析 AI 返回的 JSON
-            JsonNode root = objectMapper.readTree(cleanedResponse);
+            JsonNode recommendationsNode =
+                    RecommendationProviderOutput.requireRecommendationArray(objectMapper, cleanedResponse);
 
-            JsonNode recommendationsNode = root.path("recommendations");
-            if (recommendationsNode.isMissingNode() && root.isArray()) {
-                recommendationsNode = root;
-            }
-            if (!recommendationsNode.isArray()) {
-                throw new IllegalArgumentException("AI response must contain a recommendations array");
-            }
-
-            List<Map<String, Object>> recommendations = new ArrayList<>();
-            List<Map<String, Object>> filteredItems = new ArrayList<>();
-            List<Map<String, Object>> adjustedItems = new ArrayList<>();
-            int rawCandidateCount = recommendationsNode.size();
-            int count = 0;
-            int inspected = 0;
-
-            for (JsonNode rec : recommendationsNode) {
-                if (count >= maxRecommendations) break;
-                inspected++;
-
-                try {
-                    Map<String, Object> recommendation = objectMapper.convertValue(rec, Map.class);
-                    // Both keys are shapes the model volunteers unprompted and neither has a
-                    // verification meaning, so they are stripped rather than allowed to fail the
-                    // candidate: rejecting a `category` the prompt no longer even mentions would
-                    // discard rules that passed every capability and semantic check.
-                    recommendation.remove("confidence");
-                    recommendation.remove("category");
-
-                    // 验证并过滤推荐
-                    RecommendationValidation validation = validateRecommendation(
-                            recommendation, deviceMap, semanticContext,
-                            language, inspected);
-                    if (validation.valid()) {
-                        recommendation.remove("requiresUserInput");
-                        recommendations.add(recommendation);
-                        adjustedItems.addAll(validation.adjustments());
-                        count++;
-                    } else {
-                        log.debug("Filtered rule recommendation candidate {}: reasonCode={}",
-                                inspected, validation.reasonCode());
-                        filteredItems.add(filteredItem("rule", inspected, validation, recommendationLabel(recommendation)));
-                    }
-                } catch (Exception e) {
-                    log.warn("Failed to parse rule recommendation candidate {}: exception={}",
-                            inspected, e.getClass().getName());
-                    filteredItems.add(filteredItem("rule", inspected,
-                            invalid("parseFailed", language), jsonText(rec.path("name"), "")));
-                }
-            }
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            if (recommendations.isEmpty()) {
-                result.put("message", recommendationMessage(
-                        language, rawCandidateCount == 0 ? "noCandidates" : "empty", 0));
-            } else {
-                result.put("message", recommendationMessage(language, "found", recommendations.size()));
-            }
-            result.put("count", recommendations.size());
-            result.put("requestedCount", maxRecommendations);
-            result.put("validatedCount", recommendations.size());
-            result.put("filteredCount", filteredItems.size());
-            result.put("filteredItems", filteredItems);
-            result.put("adjustedCount", adjustedItems.size());
-            result.put("adjustedItems", adjustedItems);
-            result.put("rawCandidateCount", rawCandidateCount);
-            result.put("inspectedCount", inspected);
-            result.put("truncatedCount", Math.max(0, rawCandidateCount - inspected));
-            result.put("recommendations", recommendations);
-
-            return resultParser.parseRecommendationResponse(result, RuleRecommendationDto.class, true, "AI rule recommendation");
+            var review = RecommendationProviderOutput.reviewCandidates(objectMapper, recommendationsNode,
+                    maxRecommendations, new CandidateDiagnostics(log, "rule", "name", invalid("parseFailed", language)),
+                    (recommendation, index) -> validateRecommendation(recommendation, deviceMap, semanticContext,
+                            language, index), this::recommendationLabel);
+            return resultParser.standaloneResponse(RuleRecommendationDto.class, "AI rule recommendation",
+                    recommendationMessage(language, review.messageKey(), review.recommendations().size()),
+                    maxRecommendations, review.recommendations(), review.filteredItems(), review.adjustedItems(),
+                    review.rawCandidateCount(), review.inspectedCount());
 
         } catch (Exception e) {
             log.error("Failed to parse AI response: exception={}", e.getClass().getName());
@@ -744,19 +546,9 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
             return invalid(reasonCode, language);
         }
 
-        return RecommendationValidation.ok(adjustments);
-    }
-
-    private Map<String, Object> filteredItem(String type, int index,
-                                             RecommendationValidation validation,
-                                             String label) {
-        return new RecommendationFilterItem(
-                type,
-                index,
-                validation.reasonCode(),
-                validation.reason(),
-                label
-        ).toMap();
+        RecommendationValidation validation = RecommendationValidation.ok(adjustments);
+        recommendation.remove("requiresUserInput");
+        return validation;
     }
 
     private RecommendationValidation invalid(String reasonCode, String language) {
@@ -863,28 +655,6 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         return command == null ? null : String.valueOf(command);
     }
 
-    private boolean hasOnlyFields(Map<String, Object> value, Set<String> allowedFields) {
-        return value != null && allowedFields.containsAll(value.keySet());
-    }
-
-    private String jsonText(JsonNode node, String fallback) {
-        return node != null && !node.isMissingNode() && !node.isNull() ? node.asText("").trim() : fallback;
-    }
-
-    private record RecommendationValidation(
-            boolean valid,
-            String reasonCode,
-            String reason,
-            List<Map<String, Object>> adjustments) {
-        private static RecommendationValidation ok(List<Map<String, Object>> adjustments) {
-            return new RecommendationValidation(true, "", "", List.copyOf(adjustments));
-        }
-
-        private static RecommendationValidation reject(String reasonCode, String reason) {
-            return new RecommendationValidation(false, reasonCode, reason, List.of());
-        }
-    }
-
     private DeviceInfoHelper.DeviceInfo resolveDevice(String deviceRef,
             Map<String, DeviceInfoHelper.DeviceInfo> deviceMap) {
         if (deviceRef == null) {
@@ -902,27 +672,6 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
             case "api", "variable", "mode", "state" -> normalized;
             default -> null;
         };
-    }
-
-    private String asTrimmedString(Object value) {
-        if (value == null) {
-            return null;
-        }
-        String text = String.valueOf(value).trim();
-        return text.isEmpty() ? null : text;
-    }
-
-    private String normalizeRelation(String relation) {
-        String normalized = SmvRelationUtils.normalizeRelation(relation);
-        if (normalized == null || normalized.isBlank()) {
-            return null;
-        }
-        return SmvRelationUtils.isSupportedRelation(normalized) ? normalized : null;
-    }
-
-    private boolean isEnumRelation(String relation) {
-        return "=".equals(relation) || "!=".equals(relation)
-                || "in".equals(relation) || "not in".equals(relation);
     }
 
     private String canonicalApiName(DeviceInfoHelper.DeviceInfo device, String rawName, boolean signalOnly) {
@@ -946,19 +695,6 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         return null;
     }
 
-    private DeviceInfoHelper.VariableInfo findVariable(DeviceInfoHelper.DeviceInfo device, String rawName) {
-        if (device.variables() == null || rawName == null) {
-            return null;
-        }
-        String trimmed = rawName.trim();
-        for (DeviceInfoHelper.VariableInfo variable : device.variables()) {
-            if (variable.name() != null && variable.name().equalsIgnoreCase(trimmed)) {
-                return variable;
-            }
-        }
-        return null;
-    }
-
     private DeviceInfoHelper.ContentInfo findContent(DeviceInfoHelper.DeviceInfo device, String rawName) {
         if (device.contents() == null || rawName == null) {
             return null;
@@ -971,191 +707,4 @@ Environment Pool，其中的 value/trust/privacy 是用户当前覆盖后的共�
         }
         return null;
     }
-
-    private DeviceInfoHelper.ModeInfo findMode(DeviceInfoHelper.DeviceInfo device, String rawName) {
-        if (device.modes() == null || rawName == null) {
-            return null;
-        }
-        String trimmed = rawName.trim();
-        for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-            if (mode.name() != null && mode.name().equalsIgnoreCase(trimmed)) {
-                return mode;
-            }
-        }
-        return null;
-    }
-
-    private String canonicalVariableValue(DeviceInfoHelper.VariableInfo variable, String relation, String rawValue) {
-        if (variable == null || rawValue == null) {
-            return null;
-        }
-        List<String> candidates = splitValueCandidates(rawValue, relation, false);
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        List<String> canonical = new ArrayList<>();
-        if (variable.values() != null && !variable.values().isEmpty()) {
-            if (!isEnumRelation(relation)) {
-                return null;
-            }
-            for (String candidate : candidates) {
-                String value = EnumLiteralResolver.resolveIgnoringSpaces(variable.values(), candidate);
-                if (value == null) {
-                    return null;
-                }
-                canonical.add(value);
-            }
-        } else if (variable.lowerBound() != null && variable.upperBound() != null) {
-            for (String candidate : candidates) {
-                try {
-                    int parsed = Integer.parseInt(candidate.trim());
-                    if (parsed < variable.lowerBound() || parsed > variable.upperBound()) {
-                        return null;
-                    }
-                    canonical.add(String.valueOf(parsed));
-                } catch (NumberFormatException e) {
-                    return null;
-                }
-            }
-        } else {
-            canonical.addAll(candidates);
-        }
-        return joinCanonicalValues(canonical, relation);
-    }
-
-    private String canonicalModeValues(DeviceInfoHelper.ModeInfo mode, String relation, String rawValue) {
-        if (mode == null || mode.values() == null || rawValue == null) {
-            return null;
-        }
-        List<String> candidates = splitValueCandidates(rawValue, relation, false);
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        List<String> canonical = new ArrayList<>();
-        for (String candidate : candidates) {
-            String value = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), candidate);
-            if (value == null) {
-                return null;
-            }
-            canonical.add(value);
-        }
-        return joinCanonicalValues(canonical, relation);
-    }
-
-    private String canonicalStateValues(DeviceInfoHelper.DeviceInfo device, String relation, String rawValue) {
-        if (device == null || rawValue == null) {
-            return null;
-        }
-        boolean multiMode = device.modes() != null && device.modes().size() > 1;
-        List<String> candidates = splitValueCandidates(rawValue, relation, multiMode);
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        List<String> canonical = new ArrayList<>();
-        for (String candidate : candidates) {
-            String value = canonicalStateValue(device, candidate);
-            if (value == null) {
-                return null;
-            }
-            canonical.add(value);
-        }
-        return joinCanonicalValues(canonical, relation);
-    }
-
-    private String canonicalStateValue(DeviceInfoHelper.DeviceInfo device, String rawValue) {
-        if (rawValue == null) {
-            return null;
-        }
-        String trimmed = rawValue.trim();
-        if (trimmed.isEmpty()) {
-            return null;
-        }
-        String workingState = EnumLiteralResolver.resolveIgnoringSpaces(device.workingStates(), trimmed);
-        if (workingState != null) {
-            return workingState;
-        }
-        if (trimmed.contains(";")) {
-            return canonicalStateTuple(device, trimmed);
-        }
-        return canonicalUniqueModeValue(device, trimmed);
-    }
-
-    private String canonicalStateTuple(DeviceInfoHelper.DeviceInfo device, String rawValue) {
-        if (device.modes() == null || device.modes().isEmpty()) {
-            return null;
-        }
-        String[] parts = rawValue.split(";", -1);
-        if (parts.length != device.modes().size()) {
-            return null;
-        }
-        List<String> canonicalParts = new ArrayList<>();
-        boolean hasConcretePart = false;
-        for (int i = 0; i < parts.length; i++) {
-            String part = parts[i].trim();
-            if (part.isEmpty() || "_".equals(part)) {
-                canonicalParts.add("");
-                continue;
-            }
-            String value = EnumLiteralResolver.resolveIgnoringSpaces(device.modes().get(i).values(), part);
-            if (value == null) {
-                return null;
-            }
-            canonicalParts.add(value);
-            hasConcretePart = true;
-        }
-        return hasConcretePart ? String.join(";", canonicalParts) : null;
-    }
-
-    private String canonicalUniqueModeValue(DeviceInfoHelper.DeviceInfo device, String rawValue) {
-        if (device.modes() == null) {
-            return null;
-        }
-        String match = null;
-        int matches = 0;
-        for (DeviceInfoHelper.ModeInfo mode : device.modes()) {
-            String candidate = EnumLiteralResolver.resolveIgnoringSpaces(mode.values(), rawValue);
-            if (candidate != null) {
-                matches++;
-                if (matches > 1) {
-                    return null;
-                }
-                match = candidate;
-            }
-        }
-        return match;
-    }
-
-    private List<String> splitValueCandidates(String rawValue, String relation, boolean preserveSemicolon) {
-        if (rawValue == null) {
-            return List.of();
-        }
-        String splitRegex = ("in".equals(relation) || "not in".equals(relation))
-                ? (preserveSemicolon ? "[,|]" : "[,;|]")
-                : null;
-        if (splitRegex == null) {
-            String trimmed = rawValue.trim();
-            return trimmed.isEmpty() ? List.of() : List.of(trimmed);
-        }
-        List<String> result = new ArrayList<>();
-        for (String part : rawValue.split(splitRegex)) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
-        }
-        return result;
-    }
-
-    private String joinCanonicalValues(List<String> values, String relation) {
-        if (values == null || values.isEmpty()) {
-            return null;
-        }
-        return ("in".equals(relation) || "not in".equals(relation))
-                ? String.join(",", values)
-                : values.get(0);
-    }
-    private static <T> List<T> safeList(List<T> values) {
-        return values == null ? List.of() : values;
-    }
-
 }

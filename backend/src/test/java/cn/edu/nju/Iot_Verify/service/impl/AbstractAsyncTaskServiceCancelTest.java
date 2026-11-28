@@ -27,7 +27,6 @@ class AbstractAsyncTaskServiceCancelTest {
         private boolean cancelled;
         private boolean terminal;
         private Integer progress;
-        private String checkLogsJson;
         private String workerId;
         private LocalDateTime leaseExpiresAt;
 
@@ -47,16 +46,6 @@ class AbstractAsyncTaskServiceCancelTest {
         }
 
         @Override
-        public boolean isTerminalStatus() {
-            return terminal || cancelled;
-        }
-
-        @Override
-        public boolean isCancelledStatus() {
-            return cancelled;
-        }
-
-        @Override
         public String getTaskStatusName() {
             if (cancelled) return "CANCELLED";
             if (terminal) return "COMPLETED";
@@ -65,12 +54,7 @@ class AbstractAsyncTaskServiceCancelTest {
 
         @Override
         public String getCheckLogsJson() {
-            return checkLogsJson;
-        }
-
-        @Override
-        public void setCheckLogsJson(String json) {
-            this.checkLogsJson = json;
+            return null;
         }
 
         @Override
@@ -121,16 +105,11 @@ class AbstractAsyncTaskServiceCancelTest {
         }
 
         @Override
-        protected Optional<TestTask> findTaskByIdAndUserId(Long id, Long userId) {
+        protected Optional<TestTask> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
+            rowLocked = true;
             return task.id.equals(id) && task.userId.equals(userId)
                     ? Optional.of(task)
                     : Optional.empty();
-        }
-
-        @Override
-        protected Optional<TestTask> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
-            rowLocked = true;
-            return findTaskByIdAndUserId(id, userId);
         }
 
         @Override

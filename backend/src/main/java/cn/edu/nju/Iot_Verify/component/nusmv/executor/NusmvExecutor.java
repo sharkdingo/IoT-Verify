@@ -749,11 +749,6 @@ public class NusmvExecutor {
             this.payloadLimit = Math.max(0, maxBytes - MARKER_BYTES);
         }
 
-        void appendLine(String line) {
-            byte[] value = (line + '\n').getBytes(StandardCharsets.UTF_8);
-            append(value, 0, value.length);
-        }
-
         void append(byte[] value, int offset, int length) {
             if (truncated || length <= 0) return;
             int remaining = payloadLimit - content.size();
@@ -841,9 +836,5 @@ public class NusmvExecutor {
         public String getErrorMessage() { return errorMessage; }
         public List<SpecCheckResult> getSpecResults() { return specResults; }
         public boolean isBusy() { return busy; }
-
-        public boolean hasAnyViolation() {
-            return specResults.stream().anyMatch(r -> !r.isPassed());
-        }
     }
 }

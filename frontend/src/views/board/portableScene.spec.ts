@@ -372,6 +372,48 @@ describe('canonicalization', () => {
     expect(specificationOrder(portable.specs)).toEqual(specificationOrder(scene.specs))
   })
 
+  it.each([['variables', 'value'], ['privacies', 'privacy']] as const)(
+    'rejects duplicate normalized names in %s before validating row values', (collection, requiredField) => {
+      const portable = codec.serializeSceneFile(authoredScene())
+      const [device, ...otherDevices] = portable.devices
+      const first = device[collection]![0]
+      const field = `devices[0].${collection}`
+      const input = (name: string) => ({
+        ...portable,
+        devices: [{ ...device, [collection]: [first, { name }] }, ...otherDevices]
+      })
+      expect(() => codec.normalizeSceneFile(input(` ${first.name} `))).toThrow(
+        t('app.sceneImportDuplicateRuntimeEntry', { field, name: first.name })
+      )
+      expect(() => codec.normalizeSceneFile(input('distinct'))).toThrow(
+        t('app.sceneImportMissingField', { field: `${field}[1].${requiredField}` })
+      )
+    }
+  )
+
+  it('keeps the separate import and export diagnostics for malformed API signal comparisons', () => {
+    const scene = authoredScene()
+    const portable = codec.serializeSceneFile(scene)
+    const source = { ...portable.rules[0].sources[0], itemType: 'api' as const, relation: '=', value: 17 as unknown as string }
+    portable.rules[0].sources[0] = source
+    scene.rules[0].sources[0] = source
+
+    const field = 'rules[0].sources[0]'
+    expect(() => codec.normalizeSceneFile(portable)).toThrow(t('app.sceneImportUnexpectedRuleSignalValue', { field }))
+    expect(() => codec.serializeSceneFile(scene)).toThrow(t('app.sceneImportStringRequired', { field: `${field}.value` }))
+  })
+
+  it('rejects a missing rule comparison relation at both scene boundaries', () => {
+    const scene = authoredScene()
+    const portable = codec.serializeSceneFile(scene)
+    delete portable.rules[0].sources[0].relation
+    delete scene.rules[0].sources[0].relation
+
+    const expected = t('app.sceneImportMissingField', { field: 'rules[0].sources[0].relation' })
+    expect(() => codec.normalizeSceneFile(portable)).toThrow(expected)
+    expect(() => codec.serializeSceneFile(scene)).toThrow(expected)
+  })
+
   it('keeps canonical exports stable when unordered collections change order', () => {
     const scene = authoredScene()
     const reordered = {

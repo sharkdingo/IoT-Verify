@@ -35,6 +35,7 @@ describe('board mutation request classification', () => {
     expect(isBoardMutationRequest({ method: 'post', url: '/board/rules/recommend' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'post', url: '/board/specs/recommend?requestId=req-1' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'post', url: '/board/rules/check-duplicate' })).toBe(false)
+    expect(isBoardMutationRequest({ method: 'post', url: '/board/rules/check-similarity/batch' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'get', url: '/board/nodes' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'get', url: '/board/scene' })).toBe(false)
     expect(isBoardMutationRequest({ method: 'get', url: '/board/replacement-preview' })).toBe(false)

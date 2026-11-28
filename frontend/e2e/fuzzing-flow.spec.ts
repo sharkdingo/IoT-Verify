@@ -1,9 +1,14 @@
-import { type APIRequestContext, type APIResponse, type Locator, type Page, type Response, type Route } from '@playwright/test'
+import { type APIRequestContext, type Locator, type Page, type Route } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
+import { desktopBoardViewport, openBoardWorkspace } from './support/boardWorkspace'
 import path from 'node:path'
 import type { Specification } from '../src/types/spec'
+import type { FuzzingFindingReplay } from '../src/types/fuzzing'
 import { selectHistoryResultType } from './support/historyFilter'
+import { holdHistoryReply } from './support/historyReply'
 import {
   apiBaseURL,
+  authHeaders,
   createAuthenticatedUser,
   expect,
   test,
@@ -33,38 +38,6 @@ type FuzzRun = {
     eligibleSpecIds: string[]
     ineligibleSpecs: Array<{ specId: string, reasonCode: string }>
   }
-}
-
-const authHeaders = (auth: AuthUser) => ({
-  Authorization: `Bearer ${auth.token}`
-})
-
-const unwrap = async <T>(response: APIResponse | Response): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data as T
-}
-
-const openWorkspace = async (page: Page, auth: AuthUser) => {
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.addInitScript(({ token, user }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', 'light')
-    window.localStorage.setItem('locale', 'en')
-  }, {
-    token: auth.token,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
-
-  await page.goto('/#/board')
-  await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
 }
 
 const waitForTask = async (
@@ -119,7 +92,7 @@ const closeFuzzingPanelIfPresent = async (page: Page, panel: Locator) => {
 test.describe('bounded counterexample exploration', () => {
   test('offers device-local reported values and keeps trust-only checks out of exploration', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
-    await openWorkspace(page, auth)
+    await openBoardWorkspace(page, auth)
     const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'default-rfid-access-scene.json')
     await page.getByTestId('scene-import-file').setInputFiles(scenePath)
     await page.getByRole('dialog', { name: 'Replace the current scene?' })
@@ -159,7 +132,7 @@ test.describe('bounded counterexample exploration', () => {
     const auth = await createAuthenticatedUser(request)
 
     await test.step('complete the exploration journey', async () => {
-      await openWorkspace(page, auth)
+      await openBoardWorkspace(page, auth)
 
       const scenePath = path.resolve(process.cwd(), '..', 'docs', 'examples', 'default-climate-conflict-scene.json')
       await page.getByTestId('scene-import-file').setInputFiles(scenePath)
@@ -283,11 +256,72 @@ test.describe('bounded counterexample exploration', () => {
 
       const resultDialog = page.getByTestId('fuzzing-result-dialog')
       await expect(resultDialog).toBeHidden()
-      await expect(page.getByTestId('fuzz-unread-badge')).toHaveText('1', { timeout: 60_000 })
+      const unread = page.getByTestId('fuzz-unread-badge')
+      await expect(unread).toHaveText('1', { timeout: 60_000 })
 
-      await page.getByTestId('open-history-panel').click()
-      await expect(page.getByTestId(`open-fuzzing-run-${runId}`)).toBeVisible({ timeout: 30_000 })
-      await expect(page.getByTestId('fuzz-unread-badge')).toHaveCount(0)
+      const openHistory = page.getByTestId('open-history-panel')
+      const history = page.getByTestId('trace-history-panel')
+      const failure = history.getByTestId('history-results-load-error')
+      const explorationRuns = '/api/fuzz/runs'
+      const comparison = '/api/board/model-fingerprints'
+      const waitForReads = (...endpoints: string[]) => Promise.all(endpoints.map(endpoint =>
+        page.waitForResponse(response => response.request().method() === 'GET'
+          && new URL(response.url()).pathname === endpoint).then(response => response.finished())))
+      const siblingReads = () => waitForReads('/api/verify/runs', '/api/simulate/traces', comparison)
+      const failedRead = { status: 503, json: { code: 503, message: 'Latest exploration read failed' } }
+
+      const closedRead = await holdHistoryReply(page, explorationRuns)
+      const closedSiblings = siblingReads()
+      try {
+        await Promise.all([openHistory.click(), closedRead.requested, closedSiblings])
+        await page.getByTestId('close-history-panel').click()
+        await expect(history).toBeHidden()
+      } finally { closedRead.release() }
+      expect((await closedRead.delivered()).ok()).toBe(true)
+      await expect(unread, 'closing the panel retires its notification read').toHaveText('1')
+
+      const olderRead = await holdHistoryReply(page, explorationRuns)
+      const olderSiblings = siblingReads()
+      try {
+        await Promise.all([openHistory.click(), olderRead.requested, olderSiblings])
+        await page.route(url => url.pathname === explorationRuns, route => route.fulfill(failedRead), { times: 1 })
+        await page.evaluate(userId => {
+          const channel = new BroadcastChannel('iot-verify-board-invalidation-v1')
+          channel.postMessage({ type: 'RUN_HISTORY_INVALIDATED', userId, reason: 'http-mutation', issuedAt: Date.now() })
+          channel.close()
+        }, auth.userId)
+        await expect(failure).toBeVisible()
+      } finally { olderRead.release() }
+      expect((await olderRead.delivered()).ok()).toBe(true)
+      await expect(unread, 'an older success cannot acknowledge a newer failed refresh').toHaveText('1')
+      await expect(failure).toBeVisible()
+
+      await selectHistoryResultType(page, 'simulation')
+      const filterRead = await holdHistoryReply(page, explorationRuns)
+      const filterComparison = waitForReads(comparison)
+      try {
+        await Promise.all([selectHistoryResultType(page, 'fuzzing'), filterRead.requested, filterComparison])
+        await selectHistoryResultType(page, 'simulation')
+      } finally { filterRead.release() }
+      expect((await filterRead.delivered()).ok()).toBe(true)
+      await expect(unread, 'a retired exploration filter cannot acknowledge its read').toHaveText('1')
+
+      const filteredRefresh = await holdHistoryReply(page, explorationRuns)
+      const filteredSiblings = siblingReads()
+      filteredRefresh.release()
+      await history.getByRole('button', { name: 'Refresh', exact: true }).click()
+      await filteredSiblings
+      expect((await filteredRefresh.delivered()).ok()).toBe(true)
+      await expect(unread, 'a successful simulation-filtered refresh leaves exploration unread').toHaveText('1')
+
+      await page.route(url => url.pathname === explorationRuns, route => route.fulfill(failedRead), { times: 1 })
+      await selectHistoryResultType(page, 'fuzzing')
+      await expect(failure).toBeVisible()
+      await expect(unread).toHaveText('1')
+      await failure.getByRole('button', { name: 'Retry', exact: true }).click()
+      await expect(failure).toBeHidden()
+      await expect(page.getByTestId(`open-fuzzing-run-${runId}`)).toBeVisible()
+      await expect(unread).toHaveCount(0)
       await page.getByTestId(`open-fuzzing-run-${runId}`).click()
       await expect(resultDialog).toBeVisible()
       await expect(page.getByTestId('fuzzing-result-dialog').getByRole('dialog')).toBeFocused()
@@ -349,7 +383,7 @@ test.describe('bounded counterexample exploration', () => {
       await page.screenshot({ path: testInfo.outputPath('exploration-mobile-actions.png') })
       await metrics.first().scrollIntoViewIfNeeded()
       await page.screenshot({ path: testInfo.outputPath('exploration-mobile-metrics.png') })
-      await page.setViewportSize({ width: 1440, height: 900 })
+      await page.setViewportSize(desktopBoardViewport)
       await expect(resultDialog.getByText('Fix', { exact: true })).toHaveCount(0)
       await page.waitForTimeout(500)
       await expect(page.locator('.el-message').filter({ hasText: 'Counterexample search completed' })).toHaveCount(0)
@@ -381,7 +415,7 @@ test.describe('bounded counterexample exploration', () => {
 
       const editorTab = await page.context().newPage()
       try {
-        await openWorkspace(editorTab, auth)
+        await openBoardWorkspace(editorTab, auth)
         await editorTab.getByTestId('inspector-tab-specs').click()
         const target = editorTab.locator('article').filter({
           has: editorTab.getByTestId(`edit-spec-${run.findings[0]!.violatedSpecId}`)
@@ -481,9 +515,18 @@ test.describe('bounded counterexample exploration', () => {
       expect(independentFindingReadCount).toBe(1)
       expect(replayRunDetailReadCount).toBe(0)
       await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
+      await expect(page.getByTestId('playback-violation-badge'), 'exploration replay shows the first-violation badge')
+        .toHaveText('First violation')
+      await expect(page.locator('.device-at-violation'), 'exploration replay paints violation rings')
+        .not.toHaveCount(0)
       await expect(page.getByTestId('trace-timeline-incomplete-warning')).toHaveCount(0)
       await page.getByTestId('trace-timeline-run-tab').click()
       await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
+      const candidateRun = page.getByTestId('counterexample-run-info')
+      await expect(candidateRun.getByTestId('counterexample-evidence')).toBeVisible()
+      await expect(candidateRun.getByTestId('counterexample-run-context'), 'exploration Run tab keeps its own context')
+        .toHaveCount(0)
+      await expect(candidateRun.getByTestId('counterexample-open-owning-run')).toHaveCount(0)
       await page.getByTestId('trace-timeline-details-tab').click()
       await expect(page.getByTestId('fuzzing-playback-notice')).toBeVisible()
       await page.getByTestId('trace-timeline-changes-tab').click()
@@ -683,12 +726,36 @@ test.describe('bounded counterexample exploration', () => {
       expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(844)
       expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+
+      const boardUrl = '/#/board?review=retained'
+      const banner = page.getByTestId('board-deep-link-unavailable')
+      const timeline = page.getByTestId('trace-timeline')
+      expect(paperRun.id).not.toBe(runId)
+
+      const wrongOwnerReply = page.waitForResponse(response =>
+        response.request().method() === 'GET'
+          && new URL(response.url()).pathname === `/api/fuzz/findings/${findingId}`)
+      await page.goto(`${boardUrl}&run=exploration:${paperRun.id}&finding=${findingId}`)
+      expect((await unwrap<FuzzingFindingReplay>(await wrongOwnerReply)).finding.fuzzTaskId).toBe(runId)
+      await expect(banner).toBeVisible()
+      await expect(timeline).toBeHidden()
+      await expect(page).toHaveURL(boardUrl)
+
+      const absentFindingId = Number.MAX_SAFE_INTEGER
+      const missingReply = page.waitForResponse(response =>
+        response.request().method() === 'GET'
+          && new URL(response.url()).pathname === `/api/fuzz/findings/${absentFindingId}`)
+      await page.goto(`${boardUrl}&run=exploration:${runId}&finding=${absentFindingId}`)
+      expect((await missingReply).status()).toBe(404)
+      await expect(banner).toBeVisible()
+      await expect(timeline).toBeHidden()
+      await expect(page).toHaveURL(boardUrl)
     })
   })
 
   test('keeps transient narrow fitting out of the saved wide layout', async ({ page, request }) => {
     const auth = await createAuthenticatedUser(request)
-    await openWorkspace(page, auth)
+    await openBoardWorkspace(page, auth)
 
     const zoomInput = page.getByTestId('canvas-map-zoom-input')
     await expect(zoomInput).toBeVisible()
@@ -717,7 +784,7 @@ test.describe('bounded counterexample exploration', () => {
 
       expect(savedLayouts.every(layout => layout.canvasZoom === 0.85)).toBe(true)
 
-      await page.setViewportSize({ width: 1440, height: 900 })
+      await page.setViewportSize(desktopBoardViewport)
       await expect.poll(() => page.evaluate(() => ({
         controlCollapsed: document.querySelector('[data-testid="control-center"]')
           ?.classList.contains('is-collapsed') === true,
@@ -736,7 +803,7 @@ test.describe('bounded counterexample exploration', () => {
     let releaseLayoutSave = () => {}
 
     try {
-      await openWorkspace(page, auth)
+      await openBoardWorkspace(page, auth)
 
       let markLayoutSaveStarted!: () => void
       const layoutSaveStarted = new Promise<void>(resolve => { markLayoutSaveStarted = resolve })
@@ -777,61 +844,6 @@ test.describe('bounded counterexample exploration', () => {
       await page.unroute('**/api/board/layout', delayLayoutSave)
     } finally {
       releaseLayoutSave()
-    }
-  })
-
-  test('keeps unread search updates when a delayed history view is closed', async ({ page, request }) => {
-    const auth = await createAuthenticatedUser(request)
-    let releaseHistory = () => {}
-
-    try {
-      await page.addInitScript(({ userId }) => {
-        window.localStorage.setItem(`iot_verify_fuzz_notifications_${userId}`, JSON.stringify({
-          unread: [{
-            taskId: 9_999_999,
-            runId: 9_999_999,
-            kind: 'COMPLETED',
-            createdAt: new Date().toISOString()
-          }],
-          trackedTaskIds: []
-        }))
-      }, { userId: auth.userId })
-      await openWorkspace(page, auth)
-      await expect(page.getByTestId('fuzz-unread-badge')).toHaveText('1')
-
-      let markHistoryStarted!: () => void
-      let markHistoryFinished!: () => void
-      const historyGate = new Promise<void>(resolve => { releaseHistory = resolve })
-      const historyStarted = new Promise<void>(resolve => { markHistoryStarted = resolve })
-      const historyFinished = new Promise<void>(resolve => { markHistoryFinished = resolve })
-      const delayHistory = async (route: Route) => {
-        const requestUrl = new URL(route.request().url())
-        if (route.request().method() !== 'GET' || requestUrl.pathname !== '/api/fuzz/runs') {
-          await route.continue()
-          return
-        }
-        const response = await route.fetch()
-        markHistoryStarted()
-        await historyGate
-        try {
-          await route.fulfill({ response })
-        } finally {
-          markHistoryFinished()
-        }
-      }
-      await page.route('**/api/fuzz/runs*', delayHistory)
-
-      await page.getByTestId('open-history-panel').click()
-      await historyStarted
-      await page.getByTestId('close-history-panel').click()
-      releaseHistory()
-      await historyFinished
-      await page.unroute('**/api/fuzz/runs*', delayHistory)
-
-      await expect(page.getByTestId('trace-history-panel')).toBeHidden()
-      await expect(page.getByTestId('fuzz-unread-badge')).toHaveText('1')
-    } finally {
-      releaseHistory()
     }
   })
 })

@@ -1,4 +1,5 @@
 import api from './http'
+import { unpack } from './resultEnvelope'
 import type {
   FuzzingFinding,
   FuzzingFindingReplay,
@@ -22,9 +23,7 @@ import {
   validateFuzzPaperDomainPreview,
   validateFuzzWorkloadPreview
 } from '@/utils/fuzzingResponse'
-import { validateTaskCancellationResult } from '@/utils/runResponse'
-
-const unpack = <T>(response: any): T => response.data.data
+import { validateHistoryDeletionReceipt, validateTaskCancellationResult } from '@/utils/runResponse'
 
 export default {
   previewPaperDomain: async (pathLength: number): Promise<FuzzPaperDomainPreview> =>
@@ -82,7 +81,7 @@ export default {
     ),
 
   deleteTask: async (taskId: number): Promise<void> =>
-    unpack<void>(await api.delete(`/fuzz/tasks/${taskId}`)),
+    validateHistoryDeletionReceipt((await api.delete(`/fuzz/tasks/${taskId}`)).data),
 
   getRuns: async (page = 0, size = 25): Promise<FuzzingRunSummary[]> =>
     validateFuzzingRunSummaryList(
@@ -96,7 +95,7 @@ export default {
     validateFuzzingFindingList(unpack<unknown>(await api.get(`/fuzz/runs/${runId}/findings`))),
 
   deleteRun: async (runId: number): Promise<void> =>
-    unpack<void>(await api.delete(`/fuzz/runs/${runId}`)),
+    validateHistoryDeletionReceipt((await api.delete(`/fuzz/runs/${runId}`)).data),
 
   getFinding: async (findingId: number): Promise<FuzzingFindingReplay> =>
     validateFuzzingFindingReplay(unpack<unknown>(await api.get(`/fuzz/findings/${findingId}`)))

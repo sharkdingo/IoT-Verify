@@ -4,6 +4,7 @@ import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import { reactive, computed, watch, ref, nextTick, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuth } from '@/stores/auth'
+import { useUnconfirmedBoardItemEdit } from '@/composables/useUnconfirmedBoardItemEdit'
 import type { DeviceNode } from '../types/node'
 import type { DeviceTemplate } from '../types/device'
 import type { RuleForm, RuleSourceItemType } from '../types/rule'
@@ -77,7 +78,6 @@ const editingSourceIndex = ref<number | null>(null)
 interface SourceOption {
   name: string
   label?: string
-  type: RuleSourceItemType
   values?: string[]
   lowerBound?: number
   upperBound?: number
@@ -164,8 +164,7 @@ const getDeviceApis = (templateName: string, signalOnly = false): SourceOption[]
     return template.manifest.APIs
       .filter((api: any) => !signalOnly || api.Signal === true || api.signal === true)
       .map((api: any) => ({
-        name: api.Name || api.name || '',
-        type: 'api' as const
+        name: api.Name || api.name || ''
       }))
   }
 
@@ -192,7 +191,6 @@ const getDeviceVariables = (templateName: string): SourceOption[] => {
         variables.push({
           name,
           label: `${formatTemplateModelToken(templateName, name)} (${scope})`,
-          type: 'variable' as const,
           values: Array.isArray(v.Values) ? v.Values.map((value: unknown) => String(value)) : undefined,
           lowerBound: typeof v.LowerBound === 'number' ? v.LowerBound : undefined,
           upperBound: typeof v.UpperBound === 'number' ? v.UpperBound : undefined
@@ -211,7 +209,6 @@ const getDeviceModes = (templateName: string): SourceOption[] => {
 
   return manifest.Modes.map(mode => ({
     name: mode,
-    type: 'mode' as const,
     values: getModeStateValues(manifest, mode)
   }))
 }
@@ -221,8 +218,7 @@ const getDeviceStates = (templateName: string): SourceOption[] => {
   if (!manifest?.WorkingStates?.length) return []
 
   return manifest.WorkingStates.map(state => ({
-    name: state.Name,
-    type: 'state' as const
+    name: state.Name
   }))
 }
 
@@ -269,36 +265,35 @@ const currentSourceNode = computed(() =>
 )
 const currentSourceManifest = computed(() => resolveDeviceTemplate(currentSourceNode.value?.templateName || '')?.manifest)
 
-const sourceItemTypeOptions = computed(() => {
+const SOURCE_TYPE_LABEL_KEYS = {
+  api: 'app.actionEvent',
+  variable: 'app.variable',
+  mode: 'app.modes',
+  state: 'app.state'
+} as const satisfies Record<RuleSourceItemType, string>
+
+const sourceItemsByType = computed(() => {
   const templateName = currentSourceNode.value?.templateName || ''
-  return [
-    { value: 'api' as RuleSourceItemType, label: t('app.actionEvent'), count: getDeviceApis(templateName, true).length },
-    { value: 'variable' as RuleSourceItemType, label: t('app.variable'), count: getDeviceVariables(templateName).length },
-    { value: 'mode' as RuleSourceItemType, label: t('app.modes'), count: getDeviceModes(templateName).length },
-    { value: 'state' as RuleSourceItemType, label: t('app.state'), count: getDeviceStates(templateName).length }
-  ].filter(option => option.count > 0)
+  return {
+    api: getDeviceApis(templateName, true),
+    variable: getDeviceVariables(templateName),
+    mode: getDeviceModes(templateName),
+    state: getDeviceStates(templateName)
+  }
 })
 
-const availableSourceItems = computed<SourceOption[]>(() => {
-  if (!currentSource.fromId) return []
-  const sourceNode = currentSourceNode.value
-  if (!sourceNode) return []
+const sourceItemTypeOptions = computed(() =>
+  (Object.keys(SOURCE_TYPE_LABEL_KEYS) as RuleSourceItemType[])
+    .filter(type => sourceItemsByType.value[type].length)
+    .map(value => ({ value, label: t(SOURCE_TYPE_LABEL_KEYS[value]) }))
+)
 
-  if (currentSource.itemType === 'api') return getDeviceApis(sourceNode.templateName, true)
-  if (currentSource.itemType === 'variable') return getDeviceVariables(sourceNode.templateName)
-  if (currentSource.itemType === 'mode') return getDeviceModes(sourceNode.templateName)
-  if (currentSource.itemType === 'state') return getDeviceStates(sourceNode.templateName)
-  return []
-})
-
-// 根据选择的类型过滤显示的项
-const filteredSourceItems = computed(() => {
-  if (!currentSource.itemType) return []
-  return availableSourceItems.value.filter((item: SourceOption) => item.type === currentSource.itemType)
-})
+const currentSourceItems = computed(() =>
+  currentSource.itemType ? (sourceItemsByType.value[currentSource.itemType] ?? []) : []
+)
 
 const selectedSourceOption = computed(() =>
-  filteredSourceItems.value.find((item: SourceOption) => item.name === currentSource.fromApi)
+  currentSourceItems.value.find(item => item.name === currentSource.fromApi)
 )
 
 const selectedSourceVariable = computed(() => currentSource.itemType === 'variable'
@@ -331,10 +326,10 @@ const isSetRelation = computed(() =>
 const splitRuleValueList = (value: unknown): string[] => splitConditionValueList(value, currentSource.itemType,
   currentSourceManifest.value?.Modes?.length)
 
-const currentSourceValueList = computed<string[]>({
-  get: () => splitRuleValueList(currentSource.value),
-  set: values => {
-    currentSource.value = uniqueStrings(values).join(', ')
+const currentSourceSelectValue = computed<string | string[]>({
+  get: () => isSetRelation.value ? splitRuleValueList(currentSource.value) : currentSource.value,
+  set: value => {
+    currentSource.value = Array.isArray(value) ? uniqueStrings(value).join(', ') : value
   }
 })
 
@@ -601,6 +596,8 @@ const ruleSaveFailureElement = ref<HTMLElement | null>(null)
 let ruleDraftEpoch = 0
 const editingBaseline = ref<RuleForm | null>(null)
 const cloneRule = (rule: RuleForm): RuleForm => ({ ...rule, sources: rule.sources.map(source => ({ ...source })) })
+const { message: unconfirmedRuleSave, capture: captureRuleSaveReceipt } = useUnconfirmedBoardItemEdit(() =>
+  JSON.stringify({ ...buildRuleDraft(), name: ruleData.name?.trim() || '' }))
 
 watch(ruleDraftFingerprint, () => { ruleSaveFailure.value = null })
 watch(ruleSaveFailure, async failure => {
@@ -612,11 +609,12 @@ watch(ruleSaveFailure, async failure => {
 })
 
 const emitRuleSave = async () => {
-  if (savingRule.value) return
+  if (savingRule.value || unconfirmedRuleSave.value) return
   ruleSaveFailure.value = null
   const actionEpoch = ruleActionEpoch
   const draftEpoch = ruleDraftEpoch
   const fingerprint = ruleDraftFingerprint()
+  const rememberUnconfirmed = captureRuleSaveReceipt()
   savingRule.value = true
   const rule: RuleForm = {
     ...ruleData,
@@ -628,7 +626,8 @@ const emitRuleSave = async () => {
   }
   const saved = await new Promise<boolean>(resolve => {
     emit('save-rule', { rule, expected: editingBaseline.value ? cloneRule(editingBaseline.value) : undefined, complete: (saved, failure) => {
-      if (isRuleActionCurrent(actionEpoch) && fingerprint === ruleDraftFingerprint()) {
+      rememberUnconfirmed(failure)
+      if (draftEpoch === ruleDraftEpoch && fingerprint === ruleDraftFingerprint() && isRuleActionCurrent(actionEpoch)) {
         ruleSaveFailure.value = failure || null
       }
       resolve(saved)
@@ -648,7 +647,7 @@ const emitRuleSave = async () => {
 const checkingDuplicate = ref(false)
 const checkingSimilarity = ref(false)
 const ruleActionBusy = computed(() =>
-  checkingDuplicate.value || checkingSimilarity.value || savingRule.value
+  checkingDuplicate.value || checkingSimilarity.value || savingRule.value || Boolean(unconfirmedRuleSave.value)
 )
 let ruleActionEpoch = 0
 
@@ -698,6 +697,12 @@ watch(
   { flush: 'sync' }
 )
 
+const recordExactDuplicate = (matchedRule: DuplicateRuleCheckResult['matchedRule']) => {
+  ruleSaveFailure.value = {
+    reasonCode: 'DUPLICATE_RULE', details: [], fields: {}, duplicateCheck: { matchedRule }
+  }
+}
+
 const runDuplicateCheck = async (
   actionEpoch: number
 ): Promise<'clear' | 'save-anyway' | 'cancel'> => {
@@ -716,10 +721,7 @@ const runDuplicateCheck = async (
     if (!isRuleActionCurrent(actionEpoch)) return 'cancel'
 
     if (result.isDuplicate) {
-      ruleSaveFailure.value = {
-        reasonCode: 'DUPLICATE_RULE', details: [], fields: {},
-        duplicateCheck: { matchedRule: result.matchedRule }
-      }
+      recordExactDuplicate(result.matchedRule)
       return 'cancel'
     }
 
@@ -757,6 +759,11 @@ const runSimilarityCheck = async (
     }
 
     if (!isRuleActionCurrent(actionEpoch)) return 'cancel'
+
+    if (result.reasonCode === 'EXACT_MATCH') {
+      recordExactDuplicate(result.matchedRule)
+      return 'cancel'
+    }
 
     if (result.requiresReview) {
       const reason = t(ruleSimilarityReasonKey(result.reasonCode))
@@ -946,55 +953,21 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
             </div>
           </div>
 
-          <!-- Observable action-event selection. Only Signal=true APIs can trigger a rule. -->
-          <div class="space-y-1.5" v-if="currentSource.itemType === 'api'">
-            <label for="rule-source-api" class="board-form-label block">{{ t('app.actionEvent') }}</label>
+          <div v-if="currentSource.itemType === 'api' || currentSource.itemType === 'variable' || currentSource.itemType === 'mode'"
+            :key="currentSource.itemType" class="space-y-1.5">
+            <label :for="`rule-source-${currentSource.itemType}`" class="board-form-label block">
+              {{ t(SOURCE_TYPE_LABEL_KEYS[currentSource.itemType]) }}
+            </label>
             <div class="min-w-0">
               <FieldSelect
-                id="rule-source-api"
+                :id="`rule-source-${currentSource.itemType}`"
                 v-model="currentSource.fromApi"
-                :disabled="filteredSourceItems.length === 0"
+                :disabled="currentSourceItems.length === 0"
               >
-                <option v-if="filteredSourceItems.length === 0" value="">{{ t('app.none') }}</option>
+                <option v-if="currentSourceItems.length === 0" value="">{{ t('app.none') }}</option>
                 <option v-else value="" disabled hidden>{{ t('app.selectPlaceholder') }}</option>
-                <option v-for="item in filteredSourceItems" :key="item.name" :value="item.name">
+                <option v-for="item in currentSourceItems" :key="item.name" :value="item.name">
                   {{ item.label || formatCurrentSourceModelToken(item.name) }}
-                </option>
-              </FieldSelect>
-            </div>
-          </div>
-
-          <!-- Variable选择 - 仅选择 Variable 类型时显示 -->
-          <div class="space-y-1.5" v-if="currentSource.itemType === 'variable'">
-            <label for="rule-source-variable" class="board-form-label block">{{ t('app.variable') }}</label>
-            <div class="min-w-0">
-              <FieldSelect
-                id="rule-source-variable"
-                v-model="currentSource.fromApi"
-                :disabled="filteredSourceItems.length === 0"
-              >
-                <option v-if="filteredSourceItems.length === 0" value="">{{ t('app.none') }}</option>
-                <option v-else value="" disabled hidden>{{ t('app.selectPlaceholder') }}</option>
-                <option v-for="item in filteredSourceItems" :key="item.name" :value="item.name">
-                  {{ item.label || formatCurrentSourceModelToken(item.name) }}
-                </option>
-              </FieldSelect>
-            </div>
-          </div>
-
-          <!-- Mode 选择 - 仅选择 Mode 类型时显示 -->
-          <div class="space-y-1.5" v-if="currentSource.itemType === 'mode'">
-            <label for="rule-source-mode" class="board-form-label block">{{ t('app.modes') }}</label>
-            <div class="min-w-0">
-              <FieldSelect
-                id="rule-source-mode"
-                v-model="currentSource.fromApi"
-                :disabled="filteredSourceItems.length === 0"
-              >
-                <option v-if="filteredSourceItems.length === 0" value="">{{ t('app.none') }}</option>
-                <option v-else value="" disabled hidden>{{ t('app.selectPlaceholder') }}</option>
-                <option v-for="item in filteredSourceItems" :key="item.name" :value="item.name">
-                  {{ formatCurrentSourceModelToken(item.name) }}
                 </option>
               </FieldSelect>
             </div>
@@ -1019,26 +992,17 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
           <!-- 值输入 - 值条件类型显示 -->
           <div class="space-y-1.5" v-if="sourceShowsRelationValue(currentSource.itemType || undefined)">
             <label for="rule-source-value" class="board-form-label block">{{ t('app.value') }}</label>
-            <div v-if="currentValueOptions.length > 0 && isSetRelation" class="min-w-0">
+            <div v-if="currentValueOptions.length > 0" class="min-w-0">
               <FieldSelect
+                :key="isSetRelation ? 'membership' : 'scalar'"
                 id="rule-source-value"
-                v-model="currentSourceValueList"
-                multiple
-                size="4" class="min-h-[7.5rem]"
+                v-model="currentSourceSelectValue"
+                :multiple="isSetRelation"
+                :size="isSetRelation ? 4 : undefined"
+                :class="isSetRelation ? 'min-h-[7.5rem]' : undefined"
                 :disabled="!currentSource.relation"
               >
-                <option v-for="value in currentValueOptions" :key="value" :value="value">
-                  {{ formatCurrentSourceModelToken(value) }}
-                </option>
-              </FieldSelect>
-            </div>
-            <div v-else-if="currentValueOptions.length > 0" class="min-w-0">
-              <FieldSelect
-                id="rule-source-value"
-                v-model="currentSource.value"
-                :disabled="!currentSource.relation"
-              >
-                <option value="" disabled hidden>{{ t('app.selectValue') }}</option>
+                <option v-if="!isSetRelation" value="" disabled hidden>{{ t('app.selectValue') }}</option>
                 <option v-for="value in currentValueOptions" :key="value" :value="value">
                   {{ formatCurrentSourceModelToken(value) }}
                 </option>
@@ -1225,7 +1189,11 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
       </section>
 
       <div class="rule-builder-actions space-y-3">
-        <div v-if="ruleSaveFailureDetails" ref="ruleSaveFailureElement" data-testid="rule-save-failure"
+        <div v-if="unconfirmedRuleSave" ref="ruleSaveFailureElement" id="rule-save-outcome-unknown" data-testid="rule-save-outcome-unknown"
+          role="alert" tabindex="-1" class="board-surface-warning board-text-warning rounded-lg p-3 text-sm">
+          {{ unconfirmedRuleSave }}
+        </div>
+        <div v-else-if="ruleSaveFailureDetails" ref="ruleSaveFailureElement" data-testid="rule-save-failure"
           role="alert" tabindex="-1" class="text-left text-xs">
           <p class="font-semibold board-text-danger">{{ t(ruleSaveFailureDetails.reasonCode === 'DUPLICATE_RULE'
             ? 'app.identicalRuleNotSaved' : 'app.saveRulesFailed') }}</p>
@@ -1246,7 +1214,7 @@ const sourceShowsRelationValue = (type?: RuleSourceItemType) =>
         </div>
         <button type="button" @click="handleSave" data-testid="rule-save"
           :disabled="!isRuleDraftComplete || ruleActionBusy"
-          :aria-describedby="ruleDraftDescriptionId"
+          :aria-describedby="unconfirmedRuleSave ? 'rule-save-outcome-unknown' : ruleDraftDescriptionId"
           class="board-panel-submit board-action-disarmed">
           <span class="material-symbols-outlined text-lg" aria-hidden="true">{{ editingBaseline ? 'save' : 'add' }}</span>
           {{ savingRule ? t('app.saving') : t(editingBaseline ? 'app.saveChanges' : 'app.createRule') }}

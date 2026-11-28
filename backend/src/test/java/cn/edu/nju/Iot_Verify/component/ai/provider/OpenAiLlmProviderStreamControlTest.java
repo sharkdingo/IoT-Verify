@@ -53,20 +53,12 @@ class OpenAiLlmProviderStreamControlTest {
     void chat_failedPlanningRequest_logsCauseTypesWithoutUpstreamMessages() {
         String sensitive = "private-upstream-response-never-log";
         RuntimeException failure = new RuntimeException(sensitive, new IOException(sensitive));
-        OpenAIClient client = mock(OpenAIClient.class);
-        OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
-        ChatServiceAsync chatService = mock(ChatServiceAsync.class);
-        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
-        when(client.async()).thenReturn(asyncClient);
-        when(asyncClient.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
         AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
         when(response.onCompleteFuture()).thenReturn(CompletableFuture.failedFuture(failure));
 
         try (LogCapture logs = LogCapture.forClass(OpenAiLlmProvider.class)) {
             ServiceUnavailableException error = assertThrows(ServiceUnavailableException.class,
-                    () -> provider(client).chat(request(), new LlmRequestControl()));
+                    () -> provider(asyncClient(response)).chat(request(), new LlmRequestControl()));
             org.junit.jupiter.api.Assertions.assertSame(failure, error.getCause());
             org.junit.jupiter.api.Assertions.assertTrue(logs.messages().stream().anyMatch(message ->
                     message.contains("java.lang.RuntimeException -> java.io.IOException")));
@@ -153,17 +145,11 @@ class OpenAiLlmProviderStreamControlTest {
 
     @Test
     void chat_explicitCancellation_shouldCancelPendingPlanningRequest() throws Exception {
-        OpenAIClient client = mock(OpenAIClient.class);
-        OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
-        ChatServiceAsync chatService = mock(ChatServiceAsync.class);
         ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
         CompletableFuture<Void> pending = new CompletableFuture<>();
         AsyncStreamResponse<ChatCompletionChunk> response = mock(AsyncStreamResponse.class);
         CountDownLatch requestStarted = new CountDownLatch(1);
 
-        when(client.async()).thenReturn(asyncClient);
-        when(asyncClient.chat()).thenReturn(chatService);
-        when(chatService.completions()).thenReturn(completions);
         when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenAnswer(ignored -> {
             requestStarted.countDown();
             return response;
@@ -174,7 +160,7 @@ class OpenAiLlmProviderStreamControlTest {
             return null;
         }).when(response).close();
 
-        OpenAiLlmProvider provider = provider(client);
+        OpenAiLlmProvider provider = provider(asyncClient(completions));
         LlmRequestControl control = new LlmRequestControl();
         CompletableFuture<LlmChatResponse> call = CompletableFuture.supplyAsync(() ->
                 provider.chat(request(), control));
@@ -234,15 +220,19 @@ class OpenAiLlmProviderStreamControlTest {
     }
 
     private static OpenAIClient asyncClient(AsyncStreamResponse<ChatCompletionChunk> response) {
+        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
+        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
+        return asyncClient(completions);
+    }
+
+    private static OpenAIClient asyncClient(ChatCompletionServiceAsync completions) {
         OpenAIClient client = mock(OpenAIClient.class);
         when(client.withOptions(any())).thenReturn(client);
         OpenAIClientAsync asyncClient = mock(OpenAIClientAsync.class);
         ChatServiceAsync chatService = mock(ChatServiceAsync.class);
-        ChatCompletionServiceAsync completions = mock(ChatCompletionServiceAsync.class);
         when(client.async()).thenReturn(asyncClient);
         when(asyncClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(completions);
-        when(completions.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(response);
         return client;
     }
 
@@ -250,7 +240,6 @@ class OpenAiLlmProviderStreamControlTest {
         LlmConfig config = new LlmConfig();
         config.setModel("mock-model");
         OpenAiLlmProvider provider = new OpenAiLlmProvider(config);
-        when(client.withOptions(any())).thenReturn(client);
         ReflectionTestUtils.setField(provider, "transport", new okhttp3.OkHttpClient());
         ReflectionTestUtils.setField(provider, "client", client);
         return provider;

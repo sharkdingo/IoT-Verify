@@ -577,8 +577,10 @@ still describes the model being changed:
   current. The versioned snapshot's manifest keys and device-source keys must exactly match
   the saved verification request; a missing, unknown, or mismatched source is persisted-data
   corruption (`500`) and stops the operation rather than being downgraded to `UNKNOWN`.
-  Apply first compares current manifests with the saved
-  set: a confirmed difference blocks with `400`; an unavailable repository comparison
+  Fix search and apply compare template semantics using the same projection as the run
+  fingerprint shown in the result and History. Descriptions and icons are excluded, while
+  template identities and model fields such as initial state are retained. A confirmed
+  semantic difference blocks apply with `400`; an unavailable repository comparison
   is reported as unknown and blocks with retryable `503`. `/fix` remains usable against
   the frozen model but adds an explicit warning for either confirmed drift or an
   unavailable comparison, so the degraded applicability is never silent.

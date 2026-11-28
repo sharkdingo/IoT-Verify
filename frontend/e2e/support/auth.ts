@@ -2,7 +2,8 @@ import {
   expect,
   test as base,
   type APIRequestContext,
-  type APIResponse
+  type APIResponse,
+  type Page
 } from '@playwright/test'
 import { randomBytes, randomInt } from 'node:crypto'
 import { budgetAdviceMessage } from './authBudget'
@@ -15,6 +16,20 @@ export type AuthUser = {
   username: string
   token: string
 }
+
+export const authHeaders = ({ token }: AuthUser) => ({ Authorization: `Bearer ${token}` })
+
+export const seedBrowserSession = (
+  page: Page,
+  { token, userId, phone, username }: AuthUser,
+  { locale, theme }: { locale: string, theme: string }
+) => page.addInitScript(({ token, user, locale, theme }) => {
+  // Login replies are flat. Auth hydration parses the persisted profile separately from the token.
+  window.localStorage.setItem('iot_verify_token', token)
+  window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
+  window.localStorage.setItem('iot_verify_theme', theme)
+  window.localStorage.setItem('locale', locale)
+}, { token, user: { userId, phone, username }, locale, theme })
 
 export type TestAccountCredentials = {
   phone: string

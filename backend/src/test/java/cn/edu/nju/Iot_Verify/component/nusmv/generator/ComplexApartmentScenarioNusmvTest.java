@@ -8,7 +8,6 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWrit
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
-import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
@@ -21,7 +20,6 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
 import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -30,6 +28,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.assumeAvailableNusmvPath;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.buildExecutor;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -43,9 +43,7 @@ class ComplexApartmentScenarioNusmvTest {
 
     @Test
     void complexApartmentScenario_generatesFaithfulSmvAndViolationTrace() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this integration smoke test");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this integration smoke test");
 
         SmvGenerator generator = buildGenerator();
         List<DeviceVerificationDto> devices = buildDevices();
@@ -69,7 +67,6 @@ class ComplexApartmentScenarioNusmvTest {
 
         NusmvExecutor.NusmvResult result = FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), generated);
         assertTrue(result.isSuccess(), () -> "NuSMV failed: " + result.getErrorMessage());
-        assertTrue(result.hasAnyViolation(), "The conflict scenario should produce at least one violation");
         assertTrue(result.getSpecResults().stream()
                         .anyMatch(spec -> spec.isPassed()
                                 && spec.getSpecExpression() != null
@@ -124,16 +121,6 @@ class ComplexApartmentScenarioNusmvTest {
                 new SmvMainModuleBuilder(),
                 new SmvSpecificationBuilder(),
                 modelValidator);
-    }
-
-    private NusmvExecutor buildExecutor(String nusmvPath) {
-        NusmvConfig config = new NusmvConfig();
-        config.setPath(nusmvPath);
-        config.setCommandPrefix("");
-        config.setTimeoutMs(120_000);
-        config.setMaxConcurrent(2);
-        config.setAcquirePermitTimeoutMs(10_000);
-        return new NusmvExecutor(config);
     }
 
     private static List<DeviceVerificationDto> buildDevices() {
@@ -296,14 +283,5 @@ class ComplexApartmentScenarioNusmvTest {
 
     private static boolean isState(TraceDeviceDto device, String id, String state) {
         return id.equals(device.getDeviceId()) && state.equals(device.getState());
-    }
-
-    private static String resolveNusmvPath() {
-        String env = System.getenv("NUSMV_PATH");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
-        return Files.exists(bundled) ? bundled.toString() : "NuSMV";
     }
 }

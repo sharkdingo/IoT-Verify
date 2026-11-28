@@ -53,7 +53,8 @@ public final class RuleCandidateNormalizer {
                 if (("state".equals(targetType) || "mode".equals(targetType)) && !ENUM_RELATIONS.contains(relation)) {
                     throw new BadRequestException(path + " uses state/mode semantics and only supports =, !=, in, not in.");
                 }
-                if (("in".equals(relation) || "not in".equals(relation)) && hasNoListItem(value)) {
+                if (("in".equals(relation) || "not in".equals(relation))
+                        && SmvRelationUtils.splitRuleValues(value).isEmpty()) {
                     throw new BadRequestException(path + ".value must contain at least one item for relation " + relation + ".");
                 }
             }
@@ -89,12 +90,5 @@ public final class RuleCandidateNormalizer {
         if (raw == null) return null;
         String value = raw.trim();
         return value.isEmpty() ? null : value;
-    }
-
-    private static boolean hasNoListItem(String value) {
-        for (String item : value.split("[,;|]")) {
-            if (!item.trim().isEmpty()) return false;
-        }
-        return true;
     }
 }

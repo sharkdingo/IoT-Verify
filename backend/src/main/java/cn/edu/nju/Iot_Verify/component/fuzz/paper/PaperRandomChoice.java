@@ -26,6 +26,27 @@ final class PaperRandomChoice {
         return values.get(alternativeIndex(values.size(), excludedIndex, compactIndex));
     }
 
+    static long numeric(SplittableRandom random, int lower, int upper, String excluded) {
+        // A domain covering all signed integers is wider than an int index can represent.
+        long size = (long) upper - lower + 1L;
+        long excludedOffset = numericOffset(excluded, lower, upper);
+        long available = excludedOffset >= 0L ? size - 1L : size;
+        if (available <= 0L) return lower;
+        long offset = random.nextLong(available);
+        if (excludedOffset >= 0L && offset >= excludedOffset) offset++;
+        return lower + offset;
+    }
+
+    private static long numericOffset(String value, int lower, int upper) {
+        if (value == null) return -1L;
+        try {
+            long numeric = Long.parseLong(value);
+            return numeric < lower || numeric > upper ? -1L : numeric - lower;
+        } catch (NumberFormatException exception) {
+            return -1L;
+        }
+    }
+
     static int alternativeIndex(int size, int excludedIndex, int compactIndex) {
         if (size < 2 || excludedIndex < 0 || excludedIndex >= size
                 || compactIndex < 0 || compactIndex >= size - 1) {

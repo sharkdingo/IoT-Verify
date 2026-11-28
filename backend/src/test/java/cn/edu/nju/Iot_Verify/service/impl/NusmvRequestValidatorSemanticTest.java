@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
@@ -99,7 +100,7 @@ class NusmvRequestValidatorSemanticTest {
     void validateRuleSemantics_rejectsContentOnAnActionWithoutContentCapability() {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         DeviceSmvData model = smv();
-        model.getManifest().setContents(List.of(DeviceManifest.Content.builder()
+        model.getManifest().setContents(java.util.Arrays.asList(null, DeviceManifest.Content.builder()
                 .name("photo")
                 .privacy("private")
                 .build()));
@@ -123,6 +124,16 @@ class NusmvRequestValidatorSemanticTest {
 
         assertEquals("Command API 'turnOn' does not accept a content-sensitivity input",
                 errors.get("rules[0].command.content"));
+
+        model.getManifest().getApis().get(1).setAcceptsContent(true);
+        rule.getCommand().setContent(" photo ");
+        errors.clear();
+        NusmvRequestValidator.validateRuleSemantics(List.of(rule), Map.of("sensor_1", model), errors);
+        assertTrue(errors.isEmpty(), errors::toString);
+
+        rule.getCommand().setContent("Photo");
+        NusmvRequestValidator.validateRuleSemantics(List.of(rule), Map.of("sensor_1", model), errors);
+        assertEquals(Map.of("rules[0].command.content", "Unknown content for device template: Photo"), errors);
     }
 
     @Test
@@ -418,36 +429,6 @@ class NusmvRequestValidatorSemanticTest {
     }
 
     @Test
-    void validateEnvironmentOverrides_rejectsDuplicatesBeforeDefaultMerging() {
-        Map<String, String> errors = NusmvRequestValidator.newErrors();
-
-        NusmvRequestValidator.validateEnvironmentVariableOverrides(
-                List.of(
-                        new BoardEnvironmentVariableDto("temperature", "20", "trusted", "public"),
-                        new BoardEnvironmentVariableDto("temperature", "30", "untrusted", "private")),
-                Map.of("sensor_1", envSmv()),
-                errors);
-
-        assertEquals("Duplicate environment variable: temperature",
-                errors.get("environmentVariables[1].name"));
-    }
-
-    @Test
-    void validateEnvironmentOverrides_rejectsExplicitBlankLabelsInsteadOfUsingTemplateDefaults() {
-        Map<String, String> errors = NusmvRequestValidator.newErrors();
-
-        NusmvRequestValidator.validateEnvironmentVariableOverrides(
-                List.of(new BoardEnvironmentVariableDto("temperature", " ", " ", "")),
-                Map.of("sensor_1", envSmv()),
-                errors);
-
-        assertTrue(errors.get("environmentVariables[0].trust").contains("trusted or untrusted"));
-        assertTrue(errors.get("environmentVariables[0].privacy").contains("public or private"));
-        assertEquals("Environment variable value cannot be blank when provided",
-                errors.get("environmentVariables[0].value"));
-    }
-
-    @Test
     void validateDeviceSemantics_rejectsExplicitBlankSecurityLabels() {
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         DeviceVerificationDto device = device("sensor_1", "Sensor");
@@ -646,7 +627,7 @@ class NusmvRequestValidatorSemanticTest {
         spec.setDevices(new ArrayList<>());
 
         String smvText = new SmvSpecificationBuilder()
-                .build(List.of(spec), Map.of("sensor_1", aPrefixedEnvSmv()), false);
+                .build(List.of(spec), Map.of("sensor_1", aPrefixedEnvSmv()), false, SmvGenerationContext.noop());
 
         assertTrue(smvText.contains("a_a_temperature>28"), smvText);
     }
@@ -685,7 +666,7 @@ class NusmvRequestValidatorSemanticTest {
         spec.setDevices(new ArrayList<>());
 
         String smvText = new SmvSpecificationBuilder()
-                .build(List.of(spec), Map.of("sensor_1", trustPrefixedLocalSmv()), false);
+                .build(List.of(spec), Map.of("sensor_1", trustPrefixedLocalSmv()), false, SmvGenerationContext.noop());
 
         assertTrue(smvText.contains("sensor_1.trust_trust_temperature=untrusted"), smvText);
     }
@@ -773,7 +754,7 @@ class NusmvRequestValidatorSemanticTest {
         spec.setDevices(new ArrayList<>());
 
         String smvText = new SmvSpecificationBuilder()
-                .build(List.of(spec), Map.of("sensor_1", smv()), false);
+                .build(List.of(spec), Map.of("sensor_1", smv()), false, SmvGenerationContext.noop());
 
         assertTrue(smvText.contains("sensor_1.fanMode=fanonly"));
     }

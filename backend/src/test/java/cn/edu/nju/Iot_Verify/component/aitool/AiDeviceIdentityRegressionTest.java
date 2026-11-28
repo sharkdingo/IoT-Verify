@@ -37,6 +37,7 @@ import java.io.InputStream;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,7 +72,7 @@ class AiDeviceIdentityRegressionTest {
         board = mock(BoardStorageService.class);
         simulation = mock(SimulationService.class);
         verification = mock(VerificationService.class);
-        guard = new AiDestructiveActionGuard(mapper);
+        guard = inMemoryActionGuard(mapper);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("identity-regression-session");
     }

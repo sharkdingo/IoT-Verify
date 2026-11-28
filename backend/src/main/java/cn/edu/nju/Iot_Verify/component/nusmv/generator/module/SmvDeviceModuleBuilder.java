@@ -190,22 +190,7 @@ public class SmvDeviceModuleBuilder {
 
     private void appendInternalVariables(StringBuilder content, DeviceSmvData smv) {
         for (DeviceManifest.InternalVariable var : smv.getVariables()) {
-            String varDef;
-            if (var.getValues() != null && !var.getValues().isEmpty()) {
-                // 去除空格，与 sample.smv 一致（如 "not authorized" → "notauthorized"）
-                List<String> cleanValues = new ArrayList<>();
-                for (String v : var.getValues()) {
-                    cleanValues.add(v.replace(" ", ""));
-                }
-                varDef = "{" + String.join(", ", cleanValues) + "}";
-            } else if (var.getLowerBound() != null && var.getUpperBound() != null) {
-                int lower = var.getLowerBound();
-                int upper = var.getUpperBound();
-                varDef = lower + ".." + upper;
-            } else {
-                throw SmvGenerationException.templateInvalid(smv.getVarName(),
-                        "Variable '" + var.getName() + "' has no declared value domain");
-            }
+            String varDef = requireVariableDomain(var, smv.getVarName());
             content.append("\n\t").append(var.getName()).append(": ").append(varDef).append(";");
         }
     }
@@ -449,7 +434,7 @@ public class SmvDeviceModuleBuilder {
                 content.append("\n\tinit(").append(var.getName()).append(") :=\n")
                         .append("\tcase\n")
                         .append("\t\t").append(SmvConstants.DEVICE_ATTACK_FLAG).append("=TRUE: ")
-                        .append(variableDomainExpression(var)).append(";\n")
+                        .append(requireVariableDomain(var, "device")).append(";\n")
                         .append("\t\tTRUE: ")
                         .append(initValue).append(";\n")
                         .append("\tesac;");
@@ -466,18 +451,13 @@ public class SmvDeviceModuleBuilder {
         // device's live effect in step 0 instead of starting at zero and lagging by one step.
     }
 
-    private String variableDomainExpression(DeviceManifest.InternalVariable variable) {
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            List<String> values = variable.getValues().stream()
-                    .map(value -> value.replace(" ", ""))
-                    .toList();
-            return "{" + String.join(", ", values) + "}";
+    private static String requireVariableDomain(DeviceManifest.InternalVariable variable, String deviceName) {
+        String domain = SmvVariableDomain.render(variable);
+        if (domain == null) {
+            throw SmvGenerationException.templateInvalid(deviceName,
+                    "Variable '" + variable.getName() + "' has no declared value domain");
         }
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
-            return variable.getLowerBound() + ".." + variable.getUpperBound();
-        }
-        throw SmvGenerationException.templateInvalid("device",
-                "Variable '" + variable.getName() + "' has no declared value domain");
+        return domain;
     }
 
     private boolean isNumericVariable(DeviceSmvData smv, String varName) {
@@ -497,11 +477,7 @@ public class SmvDeviceModuleBuilder {
         }
 
         if (var.getValues() != null && !var.getValues().isEmpty()) {
-            // 枚举变量
-            List<String> cleanValues = new ArrayList<>();
-            for (String v : var.getValues()) {
-                cleanValues.add(v.replace(" ", ""));
-            }
+            List<String> cleanValues = SmvVariableDomain.enumTokens(var.getValues());
             String cleanValue = value.replace(" ", "");
             if (cleanValues.contains(cleanValue)) {
                 return cleanValue;

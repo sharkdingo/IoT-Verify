@@ -1,21 +1,32 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.dto.Result;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationOutcome;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
+import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.TaskView;
 import cn.edu.nju.Iot_Verify.service.AsyncTaskExecutionControl;
 import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
+import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 
 /**
  * 异步任务管理基类。
@@ -23,7 +34,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>提取 VerificationServiceImpl 与 SimulationServiceImpl 中完全相同的：
  * <ul>
  *   <li>本地进度管理</li>
- *   <li>serializeCheckLogs / readCheckLogs / writeCheckLogs / truncateOutput</li>
+ *   <li>serializeCheckLogs / readCheckLogs / truncateOutput</li>
  *   <li>updateTaskProgress / resolveTaskProgress / cancelTask</li>
  * </ul>
  *
@@ -49,6 +60,9 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
     // ── 并发容器（private，通过语义操作方法暴露）──────────────────────
 
     private final ConcurrentHashMap<Long, TaskProgressState> taskProgress = new ConcurrentHashMap<>();
+
+    // Task IDs are scoped to each service's repository.
+    private final ConcurrentHashMap<Long, LocalTaskExecution> localExecutions = new ConcurrentHashMap<>();
 
     protected AbstractAsyncTaskService(ObjectMapper objectMapper,
                                        String taskResourceType) {
@@ -88,13 +102,70 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
         return stopLocalExecution(taskId).requested;
     }
 
+    final void registerLocalExecution(Long taskId, LocalTaskExecution execution, String taskKind) {
+        if (localExecutions.putIfAbsent(taskId, execution) != null) {
+            throw new IllegalStateException("Duplicate local " + taskKind + " task execution " + taskId);
+        }
+    }
+
+    final void retireLocalExecution(Long taskId, LocalTaskExecution execution) {
+        localExecutions.remove(taskId, execution);
+    }
+
+    final LocalTaskExecution findLocalExecution(Long taskId) {
+        return localExecutions.get(taskId);
+    }
+
+    final List<TaskLeaseMaintenance.LocalLease> localLeases() {
+        return localExecutions.values().stream().map(LocalTaskExecution::lease).toList();
+    }
+
     /** Cancels the task's own Future, which fences interruption from pooled worker reuse. */
-    protected abstract LocalExecutionStopResult stopLocalExecution(Long taskId);
+    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
+        LocalTaskExecution execution = findLocalExecution(taskId);
+        return execution == null ? LocalExecutionStopResult.NONE : execution.requestStop();
+    }
 
     /** The task's Future retains a stop request even if the worker cleared its interrupt flag. */
-    protected abstract boolean isLocalStopRequested(Long taskId);
+    protected boolean isLocalStopRequested(Long taskId) {
+        LocalTaskExecution execution = findLocalExecution(taskId);
+        return execution != null && execution.isCancelled();
+    }
 
     // ── 直接搬入的具体方法（无领域差异）─────────────────────────────
+
+    /** Captures history rows together; callers decode the captured rows outside this read. */
+    protected static <R> R captureHistoryRows(TransactionTemplate transactionTemplate, Supplier<R> capture) {
+        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
+        readTransaction.setReadOnly(true);
+        return readTransaction.execute(status -> capture.get());
+    }
+
+    protected static Long requireTaskId(Long taskId) {
+        if (taskId == null) {
+            throw new ValidationException("taskId", "Task id cannot be null");
+        }
+        return taskId;
+    }
+
+    /** Recheck the owning user's task when the guarded delete has not confirmed its removal. */
+    protected static boolean removeUndispatchedTask(
+            Long taskId, String taskKind, Logger logger, RuntimeException dispatchError,
+            IntSupplier deletePendingTask, BooleanSupplier taskAbsent) {
+        try {
+            if (deletePendingTask.getAsInt() == 1) return true;
+            boolean absent = taskAbsent.getAsBoolean();
+            if (!absent) {
+                logger.error("Could not remove {} task {} after failure before dispatch", taskKind, taskId);
+            }
+            return absent;
+        } catch (RuntimeException cleanupError) {
+            dispatchError.addSuppressed(cleanupError);
+            logger.error("Could not remove {} task {} after failure before dispatch",
+                    taskKind, taskId, cleanupError);
+            return false;
+        }
+    }
 
     protected String serializeCheckLogs(List<String> logs) {
         try {
@@ -117,20 +188,34 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
         }
     }
 
-    protected void writeCheckLogs(T task, List<String> logs) {
-        if (task == null) return;
-        try {
-            task.setCheckLogsJson(objectMapper.writeValueAsString(logs == null ? List.of() : logs));
-        } catch (Exception e) {
-            log.warn("Failed to serialize check logs for {} {}", taskResourceType, task.getId(), e);
-            task.setCheckLogsJson(DIAGNOSTIC_LOSS_JSON);
-        }
-    }
-
     protected String truncateOutput(String output) {
         if (output == null) return null;
         return output.length() > MAX_OUTPUT_LENGTH
                 ? output.substring(0, MAX_OUTPUT_LENGTH) + OUTPUT_TRUNCATION_MARKER : output;
+    }
+
+    protected void saveRequestJson(File smvFile, String requestJson, Logger logger, String operation) {
+        if (smvFile == null || smvFile.getParentFile() == null || requestJson == null || requestJson.isBlank()) return;
+        try {
+            File jsonFile = new File(smvFile.getParentFile(), "request.json");
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(jsonFile, objectMapper.readTree(requestJson));
+            logger.debug("{} request JSON saved to: {}", operation, jsonFile.getAbsolutePath());
+        } catch (IOException e) {
+            logger.warn("Failed to save {} request JSON: {}", operation.toLowerCase(Locale.ROOT), e.getMessage());
+        }
+    }
+
+    protected <R> void saveResultJson(File smvFile, R result, Function<R, Result<R>> wrap,
+                                      Logger logger, String operation, String failureMessage) {
+        if (smvFile == null || smvFile.getParentFile() == null || result == null) return;
+        try {
+            File jsonFile = new File(smvFile.getParentFile(), "result.json");
+            byte[] payload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(wrap.apply(result));
+            Files.write(jsonFile.toPath(), payload);
+            logger.debug("{} result JSON saved to: {}", operation, jsonFile.getAbsolutePath());
+        } catch (IOException e) {
+            logger.warn(failureMessage, e.getMessage());
+        }
     }
 
     /**
@@ -284,11 +369,6 @@ public abstract class AbstractAsyncTaskService<T extends TaskView>
     }
 
     // ── 子类实现的 Repository 委托钩子 ───────────────────────────────
-
-    /**
-     * 根据 ID 和用户 ID 查找任务。
-     */
-    protected abstract Optional<T> findTaskByIdAndUserId(Long id, Long userId);
 
     /** Reads an owned task's current status and holds its row lock through cancellation. */
     protected abstract Optional<T> findTaskByIdAndUserIdForUpdate(Long id, Long userId);

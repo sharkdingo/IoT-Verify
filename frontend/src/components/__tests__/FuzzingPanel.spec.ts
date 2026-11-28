@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { mount } from '@vue/test-utils'
+import type { Plugin } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { describe, expect, it } from 'vitest'
-import FuzzingPanel from '../FuzzingPanel.vue'
+import FuzzingPanel, { type FuzzingPanelForm } from '../FuzzingPanel.vue'
 import InfoTooltip from '../common/InfoTooltip.vue'
 import type { Specification } from '@/types/spec'
 import type { FuzzPaperDomainPreview } from '@/types/fuzzing'
@@ -98,21 +99,50 @@ const specification: Specification = { name: 'Safety requirement',
   thenConditions: []
 }
 
+const createForm = (overrides: Partial<FuzzingPanelForm> = {}): FuzzingPanelForm => ({
+  explorationMode: 'BOARD_SNAPSHOT',
+  targetSpecIds: [],
+  maxIterations: 500,
+  pathLength: 20,
+  populationSize: 10,
+  seed: null,
+  ...overrides
+})
+
+type FuzzingPanelProps = InstanceType<typeof FuzzingPanel>['$props']
+
+const mountPanel = (
+  props: Partial<FuzzingPanelProps> = {},
+  { attachTo, translations = i18n }: { attachTo?: HTMLElement; translations?: Plugin } = {}
+) => mount(FuzzingPanel, {
+  attachTo,
+  global: { plugins: [translations] },
+  props: {
+    form: createForm(),
+    specifications: [specification],
+    running: false,
+    progress: 0,
+    status: 'Initializing',
+    taskId: null,
+    cancelling: false,
+    ...props
+  }
+})
+
 describe('FuzzingPanel', () => {
   it('leaves focus with the active draft when the Board declines focus restoration', async () => {
     const opener = document.createElement('button')
     const draft = document.createElement('input')
     document.body.append(opener, draft)
     opener.focus()
-    const wrapper = mount(FuzzingPanel, {
-      attachTo: document.body, global: { plugins: [appI18n] },
-      props: {
-        form: { explorationMode: 'BOARD_SNAPSHOT', targetSelectionMode: 'ALL', targetSpecIds: [],
-          maxIterations: 2, pathLength: 2, populationSize: 1, seed: null },
-        specifications: [specification], running: true, progress: 50, status: 'Exploring', taskId: 7,
-        cancelling: false, shouldRestoreFocus: () => false
-      }
-    })
+    const wrapper = mountPanel({
+      form: createForm({ targetSelectionMode: 'ALL', maxIterations: 2, pathLength: 2, populationSize: 1 }),
+      running: true,
+      progress: 50,
+      status: 'Exploring',
+      taskId: 7,
+      shouldRestoreFocus: () => false
+    }, { attachTo: document.body, translations: appI18n })
     try {
       await wrapper.vm.$nextTick()
       draft.focus()
@@ -131,13 +161,13 @@ describe('FuzzingPanel', () => {
       'zh-CN': appI18n.global.getLocaleMessage('zh-CN')
     } })
     const message = translations.global.t('app.fuzzTargetSelectionChanged', { count: 1 })
-    const form = { explorationMode: 'BOARD_SNAPSHOT' as const, targetSelectionMode: 'EXPLICIT' as 'ALL' | 'EXPLICIT',
-      targetSpecIds: ['deleted-spec'], maxIterations: 200, pathLength: 20, populationSize: 10, seed: null }
-    const wrapper = mount(FuzzingPanel, {
-      props: { form, specifications: [specification, { ...specification, id: 'unsupported', templateId: '2' }],
-        running: false, progress: 0, status: '', taskId: null, cancelling: false, configurationError: message },
-      global: { plugins: [translations] }
-    })
+    const form = createForm({ targetSelectionMode: 'EXPLICIT', targetSpecIds: ['deleted-spec'], maxIterations: 200 })
+    const wrapper = mountPanel({
+      form,
+      specifications: [specification, { ...specification, id: 'unsupported', templateId: '2' }],
+      status: '',
+      configurationError: message
+    }, { translations })
     try {
       expect(wrapper.text().split(message)).toHaveLength(2)
       expect(wrapper.get('details').attributes('open')).toBeUndefined()
@@ -156,15 +186,11 @@ describe('FuzzingPanel', () => {
 
   it('shows the run failure once while retaining separate technical evidence', () => {
     const message = 'The exploration task failed.'
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: { explorationMode: 'BOARD_SNAPSHOT', targetSpecIds: [], maxIterations: 200,
-          pathLength: 20, populationSize: 10, seed: null },
-        specifications: [specification], running: false, progress: 0, status: '',
-        taskId: null, cancelling: false, error: message,
-        failureDetails: { cause: message, details: [message, 'HTTP 500'], fields: {} }
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      form: createForm({ maxIterations: 200 }),
+      status: '',
+      error: message,
+      failureDetails: { cause: message, details: [message, 'HTTP 500'], fields: {} }
     })
     try {
       expect(wrapper.text().split(message)).toHaveLength(2)
@@ -174,26 +200,9 @@ describe('FuzzingPanel', () => {
   })
 
   it('blocks submission while the backend workload check is pending and allows retry', async () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        workloadReady: false,
-        workloadLoading: true
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      workloadReady: false,
+      workloadLoading: true
     })
 
     expect(wrapper.get('[data-testid="run-fuzzing"]').attributes('disabled')).toBeDefined()
@@ -206,27 +215,8 @@ describe('FuzzingPanel', () => {
   })
 
   it('returns a cleared restored seed to automatic generation', async () => {
-    const form = {
-      explorationMode: 'BOARD_SNAPSHOT' as const,
-      targetSelectionMode: 'ALL' as 'ALL' | 'EXPLICIT',
-      targetSpecIds: [],
-      maxIterations: 500,
-      pathLength: 20,
-      populationSize: 10,
-      seed: 42 as number | null
-    }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form,
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const form = createForm({ targetSelectionMode: 'ALL', seed: 42 })
+    const wrapper = mountPanel({ form })
 
     const seed = wrapper.get('[data-testid="fuzz-seed"]')
     expect((seed.element as HTMLInputElement).value).toBe('42')
@@ -235,25 +225,9 @@ describe('FuzzingPanel', () => {
   })
 
   it('exposes backend-aligned limits and blocks an invalid combined workload', async () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 5001,
-          pathLength: 50,
-          populationSize: 50,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        configurationError: 'Combined workload exceeds the limit.'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      form: createForm({ maxIterations: 5001, pathLength: 50, populationSize: 50 }),
+      configurationError: 'Combined workload exceeds the limit.'
     })
 
     expect(wrapper.get('[data-testid="fuzz-max-iterations"]').attributes('max')).toBe('5000')
@@ -285,27 +259,10 @@ describe('FuzzingPanel', () => {
       accepted: true,
       maxAcceptedIterations: 993
     }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        workload: preview.estimatedWorkload,
-        workloadLimit: preview.workloadLimit,
-        workloadPreview: preview
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      workload: preview.estimatedWorkload,
+      workloadLimit: preview.workloadLimit,
+      workloadPreview: preview
     })
 
     expect(wrapper.get('details [data-testid="fuzz-model-complexity"]').text()).toContain('151')
@@ -324,25 +281,9 @@ describe('FuzzingPanel', () => {
       ...specification,
       id: `spec-${index + 1}`
     }))
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications,
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        configurationError: 'Explicitly select at most 100 specifications.'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      specifications,
+      configurationError: 'Explicitly select at most 100 specifications.'
     })
 
     expect(wrapper.findAll('button').some(button => button.text() === 'Select all')).toBe(false)
@@ -355,26 +296,10 @@ describe('FuzzingPanel', () => {
       ...specification,
       id: `spec-${index}`
     }))
-    const form = {
-      explorationMode: 'BOARD_SNAPSHOT' as const,
-      targetSelectionMode: 'ALL' as 'ALL' | 'EXPLICIT',
-      targetSpecIds: [],
-      maxIterations: 500,
-      pathLength: 20,
-      populationSize: 10,
-      seed: null
-    }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form,
-        specifications,
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
+    const form = createForm({ targetSelectionMode: 'ALL' })
+    const wrapper = mountPanel({
+      form,
+      specifications
     })
 
     expect(wrapper.findAll('input[type="checkbox"]').every(input =>
@@ -398,27 +323,8 @@ describe('FuzzingPanel', () => {
   })
 
   it('blocks a stale explicit target until the user resolves the changed scope', async () => {
-    const form = {
-      explorationMode: 'BOARD_SNAPSHOT' as const,
-      targetSelectionMode: 'EXPLICIT' as const,
-      targetSpecIds: ['deleted-spec'],
-      maxIterations: 500,
-      pathLength: 20,
-      populationSize: 10,
-      seed: null
-    }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form,
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const form = createForm({ targetSelectionMode: 'EXPLICIT', targetSpecIds: ['deleted-spec'] })
+    const wrapper = mountPanel({ form })
 
     expect(wrapper.get('[data-testid="fuzz-invalid-target-selection"]').text())
       .toContain('1 selected target(s) are no longer available.')
@@ -430,26 +336,8 @@ describe('FuzzingPanel', () => {
   })
 
   it('does not allow an explicit selection to become empty', async () => {
-    const form = {
-      explorationMode: 'BOARD_SNAPSHOT' as const,
-      targetSpecIds: ['spec-1'],
-      maxIterations: 500,
-      pathLength: 20,
-      populationSize: 10,
-      seed: null
-    }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form,
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const form = createForm({ targetSpecIds: ['spec-1'] })
+    const wrapper = mountPanel({ form })
 
     const checkbox = wrapper.get('input[type="checkbox"]')
     expect(checkbox.attributes('disabled')).toBeDefined()
@@ -460,25 +348,7 @@ describe('FuzzingPanel', () => {
 
   it('marks known unsupported templates as formal-only and excludes them from selection', () => {
     const unsupported = { ...specification, id: 'spec-2', templateId: '2' as const }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification, unsupported],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const wrapper = mountPanel({ specifications: [specification, unsupported] })
 
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     const targetHelp = wrapper.findAllComponents(InfoTooltip).find(help => help.props('testId') === 'fuzz-targets-help')!
@@ -508,25 +378,7 @@ describe('FuzzingPanel', () => {
         value: 'trusted'
       }]
     }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification, trustSpecification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const wrapper = mountPanel({ specifications: [specification, trustSpecification] })
 
     const checkboxes = wrapper.findAll('input[type="checkbox"]')
     expect((checkboxes[0].element as HTMLInputElement).checked).toBe(true)
@@ -537,24 +389,8 @@ describe('FuzzingPanel', () => {
   })
 
   it('keeps every rejection reason visible when no specification can be explored', () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [{ ...specification, templateId: '5' }],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      specifications: [{ ...specification, templateId: '5' }]
     })
 
     expect(wrapper.text()).toContain('No eligible specifications.')
@@ -565,25 +401,10 @@ describe('FuzzingPanel', () => {
   })
 
   it('does not present random-input preflight as a service failure before a target is eligible', () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        workloadReady: false
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      specifications: [],
+      workloadReady: false
     })
 
     expect(wrapper.text()).toContain('Add a specification first.')
@@ -592,24 +413,11 @@ describe('FuzzingPanel', () => {
   })
 
   it('labels running progress as budget consumption rather than coverage', () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: true,
-        progress: 37,
-        status: 'Searching',
-        taskId: 12,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      running: true,
+      progress: 37,
+      status: 'Searching',
+      taskId: 12
     })
 
     const progressbar = wrapper.get('[role="progressbar"]')
@@ -620,26 +428,8 @@ describe('FuzzingPanel', () => {
   })
 
   it('uses an accessible segmented mode control and locks it while running', async () => {
-    const form = {
-      explorationMode: 'BOARD_SNAPSHOT' as 'BOARD_SNAPSHOT' | 'PAPER_COMPATIBLE',
-      targetSpecIds: [],
-      maxIterations: 500,
-      pathLength: 20,
-      populationSize: 10,
-      seed: null
-    }
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form,
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const form = createForm()
+    const wrapper = mountPanel({ form })
 
     const group = wrapper.get('[role="radiogroup"]')
     const boardMode = wrapper.get('[data-testid="fuzz-mode-board"]')
@@ -659,59 +449,43 @@ describe('FuzzingPanel', () => {
   })
 
   it('shows the authoritative paper domains and exposes a refresh command', async () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        paperDomainPreview: {
-          pathLength: 20,
-          modelFingerprint: 'a'.repeat(64),
-          initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
-          paperSemanticsCodes: [
-            'PAPER_RANDOM_INITIAL_STATE_ENABLED',
-            'PAPER_PREDECESSOR_STATE_OUTPUTS_THREE_LEVELS_ONLY'
-          ],
-          deviceDomains: [{
-            targetId: 'door-1',
-            label: 'Front door',
-            property: 'workingState',
-            legalValues: ['open', 'closed']
-          }],
-          localVariableDomains: [{
-            targetId: 'door-1',
-            label: 'Front door',
-            property: 'battery',
-            legalValues: [],
-            lowerBound: 0,
-            upperBound: 2000
-          }],
-          environmentDomains: [{
-            name: 'temperature',
-            targetId: 'environment',
-            property: 'temperature',
-            eventValueKind: 'CHANGE_RATE',
-            initialValues: [],
-            eventValues: [],
-            initialLowerBound: -2000,
-            initialUpperBound: 2000,
-            eventRateLowerBound: -1,
-            eventRateUpperBound: 1
-          }]
-        }
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      paperDomainPreview: {
+        pathLength: 20,
+        modelFingerprint: 'a'.repeat(64),
+        initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
+        paperSemanticsCodes: [
+          'PAPER_RANDOM_INITIAL_STATE_ENABLED',
+          'PAPER_PREDECESSOR_STATE_OUTPUTS_THREE_LEVELS_ONLY'
+        ],
+        deviceDomains: [{
+          targetId: 'door-1',
+          label: 'Front door',
+          property: 'workingState',
+          legalValues: ['open', 'closed']
+        }],
+        localVariableDomains: [{
+          targetId: 'door-1',
+          label: 'Front door',
+          property: 'battery',
+          legalValues: [],
+          lowerBound: 0,
+          upperBound: 2000
+        }],
+        environmentDomains: [{
+          name: 'temperature',
+          targetId: 'environment',
+          property: 'temperature',
+          eventValueKind: 'CHANGE_RATE',
+          initialValues: [],
+          eventValues: [],
+          initialLowerBound: -2000,
+          initialUpperBound: 2000,
+          eventRateLowerBound: -1,
+          eventRateUpperBound: 1
+        }]
+      }
     })
 
     const preview = wrapper.get('[data-testid="paper-domain-preview"]')
@@ -722,8 +496,12 @@ describe('FuzzingPanel', () => {
     expect(preview.get('[data-testid="paper-domain-boundaries"]').text()).toContain('structured temporal specifications')
     expect(preview.text()).not.toContain('Each candidate starts')
     expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('1 device initial-state items')
-    expect(wrapper.get('[data-testid="paper-local-variable-domains"]').text()).toContain('Front door.battery')
-    expect(wrapper.get('[data-testid="paper-local-variable-domains"]').text()).toContain('0..2000')
+    const choices = preview.get('[data-testid="paper-domain-choices"]')
+    expect(choices.text()).toContain('Device initial-state inputs')
+    expect(choices.findAll('ul')[0]!.text()).toContain('Front door.workingState: open, closed')
+    const localInputs = choices.get('[data-testid="paper-local-variable-domains"]')
+    expect(localInputs.text()).toContain('Device local-variable domains')
+    expect(localInputs.text()).toContain('Front door.battery: 0..2000')
     expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('-2000..2000')
     expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('-1..1')
     expect(wrapper.get('[data-testid="paper-domain-preview"]').text()).toContain('Automation conditions are traced back by up to three levels.')
@@ -742,25 +520,9 @@ describe('FuzzingPanel', () => {
   })
 
   it('offers an explicit retry when the random-state input preview fails', async () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        paperDomainError: 'Input ranges are temporarily unavailable.'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      paperDomainError: 'Input ranges are temporarily unavailable.'
     })
 
     expect(wrapper.text()).toContain('Input ranges are temporarily unavailable.')
@@ -785,7 +547,14 @@ describe('FuzzingPanel', () => {
         targetId: 'door_550e8400_e29b_41d4_a716_446655440000',
         label: '前门',
         property: 'customMetric',
-        legalValues: ['ecoBoost']
+        legalValues: ['off', 'ecoBoost']
+      }, {
+        targetId: 'door_550e8400_e29b_41d4_a716_446655440000',
+        label: '前门',
+        property: 'battery',
+        legalValues: [],
+        lowerBound: 0,
+        upperBound: 100
       }],
       environmentDomains: [{
         name: 'temperature',
@@ -797,122 +566,76 @@ describe('FuzzingPanel', () => {
       }]
     }
     const canonicalSnapshot = JSON.parse(JSON.stringify(paperDomainPreview))
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        paperDomainPreview,
-        bundledDeviceIds: ['door-550e8400-e29b-41d4-a716-446655440000'],
-        bundledEnvironmentNames: ['temperature']
-      },
-      global: { plugins: [appI18n] }
-    })
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      paperDomainPreview,
+      bundledDeviceIds: ['door-550e8400-e29b-41d4-a716-446655440000'],
+      bundledEnvironmentNames: ['temperature']
+    }, { translations: appI18n })
 
     const preview = wrapper.get('[data-testid="paper-domain-preview"]').text()
     expect(preview).toContain('前门.工作状态')
     expect(preview).toContain('关闭, 已锁定')
     expect(preview).toContain('温度')
-    expect(preview).toContain('customMetric')
-    expect(preview).toContain('ecoBoost')
+    const localDomains = wrapper.get('[data-testid="paper-local-variable-domains"]')
+    expect(localDomains.text()).toContain('前门.customMetric: 关闭, ecoBoost')
+    expect(localDomains.text()).toContain('前门.电量: 0..100')
     expect(paperDomainPreview).toEqual(canonicalSnapshot)
   })
 
   it('does not localize custom domain identifiers that collide with bundled tokens', () => {
     appI18n.global.locale.value = 'zh-CN'
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        paperDomainPreview: {
-          pathLength: 20,
-          modelFingerprint: 'c'.repeat(64),
-          initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
-          paperSemanticsCodes: ['PAPER_RANDOM_INITIAL_STATE_ENABLED'],
-          deviceDomains: [],
-          localVariableDomains: [{
-            targetId: 'custom-1',
-            label: '自定义设备',
-            property: 'workingState',
-            legalValues: ['off', 'active']
-          }],
-          environmentDomains: [{
-            name: 'weather',
-            targetId: 'environment',
-            property: 'weather',
-            eventValueKind: 'DIRECT_VALUE_EXTENSION',
-            initialValues: ['off'],
-            eventValues: ['active']
-          }]
-        }
-      },
-      global: { plugins: [appI18n] }
-    })
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      paperDomainPreview: {
+        pathLength: 20,
+        modelFingerprint: 'c'.repeat(64),
+        initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
+        paperSemanticsCodes: ['PAPER_RANDOM_INITIAL_STATE_ENABLED'],
+        deviceDomains: [],
+        localVariableDomains: [{
+          targetId: 'custom-1',
+          label: '自定义设备',
+          property: 'workingState',
+          legalValues: ['off', 'active']
+        }],
+        environmentDomains: [{
+          name: 'weather',
+          targetId: 'environment',
+          property: 'weather',
+          eventValueKind: 'DIRECT_VALUE_EXTENSION',
+          initialValues: ['off'],
+          eventValues: ['active']
+        }]
+      }
+    }, { translations: appI18n })
 
     const preview = wrapper.get('[data-testid="paper-domain-preview"]').text()
     expect(preview).toContain('自定义设备.workingState: off, active')
     expect(preview).toContain('weather')
     expect(preview).not.toContain('自定义设备.工作状态')
+    expect(preview).not.toContain(appI18n.global.t('app.fuzzPaperDeviceStateDomains'))
   })
 
   it('keeps a custom device-state property raw even when its name is a bundled token', () => {
     appI18n.global.locale.value = 'zh-CN'
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'PAPER_COMPATIBLE',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false,
-        paperDomainPreview: {
-          pathLength: 20,
-          modelFingerprint: 'e'.repeat(64),
-          initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
-          paperSemanticsCodes: ['PAPER_RANDOM_INITIAL_STATE_ENABLED'],
-          deviceDomains: [{
-            targetId: 'custom-1',
-            label: '自定义设备',
-            property: 'workingState',
-            legalValues: ['off', 'active']
-          }],
-          localVariableDomains: [],
-          environmentDomains: []
-        }
-      },
-      global: { plugins: [appI18n] }
-    })
+    const wrapper = mountPanel({
+      form: createForm({ explorationMode: 'PAPER_COMPATIBLE' }),
+      paperDomainPreview: {
+        pathLength: 20,
+        modelFingerprint: 'e'.repeat(64),
+        initializationPolicy: 'RANDOM_LEGAL_PER_SEED',
+        paperSemanticsCodes: ['PAPER_RANDOM_INITIAL_STATE_ENABLED'],
+        deviceDomains: [{
+          targetId: 'custom-1',
+          label: '自定义设备',
+          property: 'workingState',
+          legalValues: ['off', 'active']
+        }],
+        localVariableDomains: [],
+        environmentDomains: []
+      }
+    }, { translations: appI18n })
 
     const preview = wrapper.get('[data-testid="paper-domain-preview"]').text()
     expect(preview).toContain('自定义设备.workingState')
@@ -920,48 +643,35 @@ describe('FuzzingPanel', () => {
   })
 
   it('shows a running task from its frozen summary instead of the current editable form', () => {
-    const wrapper = mount(FuzzingPanel, {
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: true,
+    const wrapper = mountPanel({
+      running: true,
+      progress: 25,
+      status: 'Running',
+      taskId: 73,
+      frozenTask: {
+        id: 73,
+        initiator: 'USER',
+        explorationMode: 'PAPER_COMPATIBLE',
+        status: 'RUNNING',
         progress: 25,
-        status: 'Running',
-        taskId: 73,
-        cancelling: false,
-        frozenTask: {
-          id: 73,
-          initiator: 'USER',
-          explorationMode: 'PAPER_COMPATIBLE',
-          status: 'RUNNING',
-          progress: 25,
-          createdAt: '2026-07-15T10:00:00',
-          modelSnapshot: {
-            capturedAt: '2026-07-15T10:00:00',
-            modelFingerprint: 'd'.repeat(64),
-            deviceCount: 4,
-            ruleCount: 3,
-            specificationCount: 2,
-            environmentVariableCount: 1,
-            deviceTemplateCount: 2,
-            templatesFrozen: true,
-            modelSemanticsVersion: 1
-          },
-          maxIterations: 777,
-          pathLength: 11,
-          populationSize: 7,
-          seed: 99,
-          targetSpecIds: ['historical-spec']
-        }
-      },
-      global: { plugins: [i18n] }
+        createdAt: '2026-07-15T10:00:00',
+        modelSnapshot: {
+          capturedAt: '2026-07-15T10:00:00',
+          modelFingerprint: 'd'.repeat(64),
+          deviceCount: 4,
+          ruleCount: 3,
+          specificationCount: 2,
+          environmentVariableCount: 1,
+          deviceTemplateCount: 2,
+          templatesFrozen: true,
+          modelSemanticsVersion: 1
+        },
+        maxIterations: 777,
+        pathLength: 11,
+        populationSize: 7,
+        seed: 99,
+        targetSpecIds: ['historical-spec']
+      }
     })
 
     const summary = wrapper.get('[data-testid="fuzz-frozen-task-summary"]')
@@ -977,26 +687,7 @@ describe('FuzzingPanel', () => {
     const opener = document.createElement('button')
     document.body.appendChild(opener)
     opener.focus()
-    const wrapper = mount(FuzzingPanel, {
-      attachTo: document.body,
-      props: {
-        form: {
-          explorationMode: 'BOARD_SNAPSHOT',
-          targetSpecIds: [],
-          maxIterations: 500,
-          pathLength: 20,
-          populationSize: 10,
-          seed: null
-        },
-        specifications: [specification],
-        running: false,
-        progress: 0,
-        status: 'Initializing',
-        taskId: null,
-        cancelling: false
-      },
-      global: { plugins: [i18n] }
-    })
+    const wrapper = mountPanel({}, { attachTo: document.body })
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(document.activeElement).toBe(wrapper.get('[data-testid="fuzzing-panel"]').element)
     await wrapper.get('[data-testid="fuzzing-panel"]').trigger('keydown', { key: 'Escape' })

@@ -3,8 +3,6 @@ package cn.edu.nju.Iot_Verify.component.aitool.node;
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.NodeService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -55,12 +53,7 @@ public class SearchNodeTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("keyword"));
             String keyword = optionalTextArg(args, "keyword", "", 100);
             log.info("Executing search_devices, keyword: {}", keyword);
@@ -76,15 +69,9 @@ public class SearchNodeTool extends AbstractAiTool {
             return objectMapper.writeValueAsString(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("search_devices busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("search_devices business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("search_devices failed", e);
-            return errorJson("Search devices failed. Please retry.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "search_devices", e,
+                    "Search devices failed. Please retry.");
         }
     }
 

@@ -16,7 +16,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -40,12 +39,6 @@ public class SmvSpecificationBuilder {
      * @param enablePrivacy      privacy flag
      * @return SMV specification section containing only the negated spec
      */
-    public String buildNegated(List<SpecificationDto> specs, int negatedSpecIndex,
-                               Map<String, DeviceSmvData> deviceSmvMap, boolean enablePrivacy) {
-        return buildNegated(specs, negatedSpecIndex,
-                deviceSmvMap, enablePrivacy, SmvGenerationContext.noop());
-    }
-
     public String buildNegated(List<SpecificationDto> specs, int negatedSpecIndex,
                                Map<String, DeviceSmvData> deviceSmvMap, boolean enablePrivacy,
                                SmvGenerationContext context) {
@@ -93,50 +86,7 @@ public class SmvSpecificationBuilder {
      * </ul>
      */
     String generateNegatedSpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
-        validateTemplateShape(spec);
-        String templateId = spec.getTemplateId();
-        if (PERSISTENCE_TEMPLATE_ID.equals(templateId)) {
-            return generateNegatedLtlSpec(spec, deviceSmvMap);
-        }
-        return generateNegatedCtlSpec(spec, deviceSmvMap);
-    }
-
-    private String generateNegatedCtlSpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
-        String templateId = spec.getTemplateId();
-        String aPart = buildConditionGroup(spec.getAConditions(), deviceSmvMap);
-        String ifPart = buildConditionGroup(spec.getIfConditions(), deviceSmvMap);
-        String thenPart = buildConditionGroup(spec.getThenConditions(), deviceSmvMap);
-
-        switch (templateId) {
-            case "1": // always: AG(A) → EF(!A)
-                return "CTLSPEC EF(!(" + aPart + "))";
-            case "2": // eventually: AF(A) → EG(!A)
-                return "CTLSPEC EG(!(" + aPart + "))";
-            case "3": // never: AG(!A) → EF(A)
-                return "CTLSPEC EF(" + aPart + ")";
-            case "4": // immediate: AG(IF→AX(THEN)) → EF(IF & EX(!THEN))
-                return "CTLSPEC EF((" + ifPart + ") & EX(!(" + thenPart + ")))";
-            case "5": // response: AG(IF→AF(THEN)) → EF(IF & EG(!THEN))
-                return "CTLSPEC EF((" + ifPart + ") & EG(!(" + thenPart + ")))";
-            case "7": // safety: AG !(body) → EF(body), where body includes trust/attack expressions
-                return "CTLSPEC EF(" + buildSafetyBody(spec, deviceSmvMap) + ")";
-            default:
-                // Symmetric with generateCtlSpec: fail closed instead of guessing AG(A).
-                throw new InvalidConditionException("unsupported templateId '" + templateId
-                        + "'; allowed values are 1, 2, 3, 4, 5, 6, 7");
-        }
-    }
-
-    private String generateNegatedLtlSpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
-        // Template 6 (persistence): G(IF→FG(THEN)) → F(IF & GF(!THEN))
-        String ifPart = buildConditionGroup(spec.getIfConditions(), deviceSmvMap);
-        String thenPart = buildConditionGroup(spec.getThenConditions(), deviceSmvMap);
-        return "LTLSPEC F((" + ifPart + ") & G F(!(" + thenPart + ")))";
-    }
-
-    public String build(java.util.List<SpecificationDto> specs,
-                       Map<String, DeviceSmvData> deviceSmvMap, boolean enablePrivacy) {
-        return build(specs, deviceSmvMap, enablePrivacy, SmvGenerationContext.noop());
+        return generateFormula(spec, deviceSmvMap, true);
     }
 
     public String build(java.util.List<SpecificationDto> specs,
@@ -313,44 +263,35 @@ public class SmvSpecificationBuilder {
      * Generate one specification string (deviceSmvMap is required to resolve trust/privacy variables).
      */
     public String generateSpecString(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
+        return generateFormula(spec, deviceSmvMap, false);
+    }
+
+    private String generateFormula(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap,
+                                   boolean negated) {
         validateTemplateShape(spec);
         String templateId = spec.getTemplateId();
-        if (PERSISTENCE_TEMPLATE_ID.equals(templateId)) {
-            return generateLtlSpec(spec, deviceSmvMap);
-        }
-        return generateCtlSpec(spec, deviceSmvMap);
-    }
-
-    private String generateLtlSpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
+        String aPart = PERSISTENCE_TEMPLATE_ID.equals(templateId)
+                ? null : buildConditionGroup(spec.getAConditions(), deviceSmvMap);
         String ifPart = buildConditionGroup(spec.getIfConditions(), deviceSmvMap);
         String thenPart = buildConditionGroup(spec.getThenConditions(), deviceSmvMap);
 
-        return "LTLSPEC G((" + ifPart + ") -> F G(" + thenPart + "))";
-    }
-
-    private String generateCtlSpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
-        String templateId = spec.getTemplateId();
-        String aPart = buildConditionGroup(spec.getAConditions(), deviceSmvMap);
-        String ifPart = buildConditionGroup(spec.getIfConditions(), deviceSmvMap);
-        String thenPart = buildConditionGroup(spec.getThenConditions(), deviceSmvMap);
-
-        switch (templateId) {
-            case "1": // always: AG(A)
-                return "CTLSPEC AG(" + aPart + ")";
-            case "2": // eventually
-                return "CTLSPEC AF(" + aPart + ")";
-            case "3": // never
-                return "CTLSPEC AG !(" + aPart + ")";
-            case "4": // immediate
-                return "CTLSPEC AG((" + ifPart + ") -> AX(" + thenPart + "))";
-            case "5": // response
-                return "CTLSPEC AG((" + ifPart + ") -> AF(" + thenPart + "))";
-            case "7": // safety: untrusted -> !A
-                return buildSafetySpec(spec, deviceSmvMap);
-            default:
-                throw new InvalidConditionException("unsupported templateId '" + templateId
-                        + "'; allowed values are 1, 2, 3, 4, 5, 6, 7");
-        }
+        return switch (templateId) {
+            case "1" -> negated ? "CTLSPEC EF(!(" + aPart + "))" : "CTLSPEC AG(" + aPart + ")";
+            case "2" -> negated ? "CTLSPEC EG(!(" + aPart + "))" : "CTLSPEC AF(" + aPart + ")";
+            case "3" -> negated ? "CTLSPEC EF(" + aPart + ")" : "CTLSPEC AG !(" + aPart + ")";
+            case "4" -> negated
+                    ? "CTLSPEC EF((" + ifPart + ") & EX(!(" + thenPart + ")))"
+                    : "CTLSPEC AG((" + ifPart + ") -> AX(" + thenPart + "))";
+            case "5" -> negated
+                    ? "CTLSPEC EF((" + ifPart + ") & EG(!(" + thenPart + ")))"
+                    : "CTLSPEC AG((" + ifPart + ") -> AF(" + thenPart + "))";
+            case PERSISTENCE_TEMPLATE_ID -> negated
+                    ? "LTLSPEC F((" + ifPart + ") & G F(!(" + thenPart + ")))"
+                    : "LTLSPEC G((" + ifPart + ") -> F G(" + thenPart + "))";
+            case "7" -> (negated ? "CTLSPEC EF(" : "CTLSPEC AG !(") + buildSafetyBody(spec, deviceSmvMap) + ")";
+            default -> throw new InvalidConditionException("unsupported templateId '" + templateId
+                    + "'; allowed values are 1, 2, 3, 4, 5, 6, 7");
+        };
     }
 
     private String genConditionSpec(SpecConditionDto cond, Map<String, DeviceSmvData> deviceSmvMap) {
@@ -618,10 +559,7 @@ public class SmvSpecificationBuilder {
             return List.of();
         }
         if ("in".equals(relation) || "not in".equals(relation)) {
-            return Arrays.stream(value.split("[,;|]"))
-                    .map(String::trim)
-                    .filter(v -> !v.isEmpty())
-                    .collect(Collectors.toList());
+            return SmvRelationUtils.splitRuleValues(value);
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? List.of() : List.of(trimmed);
@@ -744,11 +682,6 @@ public class SmvSpecificationBuilder {
             }
         }
         return null;
-    }
-
-    private String buildSafetySpec(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
-        String body = buildSafetyBody(spec, deviceSmvMap);
-        return "CTLSPEC AG !(" + body + ")";
     }
 
     private String buildSafetyBody(SpecificationDto spec, Map<String, DeviceSmvData> deviceSmvMap) {
@@ -930,7 +863,7 @@ public class SmvSpecificationBuilder {
 
         String mode = resolveModeName(smv, key, cond.getDeviceId());
         List<String> values = ("in".equals(relation) || "not in".equals(relation))
-                ? splitValues(normalizedValue)
+                ? SmvRelationUtils.splitRuleValues(normalizedValue)
                 : List.of(normalizedValue);
         if (values.isEmpty()) {
             throw new InvalidConditionException("empty property value list for device " + cond.getDeviceId());
@@ -969,7 +902,7 @@ public class SmvSpecificationBuilder {
             return null;
         }
         if ("in".equals(relation) || "not in".equals(relation)) {
-            return splitValues(value).stream()
+            return SmvRelationUtils.splitRuleValues(value).stream()
                     .map(item -> item.toLowerCase(Locale.ROOT))
                     .collect(Collectors.joining(","));
         }
@@ -1003,7 +936,7 @@ public class SmvSpecificationBuilder {
         String value = cond.getValue();
         if (value != null) {
             List<String> candidates = "in".equals(normalized) || "not in".equals(normalized)
-                    ? splitValues(value) : List.of(value);
+                    ? SmvRelationUtils.splitRuleValues(value) : List.of(value);
             for (String candidate : candidates) {
                 if (!ManifestConditionSemantics.matchesLiteral(
                         candidate, ManifestConditionSemantics.API_SIGNAL_LITERALS)) {
@@ -1018,7 +951,7 @@ public class SmvSpecificationBuilder {
 
     private String buildRelationExpr(String left, String relation, String value) {
         if ("in".equals(relation) || "not in".equals(relation)) {
-            List<String> values = splitValues(value);
+            List<String> values = SmvRelationUtils.splitRuleValues(value);
             if (values.isEmpty()) {
                 throw new InvalidConditionException("empty value list for '" + relation + "' relation on " + left);
             }
@@ -1031,18 +964,10 @@ public class SmvSpecificationBuilder {
         return left + relation + value;
     }
 
-    private List<String> splitValues(String value) {
-        if (value == null) return List.of();
-        return Arrays.stream(value.split("[,;|]"))
-                .map(String::trim)
-                .filter(v -> !v.isEmpty())
-                .collect(Collectors.toList());
-    }
-
     private String cleanEnumValueByRelation(String normalizedRelation, String value) {
         if (value == null) return null;
         if ("in".equals(normalizedRelation) || "not in".equals(normalizedRelation)) {
-            return splitValues(value).stream()
+            return SmvRelationUtils.splitRuleValues(value).stream()
                     .map(this::cleanEnumLiteral)
                     .collect(Collectors.joining(","));
         }

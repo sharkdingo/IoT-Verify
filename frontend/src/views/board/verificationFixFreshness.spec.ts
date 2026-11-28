@@ -4,11 +4,12 @@ import { computed, ref } from 'vue'
 import { transpileModule, ScriptTarget } from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { compareModelSnapshot } from '@/utils/modelComparison'
-import type { RunBoardComparison } from '@/types/modelSemantics'
+import { getVerificationRepairRunBlock, getVerificationRepairTraceBlock } from '@/utils/verificationRepair'
+import type { ModelRunSnapshot, RunBoardComparison } from '@/types/modelSemantics'
 import i18n from '@/assets/i18n'
 
 const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
-const resultStart = board.indexOf('const rejectedVerificationRepairTraceIds =')
+const resultStart = board.indexOf('const verificationRepairBlocks =')
 const resultEnd = board.indexOf('const cancelAsyncVerification =', resultStart)
 const historyStart = board.indexOf('const openFixForVerificationTrace =')
 const historyEnd = board.indexOf('/**', historyStart)
@@ -17,12 +18,16 @@ if ([resultStart, resultEnd, historyStart, historyEnd].some(index => index < 0))
 }
 const createAdmission = new Function('computed', 'ref', 'verificationResultStale', 'verificationResult',
   'verificationBoardComparison', 'loadingCurrentBoardModelFingerprints', 'hasPersistedVerificationTrace',
-  'openFixDialog', 't', 'verificationRuns', 'currentBoardModelFingerprints', 'compareModelSnapshot',
-  'notifyBlocked', 'closeHistoryPanel', 'showFixDialog', 'fixTraceId', 'refreshCurrentBoardModelFingerprints',
+  'openFixDialog', 't', 'verificationRuns', 'compareRunToCurrentBoard',
+  'getVerificationRepairRunBlock', 'getVerificationRepairTraceBlock',
+  'closeHistoryPanel', 'showFixDialog', 'fixTraceId', 'refreshCurrentBoardModelFingerprints',
   'boardLifecycleDisposed', 'currentAuthUserId', 'boardOwnerUserId',
   transpileModule(`${board.slice(resultStart, resultEnd)}
     ${board.slice(historyStart, historyEnd)}
-    return { blockedReason: verificationFixBlockedReason, canFix: canFixVerificationResultTrace,
+    const localizeBlock = key => key == null ? null : t(key)
+    return { blockedReason: computed(() => localizeBlock(verificationRunRepairBlock.value)),
+      traceBlockReason: trace => localizeBlock(verificationResultTraceRepairBlock(trace)),
+      canFix: canFixVerificationResultTrace,
       needsReverify: verificationNeedsReverify, openResult: openFixForVerificationResultTrace,
       openHistory: openFixForVerificationTrace, rejectEvidence: handleFixModelSemanticsChanged }`, {
     compilerOptions: { target: ScriptTarget.ES2022 }
@@ -42,12 +47,19 @@ const createState = () => {
   const fixTraceId = ref(trace.id)
   const refresh = vi.fn()
   const currentUserId = ref(10)
-  const result = ref({ traces: [trace] })
+  const result = ref({ traces: [trace], historyPersistence: { status: 'SAVED', runId: 3 } })
   const fingerprints = ref<typeof currentModels | null>(currentModels)
-  const runs = ref([{ id: 3, dataAvailable: true, modelSnapshot: { modelFingerprint: 'a'.repeat(64), modelSemanticsVersion: 1 } }])
+  const modelSnapshot: ModelRunSnapshot = {
+    capturedAt: '2026-11-27T00:00:00', deviceCount: 1, ruleCount: 1, specificationCount: 1,
+    environmentVariableCount: 0, deviceTemplateCount: 1, templatesFrozen: true,
+    modelFingerprint: currentModels.verification, modelSemanticsVersion: currentModels.modelSemanticsVersion
+  }
+  const runs = ref([{ id: 3, dataAvailable: true, modelSnapshot }])
   const state = createAdmission(computed, ref, stale, result, comparison, loading, persisted, open,
-    (key: string) => i18n.global.t(key, {}, { locale: 'en' }), runs, fingerprints, compareModelSnapshot,
-    vi.fn(), closeHistory, showFixDialog, fixTraceId, refresh, false, currentUserId, 10)
+    (key: string) => i18n.global.t(key, {}, { locale: 'en' }), runs,
+    (run: { modelSnapshot: ModelRunSnapshot }) => compareModelSnapshot(run.modelSnapshot, fingerprints.value, 'verification'),
+    getVerificationRepairRunBlock, getVerificationRepairTraceBlock,
+    closeHistory, showFixDialog, fixTraceId, refresh, false, currentUserId, 10)
   return { ...state, comparison, stale, loading, persisted, open, closeHistory, runs, fingerprints,
     showFixDialog, fixTraceId, refresh, result, currentUserId }
 }
@@ -130,12 +142,13 @@ describe('verification Fix requires current-model evidence', () => {
     state.showFixDialog.value = false
     expect(state.refresh).toHaveBeenCalledOnce()
     expect(state.needsReverify.value).toBe(true)
-    expect(state.blockedReason.value).toContain('modeling version')
+    expect(state.blockedReason.value).toBeNull()
+    expect(state.traceBlockReason(trace)).toContain('modeling version')
     state.openResult(trace)
     state.openHistory(trace)
     expect(state.open).not.toHaveBeenCalled()
 
-    state.result.value = { traces: [otherTrace] }
+    state.result.value.traces = [otherTrace]
     expect(state.needsReverify.value).toBe(false)
     state.openResult(otherTrace)
     expect(state.open).toHaveBeenCalledExactlyOnceWith(otherTrace.id, otherTrace.violatedSpecId, otherTrace.violatedSpec.name)

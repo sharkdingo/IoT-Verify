@@ -28,6 +28,17 @@ public final class EnvironmentDomainUtils {
         return null;
     }
 
+    /** Selects the declared default before callers normalize it for their own boundary. */
+    public static String rawDefaultValue(DeviceManifest.InternalVariable variable) {
+        if (variable == null) {
+            return null;
+        }
+        if (hasValues(variable)) {
+            return variable.getValues().get(0);
+        }
+        return hasBounds(variable) ? String.valueOf(variable.getLowerBound()) : null;
+    }
+
     /** Returns a user-facing semantic mismatch, or {@code null} when domains are equivalent. */
     public static String incompatibility(DeviceManifest.InternalVariable left,
                                          DeviceManifest.InternalVariable right) {

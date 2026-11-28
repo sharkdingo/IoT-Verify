@@ -37,16 +37,4 @@ public class DeviceTemplateMapper {
         dto.setManifest(manifest);
         return dto;
     }
-
-    public DeviceTemplatePo toEntity(DeviceTemplateDto dto, Long userId) {
-        if (dto == null) {
-            return null;
-        }
-        return DeviceTemplatePo.builder()
-                .userId(userId)
-                .name(dto.getName())
-                .manifestJson(JsonUtils.toJson(dto.getManifest()))
-                .defaultTemplate(Boolean.TRUE.equals(dto.getDefaultTemplate()))
-                .build();
-    }
 }

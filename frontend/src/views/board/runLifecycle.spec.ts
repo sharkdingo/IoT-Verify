@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import ts from 'typescript'
 import { computed, effectScope, h, nextTick, reactive, ref, watch } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
+import { AxiosError, isAxiosError } from 'axios'
 import { describe, expect, it, vi } from 'vitest'
 import type { BoardModelFingerprints, ModelRunSnapshot } from '@/types/modelSemantics'
 import { compareModelSnapshot } from '@/utils/modelComparison'
@@ -11,7 +12,9 @@ import { errorDetails, technicalErrorLines } from '@/utils/userMessage'
 import { openModalDepth, registerModalSurface } from '@/composables/useBodyScrollLock'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { classifyTrackedFuzzRunError, FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES } from './fuzzingRecovery'
 import { chooseRunPresentation, foregroundRunBlock, type BoardWorkflowPanel } from './runPresentation'
+import { isSameBoardRunTarget } from './runDeepLink'
 import { countResponseTriggerWarnings, getVerificationOutcome } from './verificationResult'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
@@ -25,11 +28,14 @@ const bind = (name: string, ports: Record<string, unknown>) => {
     ports.isWatchedTaskCancelled ??= bind('isWatchedTaskCancelled', ports)
     ports.ensureActiveWatchedTaskPoll ??= bind('ensureActiveWatchedTaskPoll', ports)
     ports.readWatchedTaskStatus ??= bind('readWatchedTaskStatus', ports)
+    ports.pollWatchedTask ??= bind('pollWatchedTask', ports)
     ports.isAsyncTaskCancelledError ??= (error: unknown) =>
       typeof error === 'object' && error !== null && 'name' in error && error.name === 'AsyncTaskCancelledError'
   }
+  if (name === 'pollAsyncFuzzing') ports.fuzzingWatchedTask ??= ref(null)
   if (name === 'notifyTaskCancellationResult') {
     ports.hasVisibleCancelledTaskRow ??= bind('hasVisibleCancelledTaskRow', ports)
+    ports.cancellationTaskLabel ??= bind('cancellationTaskLabel', ports)
   }
   if (name === 'hasVisibleCancelledTaskRow') {
     ports.hasCancelledTaskRow ??= bind('hasCancelledTaskRow', ports)
@@ -57,11 +63,17 @@ const bindWorkflowPanel = (ports: Record<string, any>) => {
 
 const bindCancellation = (suffix: string, ports: Record<string, any>) => {
   ports.computed ??= computed
+  ports.captureBoardRunOwner ??= () => () => !ports.boardLifecycleDisposed
+  ports.showHistoryPanel ??= ref(false)
+  ports.activeHistoryLayer ??= ref('results')
+  ports.tracksRun ??= () => false
+  ports.loadTaskInbox ??= vi.fn()
+  ports.isActiveTaskStatus ??= (status: string) => status === 'RUNNING' || status === 'PENDING'
   ports.pendingTaskActionKeys = ref(new Set<string>())
   for (const kind of ['verification', 'simulation', 'fuzzing']) ports[`${kind}Tasks`] ??= ref([])
   for (const name of ['taskActionKey', 'withTaskActionLock', `watched${suffix}TaskIds`, 'watchedTaskId',
-    'isWatchedTaskCancelled', 'applyTaskCancellationReceipt',
-    'isWatchedTaskCancellationPending', `cancelling${suffix}Task`, 'cancelTaskFromProgress', `cancelWatched${suffix}`]) {
+    'isWatchedTaskCancelled', 'applyTaskCancellationStatus', 'hasCancelledTaskRow', 'isTaskCancellationKnown',
+    'isWatchedTaskCancellationPending', `cancelling${suffix}Task`, 'cancelTaskFromProgress', 'cancelBoardTask']) {
     ports[name] = bind(name, ports)
   }
   return bind(`cancelAsync${suffix}`, ports)
@@ -73,16 +85,22 @@ const bindRun = (name: string, ports: Record<string, any>) => {
   ports.isCurrentBoardAuthScope ??= (epoch: number) => epoch === ports.boardAuthScopeEpoch && !ports.boardLifecycleDisposed
   ports.captureBoardRunOwner = bind('captureBoardRunOwner', ports)
   ports.openModalDepth ??= ref(0)
-  ports.isModelPlaybackActive ??= computed(() => !!(ports.traceAnimationState?.value.visible
-    || ports.simulationAnimationState?.value.visible))
-  Object.assign(ports, { chooseRunPresentation, foregroundRunBlock })
+  ports.isModelPlaybackActive ??= ref(false)
+  for (const kind of ['verification', 'simulation']) {
+    ports[`${kind}CancelRequested`] ??= ref(false)
+    ports[`${kind}Error`] ??= ref(null)
+  }
+  Object.assign(ports, { chooseRunPresentation, foregroundRunBlock, isAxiosError,
+    RUN_RESPONSE_INCOMPLETE_CODE: 'RUN_RESPONSE_INCOMPLETE', FUZZ_RESPONSE_INCOMPLETE_CODE: 'FUZZ_RESPONSE_INCOMPLETE' })
   ports.historyDetailRequests ??= createPagedRequestCoordinator()
   ports.historyDetailRequests.hasPendingReplace ??= () => false
   bindWorkflowPanel(ports)
   ports.hasVisibleCancelledTaskRow ??= bind('hasVisibleCancelledTaskRow', ports)
   ports.notifyObservedTaskCancellation ??= bind('notifyObservedTaskCancellation', ports)
   for (const name of ['automaticRunPresentationBlock', 'automaticRunPresentation', 'completeRunPresentation',
-    'deliverCompletedFuzzingRun', 'deliverSimulationRunResult', 'deliverVerificationRunResult']) ports[name] = bind(name, ports)
+    'offerDeferredRunNotice', 'deliverCompletedFuzzingRun', 'deliverSimulationRunResult', 'deliverVerificationRunResult',
+    'submitBackgroundTask', 'taskProgressFromSubmission', 'formalRunState', 'showFormalRunFailure',
+    'finishFormalRun', 'submitFormalRun', 'watchFormalTask']) ports[name] = bind(name, ports)
   return bind(name, ports)
 }
 
@@ -92,6 +110,10 @@ const deferred = () => {
   const promise = new Promise<any>((done, fail) => { resolve = done; reject = fail })
   return { promise, resolve, reject }
 }
+
+const unknownDispatch = (taskKind: 'verification' | 'simulation' | 'fuzz', taskId = 17) => ({
+  response: { status: 503, data: { code: 503, data: { reasonCode: 'TASK_DISPATCH_OUTCOME_UNKNOWN', taskKind, taskId } } }
+})
 
 describe('side-panel opening focus', () => {
   it.each(['control', 'inspector'] as const)('focuses the selected %s tab instead of its collapse hint', async kind => {
@@ -262,6 +284,34 @@ describe('tracking an existing background task', () => {
     expect(ports.upsertFuzzingRunSummary).toHaveBeenCalledWith(result)
   })
 
+  it('rechecks exploration status after the completed result becomes retryable', async () => {
+    const elapsed = deferred()
+    const result = { id: 27, outcome: 'BUDGET_EXHAUSTED' }
+    const read = vi.fn().mockResolvedValue({ id: 17, status: 'COMPLETED', runId: 27 })
+    const load = vi.fn().mockRejectedValueOnce({ response: { status: 503 } }).mockResolvedValueOnce(result)
+    const ports = {
+      pollingEpoch: 0, ASYNC_TASK_MAX_POLLS: 2, throwIfPollingAborted: vi.fn(),
+      fuzzingApi: { getTask: read }, asyncFuzzingTask: ref({ taskId: 17, progress: 0, statusKey: '' }),
+      normalizeTaskProgress: () => 100, taskProgressStatusKey: () => 'app.taskStatusCompleted',
+      upsertFuzzingTaskSummary: vi.fn(), loadFuzzRunSingleFlight: load,
+      clearFuzzRunRecoveryState: vi.fn(), summarizeFuzzingRun: (run: unknown) => run,
+      upsertFuzzingRunSummary: vi.fn(), classifyTrackedFuzzRunError, FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES,
+      scheduleFuzzRunRecovery: () => 2_000, waitForPollingDelay: vi.fn(() => elapsed.promise),
+      waitForNextPoll: vi.fn()
+    }
+    const polling = bind('pollAsyncFuzzing', ports)(17)
+    await flushPromises()
+    expect(ports.asyncFuzzingTask.value.statusKey).toBe('app.fuzzResultRecoveryPending')
+    expect(ports.waitForPollingDelay).toHaveBeenCalledExactlyOnceWith(2_000, 0)
+    expect(read).toHaveBeenCalledOnce()
+    expect(load).toHaveBeenCalledExactlyOnceWith(17, 27)
+
+    elapsed.resolve()
+    await expect(polling).resolves.toBe(result)
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(ports.upsertFuzzingRunSummary).toHaveBeenCalledExactlyOnceWith(result)
+  })
+
   it.each([
     ['verification', 'Verification', 'boardApi'],
     ['simulation', 'Simulation', 'simulationApi'],
@@ -417,8 +467,9 @@ describe('tracking an existing background task', () => {
     const ports = { t: (key: string) => key, notifyInfo: vi.fn(), notifyBlocked: vi.fn(),
       activeHistoryLayer: ref('tasks'),
       showResultDialog: ref(true), verificationResult: ref({ historyPersistence: { status: 'SAVED', runId: 7 } }),
-      simulationAnimationState: ref({ visible: true }),
-      lastSimulationResult: ref({ historyPersistence: { status: 'SAVED', runId: 17 } }),
+      simulationPlaybackResult: ref<{ historyPersistence: { status: string; runId: number } } | null>(
+        { historyPersistence: { status: 'SAVED', runId: 17 } }
+      ),
       simulationTasks: ref([{ id: 7, simulationTraceId: 17 }]) }
     bindWorkflowPanel(ports)
     const notify = bind('notifyTaskCancellationResult', ports)
@@ -427,37 +478,33 @@ describe('tracking an existing background task', () => {
     notify(kind, { taskId: 8, cancellationOutcome: 'ALREADY_COMPLETED' })
     expect(ports.notifyBlocked).toHaveBeenCalledOnce()
     ports.showResultDialog.value = false
-    ports.simulationAnimationState.value.visible = false
+    ports.simulationPlaybackResult.value = null
     notify(kind, { taskId: 7, cancellationOutcome: 'ALREADY_COMPLETED' })
     expect(ports.notifyBlocked).toHaveBeenCalledTimes(2)
   })
 })
 
 describe('run navigation leaves playback', () => {
-  it.each(['counterexample', 'simulation'] as const)('closes %s playback before restoring a result without clearing the new address', async kind => {
+  it('closes playback before restoring a result without clearing the new address', async () => {
     const target = { kind: 'verification', runId: 19 }
     const ports: Record<string, any> = {
-      deepLinkLoadRequests: { begin: () => 1 }, appliedDeepLinkTarget: null,
-      traceAnimationState: ref({ visible: kind === 'counterexample' }),
-      simulationAnimationState: ref({ visible: kind === 'simulation' }),
-      highlightedTrace: ref({ states: [{}] }), activeFuzzingFinding: ref({ id: 1 }),
-      stopTraceAnimation: vi.fn(), deactivatePlaybackScene: vi.fn(), resetPlaybackTerminal: vi.fn(),
+      appliedDeepLinkTarget: null, deepLinkTarget: ref(target), captureBoardRunOwner: () => () => true,
+      historyDetailRequests: createPagedRequestCoordinator(),
+      activePlayback: ref({ kind: 'counterexample' }),
+      stopPlayback: vi.fn(), resetPlaybackViewport: vi.fn(),
       clearRunDeepLink: vi.fn(), closeResultSurfaces: vi.fn(), loadDeepLinkTarget: vi.fn(),
       pendingHistoryRunTarget: null
     }
-    for (const name of ['closeTraceAnimation', 'closeSimulationTimeline', 'closePlaybackForNavigation', 'applyDeepLinkTarget']) {
-      if (name === 'closePlaybackForNavigation' && !setup.includes(`const ${name} =`)) continue
+    for (const name of ['closePlayback', 'applyDeepLinkTarget']) {
       ports[name] = bind(name, ports)
     }
     await ports.applyDeepLinkTarget(target)
-    expect(ports.traceAnimationState.value.visible).toBe(false)
-    expect(ports.simulationAnimationState.value.visible).toBe(false)
-    expect(ports.highlightedTrace.value).toBeNull()
-    expect(ports.deactivatePlaybackScene).toHaveBeenCalledOnce()
-    expect(ports.resetPlaybackTerminal).toHaveBeenCalledOnce()
+    expect(ports.activePlayback.value).toBeNull()
+    expect(ports.stopPlayback).toHaveBeenCalledOnce()
+    expect(ports.resetPlaybackViewport).toHaveBeenCalledOnce()
     expect(ports.clearRunDeepLink).not.toHaveBeenCalled()
     expect(ports.appliedDeepLinkTarget).toEqual(target)
-    expect(ports.loadDeepLinkTarget).toHaveBeenCalledWith(target, { requestEpoch: 1 })
+    expect(ports.loadDeepLinkTarget).toHaveBeenCalledWith(target, expect.any(Function), undefined)
   })
 })
 
@@ -601,6 +648,8 @@ describe('run failures during playback', () => {
     ports.formatRunFailure = bind('formatRunFailure', ports)
     ports.runFailureTitle = bind('runFailureTitle', ports)
     ports.runFailureDiagnostics = bind('runFailureDiagnostics', ports)
+    ports.captureBoardRunOwner = bind('captureBoardRunOwner', ports)
+    ports.offerDeferredRunNotice = bind('offerDeferredRunNotice', ports)
     return { ports, owner, present: bind('presentRunFailure', ports) }
   }
   const failure = () => ({
@@ -775,7 +824,7 @@ describe('exploration launch', () => {
       isFuzzing: ref(false), isSceneReplacementInProgress: ref(false),
       boardAuthScopeEpoch: 3, currentAuthUserId: ref<number | null>(1),
       isCurrentBoardAuthScope: (epoch: number) => epoch === 3 && !ports.boardLifecycleDisposed,
-      waitForPendingFixRefresh: vi.fn(), waitForPendingBoardMutations: vi.fn(),
+      waitForPendingBoardMutations: vi.fn(),
       ensureBoardDataReady: () => true, nodes: ref([{}]), specifications: ref([{ id: 'spec-1' }]),
       rules: ref([]), assertRulesHaveTriggers: () => true,
       fuzzingWorkloadReady: ref(true), fuzzingContentCommandUnsupported: ref(false),
@@ -792,10 +841,12 @@ describe('exploration launch', () => {
         message: 'Paper domain changed', data: { errors: { paperDomainFingerprint: 'Refresh the domain preview' } }
       } } }) },
       isPollingAbortedError: () => false, isAsyncTaskCancelledError: () => false,
-      errorDetails, hasApiValidationError: null as any, refreshSceneForReconciliation: vi.fn().mockResolvedValue(refreshed),
+      errorDetails, hasApiValidationError: null as any,
+      enqueueBoardMutation: (work: () => Promise<boolean>) => work(),
+      refreshBoardSnapshot: vi.fn().mockResolvedValue(refreshed),
       markVerificationResultStale: vi.fn(), invalidatePaperDomainPreview: vi.fn(),
       validPaperPathLength: () => validPath, schedulePaperDomainPreview: vi.fn(),
-      notifyBlocked: vi.fn(), notifyError: vi.fn(), boardLifecycleDisposed: false,
+      notifyBlocked: vi.fn(), notifyError: vi.fn(), notifyInfo: vi.fn(), boardLifecycleDisposed: false,
       loadTaskInbox: vi.fn().mockResolvedValue(true), t: (key: string) => key
     }
     Object.assign(ports, { computed, technicalErrorLines, fuzzTaskQuotaMessage: () => null,
@@ -937,6 +988,46 @@ describe('exploration launch', () => {
     expect(ports.pollAsyncFuzzing).not.toHaveBeenCalled()
   })
 
+  it('tracks the exploration ID from an unknown dispatch without submitting again or inventing a task row', async () => {
+    const { ports, run } = context(true, false)
+    const pending = deferred()
+    ports.fuzzingApi.startAsync.mockRejectedValueOnce(unknownDispatch('fuzz'))
+    Object.assign(ports, {
+      trackFuzzTask: vi.fn(), upsertFuzzingTaskSummary: vi.fn(), normalizeTaskProgress: () => 0,
+      pollAsyncFuzzing: vi.fn(() => pending.promise)
+    })
+
+    const running = run()
+    await vi.waitFor(() => expect(ports.pollAsyncFuzzing).toHaveBeenCalledExactlyOnceWith(17))
+    expect(ports.asyncFuzzingTask.value).toMatchObject({ taskId: 17, statusKey: 'app.taskDispatchChecking' })
+    expect(ports.upsertFuzzingTaskSummary).not.toHaveBeenCalled()
+    expect(ports.trackFuzzTask).toHaveBeenCalledExactlyOnceWith(17)
+    expect(await run()).toBe(false)
+    expect(ports.fuzzingApi.startAsync).toHaveBeenCalledOnce()
+
+    pending.reject(Object.assign(new Error('Task missing'), { code: 'TASK_STATUS_GONE' }))
+    await expect(running).resolves.toBe(false)
+    expect(ports.notifyInfo).toHaveBeenCalledWith('app.taskNoLongerAvailable')
+    expect(ports.fuzzingError.value).toBeNull()
+  })
+
+  it.each([
+    ['a lost response', new AxiosError('Connection lost', 'ERR_NETWORK')],
+    ['an ID from another kind', unknownDispatch('verification')]
+  ])('reports %s without polling a guessed task', async (_case, error) => {
+    const { ports, run } = context(true, false)
+    ports.fuzzingApi.startAsync.mockRejectedValueOnce(error)
+    ports.pollAsyncFuzzing = vi.fn()
+
+    expect(await run()).toBe(false)
+
+    expect(ports.fuzzingApi.startAsync).toHaveBeenCalledOnce()
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.taskSubmissionUnconfirmed')
+    expect(ports.loadTaskInbox).toHaveBeenCalledOnce()
+    expect(ports.pollAsyncFuzzing).not.toHaveBeenCalled()
+    expect(ports.fuzzingError.value).toBeNull()
+  })
+
   it('keeps the exploration notification storage key tied to the mounted board owner', () => {
     const storageKey = bind('fuzzNotificationStorageKey', {
       boardOwnerUserId: 1, currentUser: ref({ userId: 2 }), fuzzNotificationStorageKeyForUser: (id: number) => `fuzz-${id}`
@@ -978,17 +1069,10 @@ describe('validated result presentation', () => {
     const generationIssues = [{ issueType: 'RULE_DISABLED', itemLabel: 'Rule 7', reasonCode: 'RULE_UNRESOLVABLE_COMMAND_ACTION', reason: 'Original diagnostic' }]
     const result = { generationIssues, disabledRuleCount: 0, skippedSpecCount: 2, checkLogs: ['[rule-disabled]'] }
     expect(bind('getGenerationIssues', {})(result)).toBe(generationIssues)
+    expect(bind('getSimulationDisabledRuleCount', {})({ disabledRuleCount: 0, logs: ['[rule-disabled]'] })).toBe(0)
     expect(bind('getGenerationWarningCounts', {})(result)).toEqual({ disabledRuleCount: 0, skippedSpecCount: 2, total: 2 })
     expect(bind('getGenerationIssues', {})(null)).toEqual([])
     expect(bind('getGenerationWarningCounts', {})(null)).toEqual({ disabledRuleCount: 0, skippedSpecCount: 0, total: 0 })
-  })
-
-  it('reads actual and requested transition counts independently of trace length', () => {
-    const result = { steps: 3, requestedSteps: 20, states: [{}], disabledRuleCount: 0, logs: ['[rule-disabled]'] }
-    expect(bind('getSimulationActualStepCount', {})(result)).toBe(3)
-    expect(bind('getSimulationRequestedStepCount', {})(result)).toBe(20)
-    expect(bind('getSimulationDisabledRuleCount', {})(result)).toBe(0)
-    expect(bind('getSimulationActualStepCount', {})(null)).toBe(0)
   })
 
   it('retains real failure accounting when stored traces and per-spec results differ', () => {
@@ -1005,13 +1089,11 @@ describe('simulation run ownership', () => {
       const ports = {
         lastSimulationResult: ref({ playbackScene: { nodes: [] },
           historyPersistence: { status, ...(status === 'SAVED' ? { runId: 17 } : {}) } }),
-        savedSimulationStates: ref([{ stateIndex: 0 }]), simulationAnimationState: ref({ visible: false }),
-        playbackPanelOpen: ref(false), highlightedTrace: ref(null), staleDeepLink: ref(true),
-        activatePlaybackScene: vi.fn(), focusCanvasForReplay: vi.fn(),
-        navigateToRunTarget: vi.fn(), clearRunDeepLink: vi.fn(), refreshCurrentBoardModelFingerprints: vi.fn()
+        startPlayback: vi.fn().mockReturnValue(true), staleDeepLink: ref(true),
+        navigateToRunTarget: vi.fn(), clearRunDeepLink: vi.fn()
       }
       bind('openSimulationAnimationFromSavedStates', ports)()
-      expect(ports.simulationAnimationState.value.visible).toBe(true)
+      expect(ports.startPlayback).toHaveBeenCalledExactlyOnceWith({ kind: 'simulation', result: ports.lastSimulationResult.value }, 0)
       if (status === 'SAVED') {
         expect(ports.navigateToRunTarget).toHaveBeenCalledWith({ kind: 'simulation', runId: 17 }, 'push')
         expect(ports.staleDeepLink.value).toBe(false)
@@ -1022,20 +1104,6 @@ describe('simulation run ownership', () => {
       }
     })
 
-  it('derives replay states from the adopted run while hidden and clears them with its owner', () => {
-    const previous = { states: [{ stateIndex: 0 }] }
-    const next = { states: [{ stateIndex: 7 }] }
-    const lastSimulationResult = ref<typeof previous | null>(previous)
-    const savedStates = bind('savedSimulationStates', { computed, lastSimulationResult })
-    expect(savedStates.value).toBe(lastSimulationResult.value!.states)
-    bind('adoptSimulationRunResult', {
-      lastSimulationResult, simulationResultStale: ref(false), semanticSceneChangeCount: 0
-    })(next, 0)
-    expect(savedStates.value).toBe(lastSimulationResult.value!.states)
-    expect(savedStates.value).toEqual(next.states)
-    lastSimulationResult.value = null
-    expect(savedStates.value).toEqual([])
-  })
 })
 
 describe('simulation completion during another replay', () => {
@@ -1052,7 +1120,6 @@ describe('simulation completion during another replay', () => {
       isSimulating: flag(), synchronousVerificationRunning: flag(), isSceneReplacementInProgress: flag(),
       boardAuthScopeEpoch: 3, currentAuthUserId: ref<number | null>(1),
       isCurrentBoardAuthScope: (epoch: number) => owner.current && epoch === 3,
-      waitForPendingFixRefresh: vi.fn().mockResolvedValue(undefined),
       waitForPendingBoardMutations: vi.fn().mockResolvedValue(undefined), ensureBoardDataReady: () => true,
       nodes: ref([{}]), rules: ref([]), assertRulesHaveTriggers: () => true,
       validateSimulationSteps: (value: number) => value, attackConfigurationError: () => '',
@@ -1066,13 +1133,12 @@ describe('simulation completion during another replay', () => {
       simulationResultFromTrace: (value: unknown) => value, summarizeSimulationResult: () => null,
       simulationHistoryRequests: { invalidate: vi.fn() }, simulationRuns: ref([]),
       loadSimulationRuns: vi.fn().mockResolvedValue(undefined),
-      traceAnimationState: ref({ visible: false }), simulationAnimationState: ref({ visible: false }),
+      isModelPlaybackActive: ref(false),
       openModalDepth: ref(0), activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'simulation', view: isAsync ? 'run' : 'settings' }),
       lastSimulationResult, frozenScene, unsavedRunNotifications: new Set<() => void>(),
       adoptSimulationRunResult: vi.fn(), openSimulationAnimationFromSavedStates: vi.fn(),
       notifySimulationOutcome: vi.fn(), notifyAutomaticPlaybackDeferred: vi.fn(), notifyAvailableResult: vi.fn(),
-      ensureHistoricalPlaybackUiAdmission: vi.fn((): boolean =>
-        !ports.traceAnimationState.value.visible && !ports.simulationAnimationState.value.visible),
+      ensureHistoricalPlaybackUiAdmission: vi.fn((): boolean => !ports.isModelPlaybackActive.value),
       closeOtherWorkflowSurfaces: vi.fn(), notifyInfo: vi.fn(), notifyBlocked: vi.fn(), notifyError: vi.fn(),
       isPollingAbortedError: () => false, isCompletedTaskResultUnavailableError: () => false,
       formalOperationBusyMessage: () => '', asyncTaskQuotaMessage: () => '',
@@ -1085,10 +1151,10 @@ describe('simulation completion during another replay', () => {
     })
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
     ports.notifyAutomaticPlaybackDeferred.mockImplementation(bind('notifyAutomaticPlaybackDeferred', ports))
-    const run = bindRun('handleSimulate', ports)
-    const start = () => run({ steps: 1, isAsync, saveToHistory: status !== 'NOT_REQUESTED' })
-    return { previous, result, ports, owner, pending, start,
-      savedStates: bind('savedSimulationStates', { computed, lastSimulationResult }) }
+    const start = bindRun('runSimulation', Object.assign(ports, {
+      simulationForm: { steps: 1, isAsync, saveToHistory: status !== 'NOT_REQUESTED' }
+    }))
+    return { previous, result, ports, owner, pending, start }
   }
 
   it.each([false, true])('opens the completed trajectory without a duplicate toast (async=%s)', async isAsync => {
@@ -1101,6 +1167,21 @@ describe('simulation completion during another replay', () => {
     expect(state.ports.simulationResultStale.value).toBe(true)
     expect(state.ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
     expect(state.ports.notifySimulationOutcome).not.toHaveBeenCalled()
+  })
+
+  it('delivers simulation results through the task named in the unknown dispatch response', async () => {
+    const state = context('SAVED', true)
+    state.ports.simulationApi.simulateAsync.mockRejectedValueOnce(unknownDispatch('simulation'))
+    const completion = state.start()
+    await vi.waitFor(() => expect(state.ports.pollAsyncSimulation).toHaveBeenCalledExactlyOnceWith(17))
+    expect(state.ports.upsertSimulationTaskSummary).not.toHaveBeenCalled()
+    expect(state.ports.asyncSimulationTask.value.taskId).toBe(17)
+
+    state.pending.resolve(state.result)
+    await expect(completion).resolves.toBe(true)
+    expect(state.ports.openSimulationAnimationFromSavedStates).toHaveBeenCalledOnce()
+    expect(state.ports.simulationApi.simulateAsync).toHaveBeenCalledOnce()
+    expect(state.ports.presentRunFailure).not.toHaveBeenCalled()
   })
 
   it('submits a single async simulation after the board mutation queue settles', async () => {
@@ -1126,7 +1207,7 @@ describe('simulation completion during another replay', () => {
     })
     const watching = bindRun('watchSimulationTask', ports)(17)
     if (surface === 'closed') bind('closeWorkflowPanel', ports)('simulation')
-    if (surface === 'replay') ports.simulationAnimationState.value.visible = true
+    if (surface === 'replay') ports.isModelPlaybackActive.value = true
     ports.semanticSceneChangeCount += 1
     state.pending.resolve(state.result)
     await watching
@@ -1178,13 +1259,12 @@ describe('simulation completion during another replay', () => {
       const completion = state.start()
       await vi.waitFor(() => expect(state.ports.simulationApi[status === 'NOT_REQUESTED'
         ? 'simulate' : 'simulateAndSave']).toHaveBeenCalledOnce())
-      state.ports.simulationAnimationState.value.visible = true
+      state.ports.isModelPlaybackActive.value = true
       state.pending.resolve(state.result)
       expect(await completion).toBe(true)
       expect(state.ports.adoptSimulationRunResult).not.toHaveBeenCalled()
       expect(state.ports.openSimulationAnimationFromSavedStates).not.toHaveBeenCalled()
       expect(state.ports.lastSimulationResult.value).toEqual(state.previous)
-      expect(state.savedStates.value).toEqual(state.previous.states)
       expect(state.ports.frozenScene.value).toEqual(state.previous.playbackScene)
       expect(state.ports.presentRunFailure).not.toHaveBeenCalled()
       if (status === 'SAVED') {
@@ -1196,10 +1276,9 @@ describe('simulation completion during another replay', () => {
         const action = state.ports.notifyAvailableResult.mock.calls[0][0].onAction
         expect(action()).toBe(false)
         expect(state.ports.adoptSimulationRunResult).not.toHaveBeenCalled()
-        state.ports.simulationAnimationState.value.visible = false
+        state.ports.isModelPlaybackActive.value = false
         expect(action()).toBe(true)
         expect(state.ports.lastSimulationResult.value).toEqual(state.result)
-        expect(state.savedStates.value).toEqual(state.result.states)
         expect(state.ports.frozenScene.value).toEqual(state.result.playbackScene)
       }
     }
@@ -1209,7 +1288,7 @@ describe('simulation completion during another replay', () => {
     const state = context('SAVED', true)
     const completion = state.start()
     await vi.waitFor(() => expect(state.ports.pollAsyncSimulation).toHaveBeenCalledOnce())
-    state.ports.traceAnimationState.value.visible = true
+    state.ports.isModelPlaybackActive.value = true
     state.pending.resolve(state.result)
     expect(await completion).toBe(true)
     expect(state.ports.adoptSimulationRunResult).not.toHaveBeenCalled()
@@ -1230,7 +1309,7 @@ describe('simulation completion during another replay', () => {
     const completion = state.start()
     await vi.waitFor(() => expect(state.ports.simulationApi.simulate).toHaveBeenCalledOnce())
     state.owner.current = false
-    state.ports.simulationAnimationState.value.visible = true
+    state.ports.isModelPlaybackActive.value = true
     state.pending.resolve(state.result)
     expect(await completion).toBe(false)
     expect(state.ports.notifyAvailableResult).not.toHaveBeenCalled()
@@ -1240,10 +1319,10 @@ describe('simulation completion during another replay', () => {
   it.each(['scope', 'account'])('discards an old notice action when its %s owner is gone', async change => {
     const state = context()
     const completion = state.start()
-    state.ports.simulationAnimationState.value.visible = true
+    state.ports.isModelPlaybackActive.value = true
     state.pending.resolve(state.result)
     await completion
-    state.ports.simulationAnimationState.value.visible = false
+    state.ports.isModelPlaybackActive.value = false
     if (change === 'scope') state.owner.current = false
     else state.ports.currentAuthUserId.value = 2
     expect(state.ports.notifyAvailableResult.mock.calls[0][0].onAction()).toBe(true)
@@ -1285,7 +1364,7 @@ describe('verification completion', () => {
         compareRunToCurrentBoard: () => 'UNCHANGED',
         getGenerationWarningCounts: () => ({ total: 0 }),
         getVerificationOutcome, countResponseTriggerWarnings,
-        isVerificationModelComplete: (result: { modelComplete: boolean }) => result.modelComplete,
+        isRunModelComplete: bind('isRunModelComplete', {}),
         notifyBlocked: vi.fn(), notifySuccess: vi.fn(),
         t: (key: string, values?: { count: number }) => `${key}:${values?.count ?? ''}`
       }
@@ -1307,7 +1386,7 @@ describe('verification completion', () => {
     const ports = {
       compareRunToCurrentBoard: () => 'SEMANTICS_CHANGED',
       getGenerationWarningCounts: () => ({ total: 0 }), getVerificationOutcome,
-      countResponseTriggerWarnings, isVerificationModelComplete: () => true,
+      countResponseTriggerWarnings, isRunModelComplete: bind('isRunModelComplete', {}),
       notifyBlocked: vi.fn(), notifySuccess: vi.fn(), t: (key: string) => key
     }
     bind('notifyVerificationOutcome', ports)({ outcome: 'SATISFIED', modelComplete: true, specResults: [] })
@@ -1326,7 +1405,7 @@ describe('verification completion', () => {
       boardAuthScopeEpoch: 3, currentAuthUserId: ref<number | null>(1),
       isCurrentBoardAuthScope: (epoch: number) => owner.current && epoch === 3,
       synchronousSimulationRunning: flag(), isSceneReplacementInProgress: flag(),
-      waitForPendingFixRefresh: vi.fn().mockResolvedValue(undefined), waitForPendingBoardMutations: vi.fn().mockResolvedValue(undefined),
+      waitForPendingBoardMutations: vi.fn().mockResolvedValue(undefined),
       ensureBoardDataReady: () => true, nodes: { value: [{}] }, specifications: { value: [{}] }, rules: { value: [] },
       assertRulesHaveTriggers: () => true, verificationAttackConfigurationError: { value: null },
       asyncVerificationActive: flag(), verificationCancelRequested: flag(), cancellingVerificationTask: flag(),
@@ -1341,7 +1420,7 @@ describe('verification completion', () => {
       loadCompletedTaskResult: (read: () => Promise<unknown>) => read(),
       buildVerificationResultFromTask: () => result,
       activeWorkflowPanel: ref<BoardWorkflowPanel | null>({ kind: 'verification', view: isAsync ? 'run' : 'settings', handoff: null }),
-      historyDetailRequests: { invalidate: vi.fn() }, deepLinkLoadRequests: { invalidate: vi.fn() },
+      historyDetailRequests: { invalidate: vi.fn() },
       staleDeepLink: ref(true), navigateToRunTarget: vi.fn().mockResolvedValue(undefined), clearRunDeepLink: vi.fn(),
       adoptVerificationRunResult: vi.fn(), refreshCurrentBoardModelFingerprints: vi.fn(),
       isModelPlaybackActive: flag(), openModalDepth: ref(0), notifyVerificationOutcome: vi.fn(),
@@ -1358,7 +1437,7 @@ describe('verification completion', () => {
     ports.adoptVerificationRunResult.mockImplementation(bind('adoptVerificationRunResult', ports))
     ports.notifyAvailableResult.mockImplementation((options: { onClose: () => void }) => vi.fn(() => options.onClose()))
     const verify = bindRun('handleVerify', ports)
-    return { ports, pending, owner, result, start: isAsync
+    return { ports, pending, owner, result, verify, start: isAsync
       ? () => bind('pollAsyncVerification', ports)(17)
       : verify }
   }
@@ -1375,10 +1454,29 @@ describe('verification completion', () => {
     expect(state.ports.refreshCurrentBoardModelFingerprints).toHaveBeenCalledOnce()
     expect(state.ports.navigateToRunTarget).toHaveBeenCalledExactlyOnceWith({ kind: 'verification', runId: 17 }, 'push')
     expect(state.ports.historyDetailRequests.invalidate).toHaveBeenCalledOnce()
-    expect(state.ports.deepLinkLoadRequests.invalidate).toHaveBeenCalledOnce()
     expect(state.ports.staleDeepLink.value).toBe(false)
     expect(state.ports.clearRunDeepLink).not.toHaveBeenCalled()
     expect(state.ports.notifyVerificationOutcome).toHaveBeenCalledWith(state.result, { presenting: true })
+  })
+
+  it('rechecks a verification task using the original submission scene revision', async () => {
+    const state = context('SAVED', true)
+    const reply = deferred()
+    state.ports.verificationForm.isAsync = true
+    const api = Object.assign(state.ports.boardApi, { verifyAsync: vi.fn(() => reply.promise) })
+    const polling = vi.fn(() => state.pending.promise)
+    Object.assign(state.ports, { pollAsyncVerification: polling })
+    const running = state.verify()
+    await vi.waitFor(() => expect(api.verifyAsync).toHaveBeenCalledOnce())
+    state.ports.semanticSceneChangeCount += 1
+    reply.reject(unknownDispatch('verification'))
+
+    await vi.waitFor(() => expect(polling).toHaveBeenCalledExactlyOnceWith(17, 0))
+    expect(state.ports.upsertVerificationTaskSummary).not.toHaveBeenCalled()
+    state.pending.resolve()
+    await expect(running).resolves.toBe(true)
+    expect(api.verifyAsync).toHaveBeenCalledOnce()
+    expect(state.ports.presentRunFailure).not.toHaveBeenCalled()
   })
 
   it('keeps a background asynchronous completion from changing the selected run', async () => {
@@ -1412,7 +1510,7 @@ describe('verification completion', () => {
     state.pending.resolve()
     await Promise.all([first, duplicate])
     expect(verifyAsync).toHaveBeenCalledOnce()
-    expect(pollAsyncVerification).toHaveBeenCalledExactlyOnceWith(17)
+    expect(pollAsyncVerification).toHaveBeenCalledExactlyOnceWith(17, 0)
   })
 
   it('keeps a watched verification out of the foreground after closing progress', async () => {
@@ -1432,7 +1530,7 @@ describe('verification completion', () => {
     expect(ports.loadVerificationRuns).toHaveBeenCalledOnce()
   })
 
-  it('does not restore active progress from a status read overtaken by a cancellation receipt', async () => {
+  it.each(['active progress', 'permanent error'])('does not apply %s from a status read overtaken by a cancellation receipt', async response => {
     const state = context('SAVED', true)
     const previousRead = deferred()
     const cancelResponse = deferred()
@@ -1446,7 +1544,8 @@ describe('verification completion', () => {
       taskProgressStatusKey: (_stage: unknown, status: string) => status === 'CANCELLED'
         ? 'app.taskStatusCancelled' : 'app.taskStatusRunning',
       AsyncTaskCancelledError, isAsyncTaskCancelledError: (error: unknown) => error instanceof AsyncTaskCancelledError,
-      notifyTaskCancellationResult: vi.fn(), waitForNextPoll: vi.fn(), isPermanentPollError: () => false
+      notifyTaskCancellationResult: vi.fn(), waitForNextPoll: vi.fn(),
+      isPermanentPollError: () => response === 'permanent error'
     })
     ports.isVerifying.value = true
     ports.asyncVerificationActive.value = true
@@ -1457,7 +1556,8 @@ describe('verification completion', () => {
     const polling = bind('pollAsyncVerification', ports)(17).catch((error: unknown) => error)
     const cancelling = cancel()
     // The status-read helper resumes first, then the cancel receipt, then the poller's caller.
-    previousRead.resolve({ id: 17, status: 'RUNNING', progress: 31 })
+    if (response === 'active progress') previousRead.resolve({ id: 17, status: 'RUNNING', progress: 31 })
+    else previousRead.reject({ code: 'RUN_RESPONSE_INCOMPLETE' })
     cancelResponse.resolve(receipt)
     await cancelling
 
@@ -1479,13 +1579,14 @@ describe('verification completion', () => {
       boardLifecycleDisposed: false, verificationTasks: ref([{ id: 17, status: 'RUNNING' }]),
       closeHistoryPanel: vi.fn(), loadTaskInbox: vi.fn(), notifyTaskCancellationResult: vi.fn(),
       activeHistoryLayer: ref('tasks'), invalidateTaskInboxRequests: vi.fn(),
-      presentTaskCancellationFailure: vi.fn(), isPermanentPollError: () => false,
+      presentUnconfirmedTaskCancellation: vi.fn(), isPermanentPollError: () => false,
       taskProgressStatusKey: (_stage: unknown, status: string) => status === 'CANCELLED'
         ? 'app.taskStatusCancelled' : 'app.taskStatusRunning',
       AsyncTaskCancelledError, isAsyncTaskCancelledError: (error: unknown) => error instanceof AsyncTaskCancelledError
     })
     ports.boardApi.getTask.mockReturnValue(statusRead.promise)
     ports.boardApi.cancelTask = vi.fn().mockReturnValue(cancelResponse.promise)
+    ports.upsertTaskSummary = bind('upsertTaskSummary', ports)
     ports.upsertVerificationTaskSummary = bind('upsertVerificationTaskSummary', ports)
     ports.pollAsyncVerification = bind('pollAsyncVerification', ports)
     const watching = bindRun('watchVerificationTask', ports)(17)
@@ -1509,7 +1610,7 @@ describe('verification completion', () => {
       expect(ports.notifyInfo).toHaveBeenCalledExactlyOnceWith('app.verificationCancelled')
     }
     expect(ports.notifyTaskCancellationResult).not.toHaveBeenCalled()
-    expect(ports.presentTaskCancellationFailure).not.toHaveBeenCalled()
+    expect(ports.presentUnconfirmedTaskCancellation).not.toHaveBeenCalled()
     expect(ports.asyncVerificationTask.value.statusKey).toBe('app.taskStatusCancelled')
   })
 
@@ -1548,11 +1649,13 @@ describe('verification completion', () => {
     const historical = { ...state.result, historyPersistence: { status: 'SAVED', runId: 9 } }
     const read = deferred()
     const historyDetailRequests = createPagedRequestCoordinator()
+    const target = { kind: 'verification', runId: 9 }
     const ports = Object.assign(state.ports, {
       appliedDeepLinkTarget: null, boardLifecycleDisposed: false, historyDetailRequests,
-      deepLinkLoadRequests: { begin: () => 1, invalidate: vi.fn() },
-      closePlaybackForNavigation: vi.fn(), closeHistoryPanel: vi.fn(),
-      closeResultSurfaces: () => historyDetailRequests.invalidate(), isCurrentDeepLinkLoad: () => true,
+      deepLinkTarget: ref(target), pendingHistoryRunTarget: null,
+      isSameBoardRunTarget,
+      closePlayback: vi.fn(), closeHistoryPanel: vi.fn(),
+      closeResultSurfaces: historyDetailRequests.invalidate,
       buildVerificationResultFromRun: () => historical, shouldLoadVerificationEvidence: () => false
     })
     const getVerificationRun = vi.fn(() => read.promise)
@@ -1563,7 +1666,6 @@ describe('verification completion', () => {
     })
 
     const completion = state.start()
-    const target = { kind: 'verification', runId: 9 }
     const navigation = bind('applyDeepLinkTarget', ports)(target)
     expect(getVerificationRun).toHaveBeenCalledExactlyOnceWith(9)
     state.pending.resolve(state.result)

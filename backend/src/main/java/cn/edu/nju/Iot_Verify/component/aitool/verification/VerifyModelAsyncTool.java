@@ -54,50 +54,23 @@ public class VerifyModelAsyncTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "attackMode", "attackBudget", "attackPoints", "enablePrivacy"));
-            AttackScenarioDto attackScenario = attackScenarioArg(args, true);
-            boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
-
-            VerificationRequestDto request = new VerificationRequestDto();
-            request.setAttackScenario(attackScenario);
-            request.setEnablePrivacy(enablePrivacy);
+            VerificationRequestDto request = verificationRequest(args);
+            AttackScenarioDto attackScenario = request.getAttackScenario();
 
             Long taskId = verificationService.submitVerification(userId, request);
-            if (taskId == null || taskId <= 0) {
-                throw new IllegalStateException("Verification submission returned no usable task id");
-            }
-            try {
-                var task = verificationService.getTask(userId, taskId);
-                if (task == null) {
-                    throw new IllegalStateException("Accepted verification task was not readable");
-                }
-
-                Map<String, Object> response = new java.util.LinkedHashMap<>();
-                response.put("message", "Verification task accepted. Its current status is authoritative; completion is not implied.");
-                response.put("taskAccepted", true);
-                response.put("taskId", taskId);
-                response.put("taskStatus", task.getStatus());
-                response.put("progress", task.getProgress());
-                response.put("isAttack", task.getIsAttack());
-                response.put("attackBudget", task.getAttackBudget());
-                response.put("attackScenario", attackScenario);
-                response.put("enablePrivacy", task.getEnablePrivacy());
-                response.put("modelSnapshot", task.getModelSnapshot());
-                response.put("modelSemantics", task.getModelSemantics());
-                return acceptedAsyncTaskJson(
-                        response, taskId, "verify_task_status");
-            } catch (Exception e) {
-                log.error("Verification task {} was accepted, but its status response is unavailable",
-                        taskId, e);
-                return acceptedAsyncTaskResultUnavailable(taskId, "verify_task_status");
-            }
+            return acceptedAsyncTaskJson(taskId, "Verification", "verify_task_status",
+                    "Verification task accepted. Its current status is authoritative; completion is not implied.",
+                    () -> verificationService.getTask(userId, taskId), (response, task) -> {
+                        response.put("isAttack", task.getIsAttack());
+                        response.put("attackBudget", task.getAttackBudget());
+                        response.put("attackScenario", attackScenario);
+                        response.put("enablePrivacy", task.getEnablePrivacy());
+                        response.put("modelSnapshot", task.getModelSnapshot());
+                        response.put("modelSemantics", task.getModelSemantics());
+                    });
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (AsyncTaskDispatchOutcomeUnknownException e) {

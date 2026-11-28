@@ -6,7 +6,7 @@ import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
-import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationRepairTraceContextProjection;
 import org.springframework.data.projection.SpelAwareProxyProjectionFactory;
 import cn.edu.nju.Iot_Verify.repository.projection.TraceSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.TraceTokenSourceProjection;
@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -36,8 +37,8 @@ class TraceMapperTest {
     private final TraceMapper mapper = new TraceMapper();
     private VerificationTaskPo run;
 
-    private VerificationTraceContextProjection runContext() {
-        return new SpelAwareProxyProjectionFactory().createProjection(VerificationTraceContextProjection.class, run);
+    private VerificationRepairTraceContextProjection runContext() {
+        return new SpelAwareProxyProjectionFactory().createProjection(VerificationRepairTraceContextProjection.class, run);
     }
 
     @Test
@@ -473,7 +474,7 @@ class TraceMapperTest {
         second.setId(2L);
         second.setViolatedSpecId("s2");
         second.setViolatedSpecJson(second.getViolatedSpecJson().replace("s0", "s2"));
-        VerificationTraceContextProjection owner = spy(runContext());
+        var owner = spy(runContext());
 
         var traces = mapper.toDtoList(java.util.List.of(first, second), java.util.Map.of(9L, owner));
 
@@ -483,7 +484,7 @@ class TraceMapperTest {
         verify(owner, times(1)).getModelSemanticsJson();
         verify(owner, times(1)).getGenerationIssuesJson();
         verify(owner, times(1)).getRequestJson();
-        verify(owner, times(1)).getTemplateSnapshotsJson();
+        verify(owner, never()).getTemplateSnapshotsJson();
         assertSame(traces.get(0).getPlaybackScene(), traces.get(1).getPlaybackScene());
     }
 

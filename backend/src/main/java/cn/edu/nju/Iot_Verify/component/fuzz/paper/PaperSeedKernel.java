@@ -59,24 +59,6 @@ public final class PaperSeedKernel {
         return List.copyOf(seeds);
     }
 
-    public List<PaperEvent> materializeInitialState(PaperSeed seed) {
-        Objects.requireNonNull(seed, "seed must not be null");
-        return materializeInitialValues(seed).stream()
-                .filter(value -> value.type() != PaperInitialValue.Type.DEVICE_VARIABLE)
-                .map(value -> value.type() == PaperInitialValue.Type.DEVICE_STATE
-                        ? new PaperEvent(
-                        PaperEvent.Type.DEVICE,
-                        value.targetId(),
-                        value.value(),
-                        1)
-                        : new PaperEvent(
-                        PaperEvent.Type.ENVIRONMENT,
-                        requireEnvironment(value.targetId(), value.property()).name(),
-                        value.value(),
-                        1))
-                .toList();
-    }
-
     public List<PaperInitialValue> materializeInitialValues(PaperSeed seed) {
         Objects.requireNonNull(seed, "seed must not be null");
         validateSeed(seed);
@@ -396,15 +378,6 @@ public final class PaperSeedKernel {
         PaperEnvironmentDomain environment = environmentsByName.get(name);
         if (environment == null) {
             throw new IllegalArgumentException("unknown environment target " + name);
-        }
-        return environment;
-    }
-
-    private PaperEnvironmentDomain requireEnvironment(
-            String targetId, String property) {
-        PaperEnvironmentDomain environment = domain.environment(targetId, property);
-        if (environment == null) {
-            throw new IllegalArgumentException("unknown environment initial-state target");
         }
         return environment;
     }

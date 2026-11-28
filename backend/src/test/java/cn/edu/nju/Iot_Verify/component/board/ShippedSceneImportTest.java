@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,26 +40,27 @@ class ShippedSceneImportTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private PortableSceneRequestParser parser() {
-        BoardBatchRequestParser batchParser = new BoardBatchRequestParser(
-                objectMapper,
-                Validation.buildDefaultValidatorFactory().getValidator(),
-                new DeviceTemplateSchemaValidator(objectMapper));
-        return new PortableSceneRequestParser(new PortableSceneBatchMapper(objectMapper, batchParser));
-    }
-
     private List<Path> scenePaths() throws IOException {
         try (var paths = Files.list(EXAMPLES)) {
             return paths.filter(path -> path.getFileName().toString().endsWith(".json")).sorted().toList();
         }
     }
 
-    /** Uploads the file exactly as the browser does: verbatim, beside the confirmed token. */
-    private JsonNode requestBody(Path scenePath) throws IOException {
-        ObjectNode body = objectMapper.createObjectNode();
-        body.put("impactToken", "confirmed-preview-token");
-        body.set("scene", objectMapper.readTree(Files.readString(scenePath)));
-        return body;
+    private record AdmittedScene(String name, JsonNode source, BoardBatchDto batch) {}
+
+    private void forEachAdmittedScene(List<Path> scenes, Consumer<AdmittedScene> check) throws IOException {
+        try (var validators = Validation.buildDefaultValidatorFactory()) {
+            var batchParser = new BoardBatchRequestParser(
+                    objectMapper, validators.getValidator(), new DeviceTemplateSchemaValidator(objectMapper));
+            var parser = new PortableSceneRequestParser(new PortableSceneBatchMapper(objectMapper, batchParser));
+            for (Path scenePath : scenes) {
+                JsonNode source = objectMapper.readTree(Files.readString(scenePath));
+                ObjectNode body = objectMapper.createObjectNode().put("impactToken", "confirmed-preview-token");
+                // Upload the scene verbatim beside its token, keeping the count witness independent.
+                body.set("scene", source.deepCopy());
+                check.accept(new AdmittedScene(scenePath.getFileName().toString(), source, parser.parse(body)));
+            }
+        }
     }
 
     @Test
@@ -66,10 +68,10 @@ class ShippedSceneImportTest {
         List<Path> scenes = scenePaths();
         assertFalse(scenes.isEmpty(), "No scene files found in " + EXAMPLES.toAbsolutePath());
 
-        for (Path scenePath : scenes) {
-            String name = scenePath.getFileName().toString();
-            BoardBatchDto batch = parser().parse(requestBody(scenePath));
-            JsonNode scene = objectMapper.readTree(Files.readString(scenePath));
+        forEachAdmittedScene(scenes, admitted -> {
+            String name = admitted.name();
+            BoardBatchDto batch = admitted.batch();
+            JsonNode scene = admitted.source();
 
             // Nothing silently lost between the file and the admitted command.
             assertEquals(scene.path("devices").size(), batch.getNodes().size(), name + ": devices");
@@ -80,7 +82,7 @@ class ShippedSceneImportTest {
             assertEquals(scene.path("templates").size(),
                     batch.getTemplateSnapshots().size(), name + ": templateSnapshots");
             assertEquals("confirmed-preview-token", batch.getImpactToken(), name + ": impactToken");
-        }
+        });
     }
 
     /**
@@ -91,9 +93,9 @@ class ShippedSceneImportTest {
     void variableConditionsInShippedScenesKeepTheirVariableSource() throws IOException {
         List<String> checked = new ArrayList<>();
 
-        for (Path scenePath : scenePaths()) {
-            String name = scenePath.getFileName().toString();
-            for (SpecificationDto spec : parser().parse(requestBody(scenePath)).getSpecs()) {
+        forEachAdmittedScene(scenePaths(), admitted -> {
+            String name = admitted.name();
+            for (SpecificationDto spec : admitted.batch().getSpecs()) {
                 List<SpecConditionDto> all = new ArrayList<>();
                 all.addAll(spec.getAConditions());
                 all.addAll(spec.getIfConditions());
@@ -108,7 +110,7 @@ class ShippedSceneImportTest {
                     checked.add(name);
                 }
             }
-        }
+        });
 
         // Without a scene that exercises the field, the loop above asserts nothing.
         assertFalse(checked.isEmpty(),
@@ -125,9 +127,9 @@ class ShippedSceneImportTest {
     void apiRuleSourcesInShippedScenesCarryNoRelationOrValue() throws IOException {
         List<String> checked = new ArrayList<>();
 
-        for (Path scenePath : scenePaths()) {
-            String name = scenePath.getFileName().toString();
-            for (RuleDto rule : parser().parse(requestBody(scenePath)).getRules()) {
+        forEachAdmittedScene(scenePaths(), admitted -> {
+            String name = admitted.name();
+            for (RuleDto rule : admitted.batch().getRules()) {
                 for (RuleDto.Condition condition : rule.getConditions()) {
                     if (!"api".equalsIgnoreCase(condition.getTargetType())) {
                         continue;
@@ -139,7 +141,7 @@ class ShippedSceneImportTest {
                     checked.add(name);
                 }
             }
-        }
+        });
 
         assertFalse(checked.isEmpty(),
                 "No shipped scene has an api rule source, so this test proves nothing.");

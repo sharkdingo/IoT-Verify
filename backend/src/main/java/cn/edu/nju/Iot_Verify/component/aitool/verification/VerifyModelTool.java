@@ -72,20 +72,11 @@ public class VerifyModelTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "attackMode", "attackBudget", "attackPoints", "enablePrivacy"));
-            AttackScenarioDto attackScenario = attackScenarioArg(args, true);
-            boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
-
-            VerificationRequestDto request = new VerificationRequestDto();
-            request.setAttackScenario(attackScenario);
-            request.setEnablePrivacy(enablePrivacy);
+            VerificationRequestDto request = verificationRequest(args);
+            AttackScenarioDto attackScenario = request.getAttackScenario();
 
             VerificationResultDto result = verificationService.verify(userId, request);
 
@@ -138,7 +129,7 @@ public class VerifyModelTool extends AbstractAiTool {
             };
             message = appendHistoryPersistenceNotice(message, result.getHistoryPersistence());
             summary.put("message", message);
-            return successJson(summary, message);
+            return successJson(summary);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

@@ -12,7 +12,10 @@ vi.mock('./http', () => ({
 
 import http from './http'
 import boardApi, { BOARD_RESPONSE_INCOMPLETE_CODE } from './board'
+import fuzzingApi from './fuzzing'
+import simulationApi from './simulation'
 import type { DeviceNode } from '@/types/node'
+import type { RuleForm } from '@/types/rule'
 import type { PortableSceneFile } from '@/types/scene'
 import type { Specification } from '@/types/spec'
 
@@ -20,6 +23,31 @@ const resultEnvelope = (data: unknown) => ({ data: { data } })
 const committedEditHistory = { canUndo: true, canRedo: false, editHistoryRevision: '10:2:0' } as const
 const undoneEditHistory = { canUndo: false, canRedo: true, editHistoryRevision: '10:0:2' } as const
 const emptyEditHistory = { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' } as const
+const savedBoardLayout = {
+  canvasPan: { x: 73, y: 41 }, canvasZoom: 0.65,
+  panels: {
+    control: { collapsed: false, width: 300, activeSection: 'rules' },
+    inspector: { collapsed: true, width: 280, activeSection: 'devices' }
+  }
+}
+
+describe('saved run and task delete receipts', () => {
+  it.each([
+    ['/verify/runs/7', boardApi.deleteVerificationRun],
+    ['/simulate/traces/7', simulationApi.deleteSimulation],
+    ['/fuzz/runs/7', fuzzingApi.deleteRun],
+    ['/verify/tasks/7', boardApi.deleteTask],
+    ['/simulate/tasks/7', simulationApi.deleteTask],
+    ['/fuzz/tasks/7', fuzzingApi.deleteTask]
+  ])('rejects an error envelope returned with HTTP success for %s', async (url, remove) => {
+    vi.mocked(http.delete).mockClear().mockResolvedValueOnce({ data: { code: 503, message: 'Unavailable' } })
+    await expect(remove(7)).rejects.toMatchObject({ code: 'RUN_RESPONSE_INCOMPLETE' })
+    expect(http.delete).toHaveBeenCalledExactlyOnceWith(url)
+
+    vi.mocked(http.delete).mockResolvedValueOnce({ data: { code: 200, message: 'success' } })
+    await expect(remove(7)).resolves.toBeUndefined()
+  })
+})
 
 const device: DeviceNode = {
   id: 'device_1',
@@ -286,11 +314,35 @@ describe('board mutation response contracts', () => {
 
   it('pins a layout save to the initiating session token', async () => {
     const layout = { canvasPan: { x: 73, y: 41 }, canvasZoom: 0.65 }
-    vi.mocked(http.post).mockResolvedValueOnce(resultEnvelope(layout))
-    await expect(boardApi.saveLayout(layout, 'layout-owner-token')).resolves.toEqual(layout)
+    vi.mocked(http.post).mockResolvedValueOnce({ data: { code: 200, data: savedBoardLayout } })
+    await expect(boardApi.saveLayout(layout, 'layout-owner-token')).resolves.toEqual(savedBoardLayout)
     expect(http.post).toHaveBeenCalledExactlyOnceWith('/board/layout', layout, {
       headers: { Authorization: 'Bearer layout-owner-token' }
     })
+  })
+
+  it('rejects an incomplete saved layout instead of returning partial restore data', async () => {
+    vi.mocked(http.get)
+      .mockResolvedValueOnce({ data: { code: 200 } })
+      .mockResolvedValueOnce({ data: { code: 200, data: { ...savedBoardLayout, panels: {} } } })
+      .mockResolvedValueOnce({ data: { code: 200, data: { ...savedBoardLayout, canvasPan: { x: '73', y: 41 } } } })
+      .mockResolvedValueOnce({ data: { code: 200, data: savedBoardLayout } })
+
+    for (let read = 0; read < 3; read++) {
+      await expect(boardApi.getLayout()).rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
+    }
+    await expect(boardApi.getLayout()).resolves.toEqual(savedBoardLayout)
+  })
+
+  it('requires a successful complete receipt for a saved layout mutation', async () => {
+    vi.mocked(http.post)
+      .mockResolvedValueOnce({ data: { code: 503, data: savedBoardLayout } })
+      .mockResolvedValueOnce({ data: { code: 200, data: { ...savedBoardLayout, canvasZoom: 0 } } })
+
+    for (let write = 0; write < 2; write++) {
+      await expect(boardApi.saveLayout(savedBoardLayout, 'layout-owner-token'))
+        .rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
+    }
   })
 
   it('accepts a complete authoritative device-creation result', async () => {
@@ -950,6 +1002,18 @@ describe('board mutation response contracts', () => {
     })
   })
 
+  it('rejects duplicate rule identities in a scene replacement receipt', async () => {
+    vi.mocked(http.post).mockResolvedValue(resultEnvelope({
+      nodes: [device], environmentVariables: [], rules: [deletedRule, { ...deletedRule }],
+      specs: [], createdTemplates: []
+    }))
+
+    await expect(boardApi.importScene({
+      impactToken: 'confirmed-board-impact',
+      scene: portableScene()
+    })).rejects.toThrow(/rules contains duplicate identities/)
+  })
+
   it('validates the authoritative scene-replacement preview', async () => {
     const preview = {
       impactToken: 'current-board-impact',
@@ -1103,8 +1167,7 @@ describe('board mutation response contracts', () => {
       thenConditions: []
     })
 
-    const sentCondition = async (overrides: Record<string, unknown>) => {
-      const spec = specification(overrides)
+    const sentConditions = async (spec: Specification) => {
       vi.mocked(http.post).mockResolvedValue(resultEnvelope({
         operation: 'created',
         affectedItem: spec,
@@ -1113,13 +1176,25 @@ describe('board mutation response contracts', () => {
         ...committedEditHistory
       }))
       await boardApi.addSpec(spec)
-      return (vi.mocked(http.post).mock.calls.at(-1)![1] as any).aConditions[0]
+      return vi.mocked(http.post).mock.calls.at(-1)![1] as Record<
+        'aConditions' | 'ifConditions' | 'thenConditions', unknown[]>
     }
 
-    expect(await sentCondition({ targetType: 'variable', variableSource: 'reported' }))
-      .toMatchObject({ variableSource: 'reported' })
-    expect(await sentCondition({ targetType: 'state', key: 'state', variableSource: 'reported' }))
-      .not.toHaveProperty('variableSource')
+    const variableSpec = specification({ targetType: 'variable', variableSource: 'reported' })
+    expect((await sentConditions(variableSpec)).aConditions[0]).toMatchObject({ variableSource: 'reported' })
+    const stateSpec = specification({ targetType: 'state', key: 'state', variableSource: 'reported' })
+    expect((await sentConditions(stateSpec)).aConditions[0]).not.toHaveProperty('variableSource')
+
+    const variable = variableSpec.aConditions[0]
+    const conditional = await sentConditions({ ...variableSpec, templateId: '5', aConditions: [],
+      ifConditions: [{ ...variable, side: 'if', variableSource: 'environment', relation: 'GTE' }],
+      thenConditions: [{ ...variable, id: 'condition-2', side: 'then', targetType: 'trust',
+        propertyScope: 'variable', value: 'trusted' }]
+    })
+    expect(conditional.ifConditions).toEqual([{ deviceId: 'device_1', targetType: 'variable', key: 'temperature',
+      variableSource: 'environment', relation: '>=', value: '20' }])
+    expect(conditional.thenConditions).toEqual([{ deviceId: 'device_1', targetType: 'trust', key: 'temperature',
+      propertyScope: 'variable', relation: '=', value: 'trusted' }])
   })
 
   it('accepts a stored specification that never chose a source, but rejects an unrecognised one', async () => {
@@ -2003,15 +2078,13 @@ describe('board mutation response contracts', () => {
       environmentChanges: [{
         changeType: 'ADDED',
         name: 'weather',
-        currentValue: { name: 'weather', value: 'sunny' },
-        previousModelTokenSource: 'UNKNOWN',
+        currentValue: { name: 'weather', value: 'sunny', trust: 'trusted', privacy: 'public' },
         currentModelTokenSource: 'UNVERIFIED'
       }]
     }))
 
-    await expect(boardApi.previewDefaultTemplateReset()).rejects.toMatchObject({
-      code: BOARD_RESPONSE_INCOMPLETE_CODE
-    })
+    await expect(boardApi.previewDefaultTemplateReset())
+      .rejects.toThrow(/environmentChanges\[0\].*currentModelTokenSource is invalid/)
   })
 
   it('rejects a committed reset whose final catalog contradicts its changes', async () => {
@@ -2096,6 +2169,21 @@ describe('board mutation response contracts', () => {
     })).rejects.toMatchObject({
       code: BOARD_RESPONSE_INCOMPLETE_CODE
     })
+  })
+
+  it('rejects a similarity batch response that omits a candidate', async () => {
+    const rule: RuleForm = {
+      id: 'rule_candidate', name: 'Motion turns on the light',
+      sources: [{ fromId: 'device_1', fromApi: 'motion', itemType: 'api' }],
+      toId: 'device_1', toApi: 'turn_on'
+    }
+    vi.mocked(http.post).mockResolvedValue(resultEnvelope([{
+      isSimilar: false, isDuplicate: false, requiresReview: false,
+      similarity: 0, reasonCode: 'NO_EXISTING_RULES', reason: 'No rules', message: 'No rules'
+    }]))
+
+    await expect(boardApi.checkRuleSimilarityBatch([rule, { ...rule, id: 'rule_second' }]))
+      .rejects.toMatchObject({ code: BOARD_RESPONSE_INCOMPLETE_CODE })
   })
 
   it('maps the authoritative automatic-fix rules without rewriting wildcard membership operands', async () => {

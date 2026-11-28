@@ -1,40 +1,27 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.TemplateBackedModel;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvModelValidator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvDeviceModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvMainModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWriter;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
-import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
-import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
-import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class NusmvEnvironmentPoolTest {
 
@@ -128,14 +115,14 @@ class NusmvEnvironmentPoolTest {
                 .name("Temperature Sensor")
                 .internalVariables(List.of(temperature))
                 .build();
-        SmvGenerator generator = generatorFor(manifest);
+        TemplateBackedModel fixture = modelFor(Map.of("Temperature Sensor", manifest));
         List<DeviceVerificationDto> rawDevices = List.of(device("sensor_1", "Temperature Sensor"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
 
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "public")),
                 rawMap);
-        SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+        SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                 USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
@@ -169,16 +156,16 @@ class NusmvEnvironmentPoolTest {
                                 .privacy("public").build()))
                 .build();
 
-        SmvGenerator generator = generatorFor(Map.of(
+        TemplateBackedModel fixture = modelFor(Map.of(
                 "Air Conditioner", airConditioner,
                 "Temperature Sensor", sensorDomain));
         List<DeviceVerificationDto> rawDevices = List.of(device("ac_1", "Air Conditioner", "cool"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
 
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "public")),
                 rawMap);
-        SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+        SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                 USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
@@ -209,34 +196,17 @@ class NusmvEnvironmentPoolTest {
      */
     @Test
     void environmentPoolLabelsReachAffectOnlySharedVariables() throws Exception {
-        DeviceManifest.InternalVariable affectOnly = impactNumber("temperature", 15, 35);
-        affectOnly.setTrust("untrusted");
-        affectOnly.setPrivacy("public");
-        DeviceManifest airConditioner = DeviceManifest.builder()
-                .name("Air Conditioner")
-                .modes(List.of("MachineState"))
-                .initState("cool")
-                .impactedVariables(List.of("temperature"))
-                .internalVariables(List.of(affectOnly))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("cool").trust("trusted")
-                                .privacy("public")
-                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
-                                        .variableName("temperature").changeRate("-2").build()))
-                                .build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted")
-                                .privacy("public").build()))
-                .build();
+        DeviceManifest airConditioner = affectOnlyAirConditioner();
 
-        SmvGenerator generator = generatorFor(Map.of("Air Conditioner", airConditioner));
+        TemplateBackedModel fixture = modelFor(Map.of("Air Conditioner", airConditioner));
         List<DeviceVerificationDto> rawDevices = List.of(device("ac_1", "Air Conditioner", "cool"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
 
         // The pool asserts the opposite of the manifest on both dimensions.
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "private")),
                 rawMap);
-        SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+        SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                 USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
@@ -271,38 +241,21 @@ class NusmvEnvironmentPoolTest {
                 .internalVariables(List.of(reader))
                 .build();
 
-        DeviceManifest.InternalVariable affectOnly = impactNumber("temperature", 15, 35);
-        affectOnly.setTrust("untrusted");
-        affectOnly.setPrivacy("public");
-        DeviceManifest airConditioner = DeviceManifest.builder()
-                .name("Air Conditioner")
-                .modes(List.of("MachineState"))
-                .initState("cool")
-                .impactedVariables(List.of("temperature"))
-                .internalVariables(List.of(affectOnly))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("cool").trust("trusted")
-                                .privacy("public")
-                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
-                                        .variableName("temperature").changeRate("-2").build()))
-                                .build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted")
-                                .privacy("public").build()))
-                .build();
+        DeviceManifest airConditioner = affectOnlyAirConditioner();
 
-        SmvGenerator generator = generatorFor(Map.of(
+        TemplateBackedModel fixture = modelFor(Map.of(
                 "Temperature Sensor", thermometer,
                 "Air Conditioner", airConditioner));
         List<DeviceVerificationDto> rawDevices = List.of(
                 device("sensor_1", "Temperature Sensor"),
                 device("ac_1", "Air Conditioner", "cool"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
 
         // Both manifests declare untrusted/public, so trusted/private can only come from the pool.
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "private")),
                 rawMap);
-        SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+        SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                 USER_ID, rawDevices, merged, List.of(), List.of(), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
@@ -347,28 +300,11 @@ class NusmvEnvironmentPoolTest {
      */
     @Test
     void labelSpecificationOverAffectOnlyValueIsEmittedRatherThanSkipped() throws Exception {
-        DeviceManifest.InternalVariable affectOnly = impactNumber("temperature", 15, 35);
-        affectOnly.setTrust("untrusted");
-        affectOnly.setPrivacy("public");
-        DeviceManifest airConditioner = DeviceManifest.builder()
-                .name("Air Conditioner")
-                .modes(List.of("MachineState"))
-                .initState("cool")
-                .impactedVariables(List.of("temperature"))
-                .internalVariables(List.of(affectOnly))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("cool").trust("trusted")
-                                .privacy("public")
-                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
-                                        .variableName("temperature").changeRate("-2").build()))
-                                .build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted")
-                                .privacy("public").build()))
-                .build();
+        DeviceManifest airConditioner = affectOnlyAirConditioner();
 
-        SmvGenerator generator = generatorFor(Map.of("Air Conditioner", airConditioner));
+        TemplateBackedModel fixture = modelFor(Map.of("Air Conditioner", airConditioner));
         List<DeviceVerificationDto> rawDevices = List.of(device("ac_1", "Air Conditioner", "cool"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
         List<BoardEnvironmentVariableDto> merged = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "28", "untrusted", "public")),
                 rawMap);
@@ -388,7 +324,7 @@ class NusmvEnvironmentPoolTest {
         spec.setDevices(List.of());
         spec.setAConditions(List.of(labelOfAffectOnly));
 
-        SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+        SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                 USER_ID, rawDevices, merged, List.of(), List.of(spec), AttackScenarioDto.none(), true,
                 SmvGenerator.GeneratePurpose.VERIFICATION);
 
@@ -423,14 +359,14 @@ class NusmvEnvironmentPoolTest {
                                 .build()))
                         .build()))
                 .build();
-        SmvGenerator generator = generatorFor(Map.of(
+        TemplateBackedModel fixture = modelFor(Map.of(
                 "Air Conditioner", airConditioner,
                 "Temperature Sensor", sensorDomain));
         List<DeviceVerificationDto> devices = List.of(device("ac_1", "Air Conditioner", "cool"));
 
         cn.edu.nju.Iot_Verify.exception.BadRequestException exception = assertThrows(
                 cn.edu.nju.Iot_Verify.exception.BadRequestException.class, () ->
-                generator.generateWithEnvironment(
+                fixture.generator().generateWithEnvironment(
                         USER_ID, devices,
                         List.of(new BoardEnvironmentVariableDto("temperature", "28", "trusted", "public")),
                         List.of(), List.of(), AttackScenarioDto.none(), true,
@@ -449,6 +385,27 @@ class NusmvEnvironmentPoolTest {
                 .naturalChangeRate("0")
                 .trust("trusted")
                 .privacy("public")
+                .build();
+    }
+
+    private static DeviceManifest affectOnlyAirConditioner() {
+        DeviceManifest.InternalVariable affectOnly = impactNumber("temperature", 15, 35);
+        affectOnly.setTrust("untrusted");
+        affectOnly.setPrivacy("public");
+        return DeviceManifest.builder()
+                .name("Air Conditioner")
+                .modes(List.of("MachineState"))
+                .initState("cool")
+                .impactedVariables(List.of("temperature"))
+                .internalVariables(List.of(affectOnly))
+                .workingStates(List.of(
+                        DeviceManifest.WorkingState.builder().name("cool").trust("trusted")
+                                .privacy("public")
+                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
+                                        .variableName("temperature").changeRate("-2").build()))
+                                .build(),
+                        DeviceManifest.WorkingState.builder().name("off").trust("trusted")
+                                .privacy("public").build()))
                 .build();
     }
 
@@ -498,35 +455,7 @@ class NusmvEnvironmentPoolTest {
         return device;
     }
 
-    private static SmvGenerator generatorFor(DeviceManifest manifest) throws Exception {
-        return generatorFor(Map.of("Temperature Sensor", manifest));
-    }
-
-    private static SmvGenerator generatorFor(Map<String, DeviceManifest> manifests) throws Exception {
-        ObjectMapper objectMapper = new ObjectMapper();
-        DeviceTemplateService templateService = mock(DeviceTemplateService.class);
-        when(templateService.findTemplateByName(anyLong(), anyString())).thenAnswer(invocation -> {
-            String name = invocation.getArgument(1, String.class);
-            DeviceManifest manifest = manifests.get(name);
-            if (manifest == null) {
-                return Optional.empty();
-            }
-            return Optional.of(DeviceTemplatePo.builder()
-                    .id(1L)
-                    .userId(USER_ID)
-                    .name(name)
-                    .manifestJson(objectMapper.writeValueAsString(manifest))
-                    .defaultTemplate(true)
-                    .build());
-        });
-        SmvModelValidator validator = new SmvModelValidator();
-        return new SmvGenerator(
-                new DeviceSmvDataFactory(objectMapper, templateService, validator,
-                        new DeviceTemplateSchemaValidator(objectMapper)),
-                new SmvDeviceModuleBuilder(),
-                new SmvRuleCommentWriter(),
-                new SmvMainModuleBuilder(),
-                new SmvSpecificationBuilder(),
-                validator);
+    private static TemplateBackedModel modelFor(Map<String, DeviceManifest> manifests) {
+        return FormalCheckTestSupport.buildTemplateBackedModel(USER_ID, manifests, name -> 1L);
     }
 }

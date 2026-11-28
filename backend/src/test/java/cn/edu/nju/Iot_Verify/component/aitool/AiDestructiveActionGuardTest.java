@@ -23,6 +23,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -41,7 +42,7 @@ class AiDestructiveActionGuardTest {
 
     @BeforeEach
     void setUp() {
-        guard = new AiDestructiveActionGuard(new ObjectMapper());
+        guard = inMemoryActionGuard(new ObjectMapper());
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("session-1");
     }

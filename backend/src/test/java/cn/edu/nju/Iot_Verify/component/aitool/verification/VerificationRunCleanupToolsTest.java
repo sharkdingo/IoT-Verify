@@ -18,11 +18,13 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -43,7 +45,7 @@ class VerificationRunCleanupToolsTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
-        destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
+        destructiveActionGuard = inMemoryActionGuard(objectMapper);
         deleteRunTool = new DeleteVerificationRunTool(
                 verificationService, objectMapper, destructiveActionGuard);
         dismissTool = new DismissVerifyTaskTool(
@@ -99,6 +101,13 @@ class VerificationRunCleanupToolsTest {
         assertTrue(preview.path("countIncludesUnavailableEvidence").asBoolean());
         verify(verificationService, never()).deleteRun(1L, 5L, 3L);
 
+        preview = objectMapper.readTree(deleteRunTool.execute(
+                "{\"runId\":5,\"confirmed\":true,\"impactToken\":\""
+                        + preview.path("impactToken").asText() + "\"}"));
+        assertEquals("preview", preview.path("operation").asText());
+        verify(verificationService, never()).deleteRun(anyLong(), anyLong(), anyLong());
+        verify(verificationService, never()).deleteRun(anyLong(), anyLong());
+
         UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteRunTool.execute(
                 "{\"runId\":5,\"confirmed\":true,\"impactToken\":\""
@@ -144,6 +153,10 @@ class VerificationRunCleanupToolsTest {
 
     @Test
     void dismiss_previewThenConfirmRemovesFailedTaskAndDiagnostics() throws Exception {
+        var schema = dismissTool.getDefinition().parameters();
+        assertEquals(List.of("taskId", "confirmed", "impactToken"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId", "confirmed"), schema.required);
+
         VerificationTaskDto task = VerificationTaskDto.builder()
                 .id(9L)
                 .status("FAILED")
@@ -152,6 +165,11 @@ class VerificationRunCleanupToolsTest {
                 .checkLogs(List.of("model generated", "solver failed"))
                 .build();
         when(verificationService.getTask(1L, 9L)).thenReturn(task);
+
+        JsonNode unexpected = objectMapper.readTree(dismissTool.execute(
+                "{\"taskId\":9,\"confirmed\":false,\"force\":true}"));
+        assertEquals("arguments contains unsupported field(s): force.", unexpected.path("error").asText());
+        verify(verificationService, never()).getTask(1L, 9L);
 
         JsonNode preview = objectMapper.readTree(
                 dismissTool.execute("{\"taskId\":9,\"confirmed\":false}"));

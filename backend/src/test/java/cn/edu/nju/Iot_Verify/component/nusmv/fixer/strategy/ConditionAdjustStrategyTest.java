@@ -60,6 +60,14 @@ class ConditionAdjustStrategyTest {
         strategy = new ConditionAdjustStrategy(smvGenerator, nusmvExecutor, fixConfig);
     }
 
+    private void stubParameterizedSearch() throws IOException {
+        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(),
+                any(), anyBoolean(), any(ParameterizationConfig.class),
+                any(SmvGenerator.TempModelContext.class), anyMap()))
+                .thenReturn(createGenResult());
+    }
+
     private SmvGenerator.GenerateResult createGenResult() throws IOException {
         File tempDir = Files.createTempDirectory("smv-test").toFile();
         File smvFile = new File(tempDir, "test.smv");
@@ -69,6 +77,11 @@ class ConditionAdjustStrategyTest {
 
     private FixContext ctx(List<FaultRuleDto> faultRules, List<RuleDto> allRules,
                             List<SpecificationDto> specs) {
+        return ctx(faultRules, allRules, specs, 20);
+    }
+
+    private FixContext ctx(List<FaultRuleDto> faultRules, List<RuleDto> allRules,
+                           List<SpecificationDto> specs, int maxAttempts) {
         return FixContext.builder()
                 .faultRules(faultRules)
                 .repairRuleIndices(faultRules == null ? List.of()
@@ -81,7 +94,7 @@ class ConditionAdjustStrategyTest {
                 .userId(1L)
                 .attackScenario(AttackScenarioDto.none())
                 .enablePrivacy(false)
-                .maxAttempts(20)
+                .maxAttempts(maxAttempts)
                 .build();
     }
 
@@ -327,25 +340,7 @@ class ConditionAdjustStrategyTest {
 
     @Test
     void tryFix_negatedSpecTrue_provesNoConditionRepairExists() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build(),
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("humidity").relation(">").value("60").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
 
         // Negated spec universally true → no fix
         SpecCheckResult passing = mock(SpecCheckResult.class);
@@ -355,7 +350,7 @@ class ConditionAdjustStrategyTest {
         when(result.getSpecResults()).thenReturn(List.of(passing));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(result);
 
-        FixContext context = ctx(List.of(fault), List.of(rule), List.of(spec));
+        FixContext context = singleRuleContext(twoConditionRule(), 20);
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
 
         assertTrue(outcome.suggestions().isEmpty());
@@ -389,11 +384,7 @@ class ConditionAdjustStrategyTest {
         spec.setTemplateId("1");
 
         // Parameterized model generation
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
 
         // NuSMV returns counterexample: lambda_r0_c0 = TRUE (keep), lambda_r0_c1 = FALSE (remove)
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -496,23 +487,7 @@ class ConditionAdjustStrategyTest {
         // leave the rule with zero conditions. NuSMV treats an empty-condition rule as fail-closed so it
         // "verifies", but RuleDto forbids empty conditions and apply rejects it — so the strategy must
         // NOT return this candidate; it should exclude the config and retry until attempts run out.
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
 
         // lambda_r0_c0 = FALSE → remove the only condition → would empty the rule.
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -524,18 +499,7 @@ class ConditionAdjustStrategyTest {
                 "  -> State: 1.1 <-\n    lambda_r0_c0 = FALSE\n");
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(negatedResult);
 
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(Map.of())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(2)
-                .build();
+        FixContext context = singleRuleContext(oneConditionRule(), 2);
 
         // The empty-rule candidate is rejected (never forward-verified), so no suggestion is returned;
         // the config is excluded and the loop retries until attempts are exhausted.
@@ -552,22 +516,7 @@ class ConditionAdjustStrategyTest {
     void tryFix_onlyRuleEmptyingCandidatesAvoidTheCounterexample_isARejectionNotAnAbsence() throws Exception {
         // The one candidate that avoids the counterexample removes the rule's only condition; the next
         // solve is UNSAT. Candidates existed and were ruled out, which the status must not call "none".
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
         SpecCheckResult failing = mock(SpecCheckResult.class);
         when(failing.isPassed()).thenReturn(false);
         NusmvResult emptying = mock(NusmvResult.class);
@@ -581,7 +530,7 @@ class ConditionAdjustStrategyTest {
         when(exhausted.getSpecResults()).thenReturn(List.of(unsat));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(emptying, exhausted);
 
-        FixContext context = ctx(List.of(fault), List.of(rule), List.of(spec));
+        FixContext context = singleRuleContext(oneConditionRule(), 20);
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
 
         assertTrue(outcome.suggestions().isEmpty());
@@ -591,23 +540,7 @@ class ConditionAdjustStrategyTest {
 
     @Test
     void tryFix_allKept_exhaustsAttemptsAndReturnsNull() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
 
         // NuSMV keeps all conditions (lambda = TRUE for all) — strategy should retry with exclusion
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -620,18 +553,7 @@ class ConditionAdjustStrategyTest {
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(negatedResult);
 
         // Use maxAttempts=2 to verify retry behavior without excessive looping
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(Map.of())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(2)
-                .build();
+        FixContext context = singleRuleContext(oneConditionRule(), 2);
 
         assertTrue(strategy.tryFix(context).suggestions().isEmpty());
         // Verify it retried (2 calls = 2 attempts)
@@ -640,23 +562,7 @@ class ConditionAdjustStrategyTest {
 
     @Test
     void tryFix_jointSolverFailure_endsTheSearchWithoutRepeatingTheIdenticalModel() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
 
         NusmvResult failedResult = mock(NusmvResult.class);
         when(failedResult.isSuccess()).thenReturn(false);
@@ -664,18 +570,7 @@ class ConditionAdjustStrategyTest {
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(failedResult);
 
         // Budget left for two more runs: a failure must not spend it re-running the same model.
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(Map.of())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(3)
-                .build();
+        FixContext context = singleRuleContext(oneConditionRule(), 3);
 
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
         assertTrue(outcome.suggestions().isEmpty());
@@ -707,7 +602,7 @@ class ConditionAdjustStrategyTest {
                 witness("TRUE", "FALSE"), pass,
                 pass);
 
-        FixStrategy.StrategyOutcome outcome = strategy.tryFix(twoConditionCtx(rule, 20));
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(singleRuleContext(rule, 20));
 
         assertEquals(List.of(1), outcome.suggestions().stream()
                 .map(suggestion -> suggestion.getConditionAdjustments().get(0).getConditionIndex())
@@ -727,17 +622,7 @@ class ConditionAdjustStrategyTest {
                         .targetType("variable").relation(">").value("30").build()))
                 .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
                 .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
         // The concurrency cap refusing a permit says nothing about the model, so the same run is retried.
         NusmvResult busy = NusmvResult.busy("NuSMV execution is busy, please retry later");
         SpecCheckResult unsat = mock(SpecCheckResult.class);
@@ -747,10 +632,7 @@ class ConditionAdjustStrategyTest {
         when(conclusive.getSpecResults()).thenReturn(List.of(unsat));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(busy, conclusive);
 
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex())).allRules(List.of(rule)).devices(List.of())
-                .specs(List.of(spec)).deviceSmvMap(Map.of()).violatedSpecIndex(0)
-                .userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(2).build();
+        FixContext context = singleRuleContext(rule, 2);
 
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
         assertTrue(outcome.suggestions().isEmpty());
@@ -766,20 +648,6 @@ class ConditionAdjustStrategyTest {
      */
     @Test
     void tryFix_partialExtraction_neitherExcludesNorRepeatsTheIdenticalRun() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build(),
-                        RuleDto.Condition.builder()
-                                .deviceName("sensor_1").attribute("humidity").relation(">").value("60").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
         ArgumentCaptor<ParameterizationConfig> configCaptor =
                 ArgumentCaptor.forClass(ParameterizationConfig.class);
         when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
@@ -799,18 +667,7 @@ class ConditionAdjustStrategyTest {
                 "  -> State: 1.1 <-\n    lambda_r0_c0 = TRUE\n");
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(partialResult);
 
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(Map.of())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(3)
-                .build();
+        FixContext context = singleRuleContext(twoConditionRule(), 3);
 
         assertTrue(strategy.tryFix(context).suggestions().isEmpty());
         assertNotNull(context.strategySolverFailure("condition"));
@@ -943,7 +800,7 @@ class ConditionAdjustStrategyTest {
                 witness("TRUE", "FALSE"), pass,
                 pass);
 
-        FixStrategy.StrategyOutcome outcome = strategy.tryFix(twoConditionCtx(rule, 20));
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(singleRuleContext(rule, 20));
 
         assertEquals(List.of(0, 1), outcome.suggestions().stream()
                 .map(suggestion -> suggestion.getConditionAdjustments().get(0).getConditionIndex())
@@ -967,11 +824,7 @@ class ConditionAdjustStrategyTest {
     @Test
     void tryFix_attemptBudgetEndingTheSearchLeavesTheListingIncomplete() throws Exception {
         RuleDto rule = twoConditionRule();
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
         when(smvGenerator.generateWithResolvedDeviceModel(
                 anyLong(), anyList(), anyList(), anyList(), anyList(),
                 any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class),
@@ -981,7 +834,7 @@ class ConditionAdjustStrategyTest {
                 witness("FALSE", "TRUE"),
                 NusmvResult.success("", List.of(new SpecCheckResult("AG safe", true, null))));
 
-        FixStrategy.StrategyOutcome outcome = strategy.tryFix(twoConditionCtx(rule, 1));
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(singleRuleContext(rule, 1));
 
         assertEquals(1, outcome.suggestions().size());
         assertFalse(outcome.alternativesComplete(), "the one attempt ended the search before ¬ρ was settled");
@@ -1013,7 +866,7 @@ class ConditionAdjustStrategyTest {
                 witness("TRUE", "FALSE"), pass,
                 pass);
 
-        FixStrategy.StrategyOutcome outcome = strategy.tryFix(twoConditionCtx(rule, 20));
+        FixStrategy.StrategyOutcome outcome = strategy.tryFix(singleRuleContext(rule, 20));
 
         assertEquals(List.of(GuardProbe.Kind.CONDITION, GuardProbe.Kind.CONDITION,
                         GuardProbe.Kind.RULE_BASE, GuardProbe.Kind.RULE_CONDITIONS),
@@ -1034,11 +887,7 @@ class ConditionAdjustStrategyTest {
     @Test
     void tryFix_aRejectionEveryAssignmentShares_endsTheSearchAsComplete() throws Exception {
         RuleDto rule = twoConditionRule();
-        when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                anyLong(), anyList(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenReturn(createGenResult());
+        stubParameterizedSearch();
         when(smvGenerator.generateWithResolvedDeviceModel(
                 anyLong(), anyList(), anyList(), anyList(), anyList(),
                 any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class),
@@ -1048,7 +897,7 @@ class ConditionAdjustStrategyTest {
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(
                 witness("FALSE", "TRUE"), forward(probeTrace("TRUE", "FALSE", "FALSE", "FALSE")));
 
-        FixContext context = twoConditionCtx(rule, 20);
+        FixContext context = singleRuleContext(rule, 20);
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
 
         assertTrue(outcome.suggestions().isEmpty());
@@ -1079,6 +928,15 @@ class ConditionAdjustStrategyTest {
         return trace.toString();
     }
 
+    private static RuleDto oneConditionRule() {
+        return RuleDto.builder()
+                .conditions(List.of(
+                        RuleDto.Condition.builder()
+                                .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
+                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
+                .build();
+    }
+
     private static RuleDto twoConditionRule() {
         return RuleDto.builder()
                 .conditions(List.of(
@@ -1090,16 +948,13 @@ class ConditionAdjustStrategyTest {
                 .build();
     }
 
-    private FixContext twoConditionCtx(RuleDto rule, int maxAttempts) {
+    private FixContext singleRuleContext(RuleDto rule, int maxAttempts) {
         SpecificationDto spec = new SpecificationDto();
         spec.setId("s1");
         spec.setName("Safety requirement");
         spec.setTemplateId("1");
         FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        return FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(0)).allRules(List.of(rule))
-                .devices(List.of()).specs(List.of(spec)).deviceSmvMap(Map.of()).violatedSpecIndex(0)
-                .userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(maxAttempts).build();
+        return ctx(List.of(fault), List.of(rule), List.of(spec), maxAttempts);
     }
 
     /** A ¬ρ counterexample assigning the two condition lambdas of {@link #twoConditionRule()}. */

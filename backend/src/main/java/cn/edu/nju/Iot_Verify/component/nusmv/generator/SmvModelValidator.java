@@ -4,6 +4,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvNamespace;
 import cn.edu.nju.Iot_Verify.component.template.DeviceManifestModes;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
@@ -437,7 +438,7 @@ public class SmvModelValidator {
      * "switch off when illuminance >= 80" would fire on noise while the real reading sat at 20.
      *
      * <p>This is the same narrowing already applied to rule and specification value conditions
-     * (`NusmvRequestValidator.internalVariable`, `BoardStorageServiceImpl.conditionSourceVariable`): a
+     * (`ManifestConditionSemantics.canReadConditionValue`): a
      * Trigger is a read, so it gets the read capability set. Writes are unaffected — `Assignments` targets
      * are checked elsewhere, and writing an affect-only value is exactly what the declaration is for.
      */
@@ -446,10 +447,7 @@ public class SmvModelValidator {
         attrs.addAll(DeviceManifestModes.modeNames(smv.getManifest()));
         if (smv.getManifest().getInternalVariables() != null) {
             for (DeviceManifest.InternalVariable iv : smv.getManifest().getInternalVariables()) {
-                if (iv.getName() == null) continue;
-                boolean affectOnlyShared = !Boolean.TRUE.equals(iv.getIsInside())
-                        && Boolean.FALSE.equals(iv.getReads());
-                if (affectOnlyShared) continue;
+                if (iv.getName() == null || !ManifestConditionSemantics.canReadConditionValue(iv)) continue;
                 attrs.add(iv.getName());
             }
         }

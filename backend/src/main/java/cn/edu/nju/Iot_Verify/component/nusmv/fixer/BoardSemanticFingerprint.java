@@ -15,6 +15,7 @@ import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
+import cn.edu.nju.Iot_Verify.util.EnvironmentDomainUtils;
 import cn.edu.nju.Iot_Verify.util.SpecificationSemanticSignature;
 
 import java.util.ArrayList;
@@ -206,7 +207,7 @@ public final class BoardSemanticFingerprint {
             String name = entry.getKey();
             DeviceManifest.InternalVariable definition = entry.getValue();
             BoardEnvironmentVariableDto value = explicit.get(name);
-            String rawValue = value != null ? value.getValue() : defaultEnvironmentValue(definition);
+            String rawValue = value != null ? value.getValue() : EnvironmentDomainUtils.rawDefaultValue(definition);
             String trust = value != null ? value.getTrust() : definition.getTrust();
             String privacy = value != null ? value.getPrivacy() : definition.getPrivacy();
             parts.add(name + "=" + normalizeModelVariableValue(rawValue, definition)
@@ -307,17 +308,6 @@ public final class BoardSemanticFingerprint {
 
     private static boolean isEnvironmentVariable(DeviceManifest.InternalVariable variable) {
         return variable != null && !Boolean.TRUE.equals(variable.getIsInside());
-    }
-
-    private static String defaultEnvironmentValue(DeviceManifest.InternalVariable iv) {
-        if (iv == null) return "";
-        if (iv.getValues() != null && !iv.getValues().isEmpty()) {
-            return cleanEnumLiteral(iv.getValues().get(0));
-        }
-        if (iv.getLowerBound() != null && iv.getUpperBound() != null) {
-            return String.valueOf(iv.getLowerBound());
-        }
-        return "";
     }
 
     private static String normalizeModelVariableValue(String value, DeviceManifest.InternalVariable iv) {

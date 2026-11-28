@@ -5,6 +5,7 @@ import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { flushPromises } from '@vue/test-utils'
 import { createBoardSemanticCommit, reconcileBoardFocus, type BoardFocusState } from './semanticCommit'
+import { isDefinitiveMutationRejection } from '@/utils/boardWriteReceipt'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const start = board.indexOf('<script setup')
@@ -34,7 +35,10 @@ const boardQueue = () => {
 const currentSession = (active = ref(true)) => ({
   captureBoardRunOwner: () => () => active.value,
   getToken: () => 'the original session',
-  isCurrentSessionToken: (expected: string) => active.value && expected === 'the original session'
+  isCurrentSessionToken: (expected: string) => active.value && expected === 'the original session',
+  verificationRepairBlocks: ref(new Map()),
+  isDefinitiveMutationRejection,
+  isPollingAbortedError: () => false
 })
 
 describe('automatic fix result reconciliation', () => {
@@ -53,17 +57,18 @@ describe('automatic fix result reconciliation', () => {
       syncUndoAvailability: syncBoardUndoAvailability,
       markVerificationResultStale: () => { stale.value = true }
     })
-    const ports = { ...currentSession(), commitSemanticScene, enqueueBoardMutation: boardQueue() }
+    const ports = { ...currentSession(), commitSemanticScene, enqueueBoardMutation: boardQueue(), refreshBoardSnapshot: vi.fn() }
     const apply = bind('applyFixOnBoard', ports)
     const fixedRules = allRemoved ? [] : [{ id: 'r1', sources: [], toId: 'device', toApi: 'off' }]
     const receipt = signedReceipt(fixedRules)
-    expect(await apply(() => Promise.resolve(receipt))).toBe(receipt)
+    expect(await apply(7, () => Promise.resolve(receipt))).toBe(receipt)
 
     expect(rules.value).toEqual(fixedRules)
     expect(edges.value).toEqual(fixedRules.map(rule => rule.id))
     expect(focus.value.ruleId).toBeNull()
     expect(availability.value).toMatchObject({ canUndo: true, canRedo: false })
     expect(stale.value).toBe(true)
+    expect(ports.refreshBoardSnapshot).not.toHaveBeenCalled()
   })
 
   it('adopts a delayed fix receipt before the newer cross-tab snapshot', async () => {
@@ -78,7 +83,7 @@ describe('automatic fix result reconciliation', () => {
       boardRefreshRequestedWhileBusy: false
     }
     const startWrite = vi.fn(() => receipt)
-    const applying = bind('applyFixOnBoard', ports)(startWrite)
+    const applying = bind('applyFixOnBoard', ports)(7, startWrite)
     await flushPromises()
     expect(startWrite).toHaveBeenCalledOnce()
     const refreshing = bind('requestBoardSnapshotRefresh', ports)()
@@ -91,6 +96,30 @@ describe('automatic fix result reconciliation', () => {
     expect(rules.value).toEqual(['r2', 'r3'])
   })
 
+  it('settles a queued snapshot refresh as cancelled when its Board is left before dispatch', async () => {
+    let releaseWrite!: () => void
+    const queue = boardQueue()
+    const pendingWrite = queue(() => new Promise<void>(resolve => { releaseWrite = resolve }))
+    const retired = new Error('Board was left')
+    const ports = {
+      boardLifecycleDisposed: false, document: { visibilityState: 'visible' },
+      boardForegroundRefreshPromise: null, boardRefreshRequestedWhileBusy: false,
+      refreshBoardSnapshot: vi.fn().mockResolvedValue(true),
+      isPollingAbortedError: (error: unknown) => error === retired,
+      enqueueBoardMutation: (work: () => Promise<boolean>) =>
+        queue(() => ports.boardLifecycleDisposed ? Promise.reject(retired) : work())
+    }
+    const refreshing = bind('requestBoardSnapshotRefresh', ports)()
+    await flushPromises()
+    ports.boardLifecycleDisposed = true
+    releaseWrite()
+
+    await pendingWrite
+    await expect(refreshing).resolves.toBe(false)
+    expect(ports.refreshBoardSnapshot).not.toHaveBeenCalled()
+    expect(ports.boardForegroundRefreshPromise).toBeNull()
+  })
+
   it('does not adopt a receipt after the owning Board session is retired', async () => {
     const active = ref(true)
     let release!: (response: ReturnType<typeof signedReceipt>) => void
@@ -98,7 +127,7 @@ describe('automatic fix result reconciliation', () => {
     const commitSemanticScene = vi.fn()
     const ports = { ...currentSession(active), commitSemanticScene, enqueueBoardMutation: boardQueue() }
     const startWrite = vi.fn(() => receipt)
-    const applying = bind('applyFixOnBoard', ports)(startWrite)
+    const applying = bind('applyFixOnBoard', ports)(7, startWrite)
     await flushPromises()
     expect(startWrite).toHaveBeenCalledOnce()
     active.value = false
@@ -107,17 +136,61 @@ describe('automatic fix result reconciliation', () => {
     expect(commitSemanticScene).not.toHaveBeenCalled()
   })
 
-  it('reconciles an uncertain response once and keeps the outcome explicitly unknown', async () => {
-    const ports = { ...currentSession(), enqueueBoardMutation: boardQueue(), pendingFixRefreshPromise: null,
-      refreshRules: vi.fn().mockResolvedValue(true), reloadUndoAvailability: vi.fn().mockResolvedValue(undefined),
-      notifyBlocked: vi.fn(), t: (key: string) => key }
-    const reconciliation = bind('handleFixOutcomeUncertain', ports)()
-    expect(ports.pendingFixRefreshPromise).not.toBeNull()
-    await reconciliation
-    expect(ports.refreshRules).toHaveBeenCalledExactlyOnceWith('the original session')
-    expect(ports.reloadUndoAvailability).toHaveBeenCalledOnce()
+  it('reads one recovery snapshot before dispatching an edit queued behind a lost apply response', async () => {
+    let dropResponse!: () => void
+    const response = new Promise<never>((_, reject) => {
+      dropResponse = () => reject(new Error('response lost'))
+    })
+    let completeRead!: () => void
+    const snapshot = new Promise<boolean>(resolve => { completeRead = () => resolve(true) })
+    const queue = boardQueue()
+    const ports = { ...currentSession(), enqueueBoardMutation: queue, commitSemanticScene: vi.fn(),
+      refreshBoardSnapshot: vi.fn(() => snapshot), notifyBlocked: vi.fn(), t: (key: string) => key }
+    const write = vi.fn(() => response)
+    const apply = bind('applyFixOnBoard', ports)
+    const applying = apply(7, write).catch((error: unknown) => error)
+    await flushPromises()
+    const nextEdit = vi.fn(async () => undefined)
+    const following = queue(nextEdit)
+    const repeated = apply(7, write)
+    dropResponse()
+    try {
+      await flushPromises()
+      expect(ports.refreshBoardSnapshot).toHaveBeenCalledOnce()
+      expect(nextEdit).not.toHaveBeenCalled()
+      expect(ports.commitSemanticScene).not.toHaveBeenCalled()
+    } finally {
+      completeRead()
+      await Promise.all([applying, following, repeated])
+    }
+    expect(await applying).toBe('unconfirmed')
+    expect(await repeated).toBeNull()
+    expect(write).toHaveBeenCalledOnce()
     expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.fixApplyOutcomeUnconfirmedAfterRefresh')
-    expect(ports.pendingFixRefreshPromise).toBeNull()
+  })
+
+  it('keeps the intended repair blocked when both its response and recovery fail', async () => {
+    const ports = { ...currentSession(), enqueueBoardMutation: boardQueue(),
+      refreshBoardSnapshot: vi.fn().mockResolvedValue(false),
+      notifyBlocked: vi.fn(), t: (key: string) => key }
+    const apply = bind('applyFixOnBoard', ports)
+    const missing = vi.fn().mockRejectedValue({ response: { status: 503 } })
+    expect(await apply(7, missing)).toBe('unconfirmed')
+    expect(ports.refreshBoardSnapshot).toHaveBeenCalledOnce()
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.fixApplyOutcomeUnknownRefreshFailed')
+    expect(ports.verificationRepairBlocks.value.get(7)).toBe('app.fixApplyUnconfirmedReverify')
+    expect(await apply(7, missing)).toBeNull()
+    expect(missing).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { status: 409, data: { data: { reasonCode: 'MODEL_SEMANTICS_CHANGED' } } },
+    { status: 503, data: { data: { reasonCode: 'FIX_APPLY_PREFLIGHT_UNAVAILABLE' } } }
+  ])('leaves a proven pre-write rejection to the dialog (HTTP $status)', async response => {
+    const ports = { ...currentSession(), enqueueBoardMutation: boardQueue(), refreshBoardSnapshot: vi.fn() }
+    const error = { response }
+    await expect(bind('applyFixOnBoard', ports)(7, vi.fn().mockRejectedValue(error))).rejects.toBe(error)
+    expect(ports.refreshBoardSnapshot).not.toHaveBeenCalled()
   })
 
   it.each([7, 8])('places the receipt inline only when the open verdict owns its source trace (open=%i)', openTrace => {

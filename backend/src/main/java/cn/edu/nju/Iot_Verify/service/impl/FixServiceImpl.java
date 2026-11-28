@@ -44,7 +44,7 @@ import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.TracePo;
 import cn.edu.nju.Iot_Verify.repository.TraceRepository;
 import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
-import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationRepairTraceContextProjection;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.service.FormalOperationAdmission;
@@ -54,6 +54,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.fixer.BoardSemanticFingerprint;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import cn.edu.nju.Iot_Verify.util.mapper.TraceMapper;
@@ -90,6 +91,7 @@ public class FixServiceImpl implements FixService {
     private final BoardDataConverter boardDataConverter;
     private final FixSuggestionTokenService fixSuggestionTokenService;
     private final FormalOperationAdmission formalOperationAdmission;
+    private final ModelFingerprint modelFingerprint;
 
     @Override
     @Transactional(readOnly = true)
@@ -101,10 +103,7 @@ public class FixServiceImpl implements FixService {
     @Transactional(readOnly = true)
     public FaultLocalizationResultDto localizeFault(Long userId, Long traceId) {
         VerificationContext ctx = loadContext(userId, traceId);
-        List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
-                ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
-                ctx.request.getSpecs(), ctx.deviceSmvMap());
-        attachModelTokenSources(faultRules, ctx.deviceSmvMap());
+        List<FaultRuleDto> faultRules = localizeFrozenFaults(ctx);
         boolean modelComplete = sourceModelComplete(ctx.trace);
         String summary = faultRules.isEmpty()
                 ? "No automation rule that fired in the counterexample can influence the violated property. "
@@ -156,16 +155,16 @@ public class FixServiceImpl implements FixService {
 
         if (!sourceModelComplete(ctx.trace)) {
             progress.accept(InteractiveOperationStage.FINALIZING);
-            return incompleteSourceModelResult(
-                    traceId, ctx, strategies, deviceSmvMap, preferredRanges);
+            return incompleteSourceModelResult(traceId, ctx, strategies, preferredRanges);
         }
 
         progress.accept(InteractiveOperationStage.SEARCHING_AND_VERIFYING);
-        FixResultDto result = runFixer(
+        List<RuleDto> rules = req.getRules();
+        FixResultDto result = ruleFixer.fix(
                 traceId,
                 ctx.trace.getViolatedSpecId(),
                 ctx.trace.getStates(),
-                req.getRules(),
+                rules,
                 req.getDevices(),
                 req.getEnvironmentVariables(),
                 req.getSpecs(),
@@ -178,6 +177,7 @@ public class FixServiceImpl implements FixService {
                 preferredRanges,
                 () -> progress.accept(InteractiveOperationStage.COMPARING_VERIFIED_OPTIONS)
         );
+        attachModelTokenSources(result, rules, deviceSmvMap);
 
         progress.accept(InteractiveOperationStage.FINALIZING);
         appendDriftWarningIfNeeded(result, userId, ctx);
@@ -208,15 +208,12 @@ public class FixServiceImpl implements FixService {
             // that forward verification accepted; a valid token is therefore the proof of verification.
             FixSuggestionDto trusted = fixSuggestionTokenService.verify(
                     userId, traceId, validatedStrategy, suggestion, suggestionToken, preferredRanges);
-            return applyFixInternal(userId, traceId, validatedStrategy, trusted, preferredRanges);
+            return applyFixInternal(userId, traceId, validatedStrategy, trusted);
         });
     }
 
-    private FixApplyResultDto applyFixInternal(Long userId, Long traceId, String strategy,
-                                               FixSuggestionDto trusted,
-                                               Map<String, PreferredRange> preferredRanges) {
-        String validatedStrategy = validateApplyStrategy(strategy);
-        validatePreferredRanges(preferredRanges);
+    private FixApplyResultDto applyFixInternal(Long userId, Long traceId, String validatedStrategy,
+                                               FixSuggestionDto trusted) {
         // Load the trace's verification-time snapshot (normalized rules) for index/fingerprint alignment.
         VerificationContext ctx = loadContext(userId, traceId);
         assertCompleteSourceForApply(ctx.trace);
@@ -226,8 +223,6 @@ public class FixServiceImpl implements FixService {
         }
 
         Map<String, DeviceSmvData> deviceSmvMap = ctx.deviceSmvMap();
-
-        FixSuggestionDto suggestionToApply = trusted;
 
         // Read current rules → drift check → apply → save, all inside ONE per-user lock + transaction.
         // This closes the race where a concurrent save could interleave between an unlocked read and the
@@ -261,7 +256,7 @@ public class FixServiceImpl implements FixService {
                             ? Map.of()
                             : buildDisplayDeviceNames(currentSnapshot.nodes());
                     List<RuleDto> proposedRules = FixStrategyApplier.apply(
-                            validatedStrategy, suggestionToApply, boardRules, deviceSmvMap,
+                            validatedStrategy, trusted, boardRules,
                             persistenceDeviceRefs, displayDeviceNames);
                     if (scenario != null && scenario.getMode() == AttackScenarioDto.Mode.EXACT_POINTS) {
                         // Candidate commands still carry Board IDs; the validator reports model IDs.
@@ -287,10 +282,10 @@ public class FixServiceImpl implements FixService {
                 .applied(true)
                 .strategy(validatedStrategy)
                 .verificationEvidenceReused(true)
-                .appliedSuggestion(suggestionToApply)
+                .appliedSuggestion(trusted)
                 .previousRuleCount(before[0])
                 .currentRuleCount(saved.size())
-                .message(buildApplyMessage(validatedStrategy, suggestionToApply, before[0], saved.size()))
+                .message(buildApplyMessage(validatedStrategy, trusted, before[0], saved.size()))
                 .rules(saved)
                 .canUndo(Boolean.TRUE.equals(mutation.getCanUndo()))
                 .canRedo(Boolean.TRUE.equals(mutation.getCanRedo()))
@@ -606,16 +601,22 @@ public class FixServiceImpl implements FixService {
         addResultWarning(result, warning);
     }
 
+    private List<FaultRuleDto> localizeFrozenFaults(VerificationContext ctx) {
+        List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
+                ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
+                ctx.request.getSpecs(), ctx.deviceSmvMap());
+        attachModelTokenSources(faultRules, ctx.deviceSmvMap());
+        return faultRules;
+    }
+
     private FixResultDto incompleteSourceModelResult(Long traceId,
                                                      VerificationContext ctx,
                                                      List<String> strategies,
-                                                     Map<String, DeviceSmvData> deviceSmvMap,
                                                      Map<String, PreferredRange> preferredRanges) {
         int disabledRules = sourceDisabledRuleCount(ctx.trace);
         int skippedSpecs = sourceSkippedSpecCount(ctx.trace);
         String warning = incompleteSourceModelWarning(ctx.trace);
-        List<String> effectiveStrategies = strategies != null && !strategies.isEmpty()
-                ? strategies : DEFAULT_FIX_STRATEGIES;
+        List<String> effectiveStrategies = strategies != null ? strategies : DEFAULT_FIX_STRATEGIES;
         List<FixStrategyAttemptDto> attempts = effectiveStrategies.stream()
                 .map(strategy -> FixStrategyAttemptDto.builder()
                         .strategy(strategy)
@@ -623,10 +624,7 @@ public class FixServiceImpl implements FixService {
                         .reason(warning)
                         .build())
                 .toList();
-        List<FaultRuleDto> faultRules = ruleFixer.localizeFaults(
-                ctx.trace.getStates(), ctx.request.getRules(), ctx.trace.getViolatedSpecId(),
-                ctx.request.getSpecs(), deviceSmvMap);
-        attachModelTokenSources(faultRules, deviceSmvMap);
+        List<FaultRuleDto> faultRules = localizeFrozenFaults(ctx);
         return FixResultDto.builder()
                 .traceId(traceId)
                 .violatedSpecId(ctx.trace.getViolatedSpecId())
@@ -713,21 +711,11 @@ public class FixServiceImpl implements FixService {
                 || currentTemplateSnapshots == null) {
             return TemplateSnapshotComparison.UNAVAILABLE;
         }
-        boolean drifted = !verificationTemplateSnapshots.keySet().equals(currentTemplateSnapshots.keySet())
-                || verificationTemplateSnapshots.entrySet().stream()
-                        .anyMatch(entry -> !sameTemplateManifest(
-                                entry.getValue(), currentTemplateSnapshots.get(entry.getKey())));
+        boolean drifted = !modelFingerprint.sameTemplateSemantics(verificationTemplateSnapshots, currentTemplateSnapshots);
         if (drifted) {
             log.warn("Template drift detected by manifest comparison");
         }
         return drifted ? TemplateSnapshotComparison.CHANGED : TemplateSnapshotComparison.UNCHANGED;
-    }
-
-    private boolean sameTemplateManifest(DeviceManifest first, DeviceManifest second) {
-        if (first == null || second == null) {
-            return first == second;
-        }
-        return Objects.equals(JsonUtils.toJson(first), JsonUtils.toJson(second));
     }
 
     private List<String> validateRequestedStrategies(List<String> strategies) {
@@ -884,32 +872,6 @@ public class FixServiceImpl implements FixService {
                 : ModelTokenSource.UNKNOWN;
     }
 
-    private FixResultDto runFixer(
-            Long traceId,
-            String violatedSpecId,
-            List<cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto> states,
-            List<RuleDto> rules,
-            List<DeviceVerificationDto> devices,
-            List<BoardEnvironmentVariableDto> environmentVariables,
-            List<SpecificationDto> specs,
-            Map<String, DeviceSmvData> deviceSmvMap,
-            Long userId,
-            AttackScenarioDto attackScenario,
-            boolean enablePrivacy,
-            List<String> strategies,
-            int maxAttempts,
-            Map<String, PreferredRange> preferredRanges,
-            Runnable onVerifiedRepair) {
-        AttackScenarioDto scenario = Objects.requireNonNull(
-                attackScenario, "attackScenario is required");
-        FixResultDto result = ruleFixer.fix(
-                traceId, violatedSpecId, states, rules, devices, environmentVariables, specs,
-                deviceSmvMap, userId, scenario, enablePrivacy, strategies, maxAttempts, preferredRanges,
-                onVerifiedRepair);
-        attachModelTokenSources(result, rules, deviceSmvMap);
-        return result;
-    }
-
     private FrozenTemplateSnapshots readFrozenTemplateSnapshots(
             TracePo trace, String json, List<DeviceVerificationDto> devices) {
         JsonNode shape = JsonUtils.readPersistedJsonRequired(
@@ -990,10 +952,9 @@ public class FixServiceImpl implements FixService {
         TracePo po = traceRepository.findByIdAndUserId(traceId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Trace", traceId));
         Long runId = po.getVerificationTaskId();
-        VerificationTraceContextProjection run = runId == null ? null
-                : verificationTaskRepository.findTraceContextsByUserIdAndIdInAndStatus(
-                        userId, List.of(runId), VerificationTaskPo.TaskStatus.COMPLETED)
-                .stream().findFirst().orElse(null);
+        VerificationRepairTraceContextProjection run = runId == null ? null
+                : verificationTaskRepository.findRepairTraceContextByIdAndUserIdAndStatus(
+                        runId, userId, VerificationTaskPo.TaskStatus.COMPLETED).orElse(null);
         TraceMapper.PersistedContext persisted = traceMapper.readContext(po, run);
         TraceDto trace = persisted.trace();
         if (!ModelSemanticsVersion.isCurrent(trace.getModelSnapshot())) {

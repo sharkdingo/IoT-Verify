@@ -613,7 +613,7 @@ public class DeviceTemplateNuSmvValidator {
 
             // Check for driver mechanisms
             boolean hasDynamics = hasWorkingStateDynamics(manifest, var.getName());
-            boolean hasTransition = hasTransitionAssignment(manifest, var.getName());
+            boolean hasTransition = DeviceManifestModes.hasTransitionAssignment(manifest, var.getName());
 
             if (!hasDynamics && !hasTransition) {
                 throw new BadRequestException(
@@ -637,23 +637,6 @@ public class DeviceTemplateNuSmvValidator {
             }
             for (DeviceManifest.Dynamic dynamic : state.getDynamics()) {
                 if (dynamic != null && variableName.equals(dynamic.getVariableName())) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean hasTransitionAssignment(DeviceManifest manifest, String variableName) {
-        if (manifest.getTransitions() == null) {
-            return false;
-        }
-        for (DeviceManifest.Transition transition : manifest.getTransitions()) {
-            if (transition == null || transition.getAssignments() == null) {
-                continue;
-            }
-            for (DeviceManifest.Assignment assignment : transition.getAssignments()) {
-                if (assignment != null && variableName.equals(assignment.getAttribute())) {
                     return true;
                 }
             }
@@ -727,7 +710,6 @@ public class DeviceTemplateNuSmvValidator {
         } catch (SmvGenerationException e) {
             if (SmvGenerationException.ErrorCategories.TEMPLATE_LOAD_ERROR.equals(e.getErrorCategory())
                     || SmvGenerationException.ErrorCategories.MANIFEST_PARSE_ERROR.equals(e.getErrorCategory())
-                    || SmvGenerationException.ErrorCategories.TEMPLATE_NOT_FOUND.equals(e.getErrorCategory())
                     || SmvGenerationException.ErrorCategories.MULTIPLE_DEVICES_FAILED.equals(e.getErrorCategory())) {
                 throw new InternalServerException(
                         "NuSMV precheck failed for template '" + templateName + "'.", e);

@@ -70,6 +70,20 @@ const terminalFrame = (
   executionStatus = 'PARTIAL'
 ) => `data: ${JSON.stringify({ terminal: { turnId, executionStatus } })}\n\n`
 
+const savedChatMessage = (overrides: Record<string, unknown> = {}) => ({
+  id: 1,
+  sessionId: 'session-1',
+  role: 'assistant',
+  content: 'Saved response',
+  turnId: 'turn-1',
+  createdAt: '2026-07-24T12:00:00Z',
+  ...overrides
+})
+
+const historyResponse = (messages: unknown[], hasMore = false) => ({
+  data: { data: { messages, nextBeforeId: null, hasMore } }
+})
+
 describe('chat stream lifecycle semantics', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -129,9 +143,7 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('binds a conversation-history load to its caller abort signal', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: { data: { messages: [], nextBeforeId: null, hasMore: false } }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([]))
     const controller = new AbortController()
 
     await getSessionHistory('session-1', controller.signal)
@@ -145,19 +157,12 @@ describe('chat stream lifecycle semantics', () => {
   it.each(['id', 'sessionId', 'turnId', 'createdAt'])(
     'rejects persisted history without required %s identity',
     async field => {
-      const message: Record<string, unknown> = {
-        id: 1,
-        sessionId: 'session-1',
-        role: 'assistant',
+      const message: Record<string, unknown> = savedChatMessage({
         content: 'Saved response.',
-        turnId: 'turn-1',
-        createdAt: '2026-07-24T12:00:00Z',
         executionStatus: 'PARTIAL'
-      }
-      delete message[field]
-      vi.mocked(http.get).mockResolvedValue({
-        data: { data: { messages: [message], nextBeforeId: null, hasMore: false } }
       })
+      delete message[field]
+      vi.mocked(http.get).mockResolvedValue(historyResponse([message]))
 
       await expect(getSessionHistory('session-1')).rejects.toThrow(
         'Chat history message 0 is incomplete'
@@ -166,23 +171,10 @@ describe('chat stream lifecycle semantics', () => {
   )
 
   it('rejects an unknown persisted execution status at the history boundary', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: 'A future server response.',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z',
-            executionStatus: 'FUTURE_STATUS'
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([savedChatMessage({
+      content: 'A future server response.',
+      executionStatus: 'FUTURE_STATUS'
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 has an unknown execution status'
@@ -190,23 +182,10 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('rejects completed history without persisted usable tool evidence', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: 'Unproven completion.',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z',
-            executionStatus: 'COMPLETED'
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([savedChatMessage({
+      content: 'Unproven completion.',
+      executionStatus: 'COMPLETED'
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 has unproven completed status'
@@ -214,27 +193,14 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('rejects completed history with an unpaired tool execution and another usable result', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: 'Mismatched completion.',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z',
-            executionStatus: 'COMPLETED',
-            executionTrace: [
-              { stage: 'TOOL_EXECUTION', toolName: 'board_overview', round: 1 },
-              { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 1, outcome: 'USABLE' }
-            ]
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([savedChatMessage({
+      content: 'Mismatched completion.',
+      executionStatus: 'COMPLETED',
+      executionTrace: [
+        { stage: 'TOOL_EXECUTION', toolName: 'board_overview', round: 1 },
+        { stage: 'TOOL_RESULT', toolName: 'list_rules', round: 1, outcome: 'USABLE' }
+      ]
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 has unproven completed status'
@@ -242,44 +208,17 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('rejects malformed persisted message content and execution traces', async () => {
-    vi.mocked(http.get).mockResolvedValueOnce({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: { text: 'not a string' },
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z'
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValueOnce(historyResponse([savedChatMessage({
+      content: { text: 'not a string' }
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 is incomplete'
     )
 
-    vi.mocked(http.get).mockResolvedValueOnce({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: 'Saved response',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z',
-            executionTrace: [{ stage: 'FUTURE_STAGE' }]
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValueOnce(historyResponse([savedChatMessage({
+      executionTrace: [{ stage: 'FUTURE_STAGE' }]
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 is incomplete'
@@ -287,22 +226,10 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('rejects a history page containing a message from another session', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-2',
-            role: 'assistant',
-            content: 'Do not render this in session 1.',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z'
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([savedChatMessage({
+      sessionId: 'session-2',
+      content: 'Do not render this in session 1.'
+    })]))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 is incomplete'
@@ -310,22 +237,7 @@ describe('chat stream lifecycle semantics', () => {
   })
 
   it('rejects an unusable history cursor instead of paginating with corrupted state', async () => {
-    vi.mocked(http.get).mockResolvedValue({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'assistant',
-            content: 'Saved response',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z'
-          }],
-          nextBeforeId: null,
-          hasMore: true
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValue(historyResponse([savedChatMessage()], true))
 
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history response is incomplete'
@@ -338,22 +250,10 @@ describe('chat stream lifecycle semantics', () => {
       'Chat history response is incomplete'
     )
 
-    vi.mocked(http.get).mockResolvedValueOnce({
-      data: {
-        data: {
-          messages: [{
-            id: 1,
-            sessionId: 'session-1',
-            role: 'tool',
-            content: '{"secret":true}',
-            turnId: 'turn-1',
-            createdAt: '2026-07-24T12:00:00Z'
-          }],
-          nextBeforeId: null,
-          hasMore: false
-        }
-      }
-    })
+    vi.mocked(http.get).mockResolvedValueOnce(historyResponse([savedChatMessage({
+      role: 'tool',
+      content: '{"secret":true}'
+    })]))
     await expect(getSessionHistory('session-1')).rejects.toThrow(
       'Chat history message 0 is incomplete'
     )
@@ -682,24 +582,22 @@ describe('chat stream lifecycle semantics', () => {
     expect(onProgress).not.toHaveBeenCalled()
   })
 
-  it('requires an outcome that matches each progress stage', async () => {
-    const invalidPayloads = [
-      { progress: { stage: 'TOOL_RESULT' } },
-      { progress: { stage: 'TOOL_RESULT', outcome: 'EMERGENCY_LIMIT' } },
-      { progress: { stage: 'EXECUTION_GUARD', outcome: 'USABLE' } },
-      { progress: { stage: 'PLANNING', outcome: 'USABLE' } }
-    ]
-
-    for (const payload of invalidPayloads) {
-      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(successfulStreamResponse(
-        `data: ${JSON.stringify(payload)}\n\n`
-      )))
-      await expect(sendStreamChat(
-        'session-1',
-        'hello',
-        { onMessage: vi.fn(), onProgress: vi.fn() }
-      )).rejects.toMatchObject({ kind: 'INVALID_FRAME' })
-    }
+  it.each([
+    { stage: 'TOOL_RESULT' },
+    { stage: 'TOOL_RESULT', outcome: 'EMERGENCY_LIMIT' },
+    { stage: 'EXECUTION_GUARD', outcome: 'USABLE' },
+    { stage: 'PLANNING', outcome: 'USABLE' },
+    { stage: 'CLAIM_REVIEW', outcome: 'USABLE', claimReview: {
+      reasonCode: 'MISSING_OPERATION_RECEIPT', originalText: 'Changed the board.', matchedText: 'Changed the board.'
+    } }
+  ])('rejects progress outcomes outside their stage contract: %j', async progress => {
+    const onProgress = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(successfulStreamResponse(
+      `data: ${JSON.stringify({ progress })}\n\n${terminalFrame()}`
+    )))
+    await expect(sendStreamChat('session-1', 'hello', { onMessage: vi.fn(), onProgress }, undefined, 'turn-1'))
+      .rejects.toMatchObject({ kind: 'INVALID_FRAME' })
+    expect(onProgress).not.toHaveBeenCalled()
   })
 
   it('rejects empty, non-object, and non-JSON stream frames without completing', async () => {
@@ -1351,6 +1249,15 @@ describe('chat session list contract', () => {
       latestExecutionStatus: 'FAILED'
     })] } })
     await expect(getSessionList()).rejects.toThrow(/incomplete/)
+  })
+
+  it('rejects an unknown execution status in the session projection', async () => {
+    vi.mocked(http.get).mockResolvedValue({ data: { data: [session({
+      latestTerminalMessageId: 42,
+      latestExecutionStatus: 'FUTURE_STATUS'
+    })] } })
+
+    await expect(getSessionList()).rejects.toThrow('Chat session list row 0 is incomplete')
   })
 
   it('acknowledges the exact terminal message rendered for a session', async () => {

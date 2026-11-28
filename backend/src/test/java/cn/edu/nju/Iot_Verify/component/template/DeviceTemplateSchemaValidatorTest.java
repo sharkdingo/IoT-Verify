@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.template;
 
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -397,27 +398,18 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void apiTrigger_isRejectedByCanonicalSchema() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [
-                    {
-                      "Name": "turn_on",
-                      "EndState": "on",
-                      "Trigger": {
-                        "Attribute": "LampState",
-                        "Relation": "=",
-                        "Value": "off"
-                      }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [
+                  {
+                    "Name": "turn_on",
+                    "EndState": "on",
+                    "Trigger": {
+                      "Attribute": "LampState",
+                      "Relation": "=",
+                      "Value": "off"
                     }
-                  ]
-                }
+                  }
+                ]
                 """);
 
         BadRequestException ex = assertThrows(BadRequestException.class,
@@ -430,30 +422,21 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void apiAssignments_areRejectedInsteadOfSilentlyIgnored() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "InternalVariables": [{
-                    "Name": "level",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 100
-                  }],
-                  "APIs": [{
-                    "Name": "turn_on",
-                    "EndState": "on",
-                    "Assignments": [{"Attribute": "level", "Value": "100"}]
-                  }]
-                }
+        JsonNode manifest = readLampManifest("""
+                "InternalVariables": [{
+                  "Name": "level",
+                  "IsInside": true,
+                  "FalsifiableWhenCompromised": false,
+                  "Trust": "trusted",
+                  "Privacy": "public",
+                  "LowerBound": 0,
+                  "UpperBound": 100
+                }],
+                "APIs": [{
+                  "Name": "turn_on",
+                  "EndState": "on",
+                  "Assignments": [{"Attribute": "level", "Value": "100"}]
+                }]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -526,17 +509,8 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void apiSignalMustBeExplicit() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [{"Name": "turn_on", "StartState": "off", "EndState": "on"}]
-                }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [{"Name": "turn_on", "StartState": "off", "EndState": "on"}]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -549,17 +523,8 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void apiStartStateMustBeExplicit() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [{"Name": "turn_on", "EndState": "on", "Signal": true}]
-                }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [{"Name": "turn_on", "EndState": "on", "Signal": true}]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -572,20 +537,11 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void observableApiRouteCannotOverlapCommandOnlyApi() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [
-                    {"Name": "turn_on", "StartState": "off", "EndState": "on", "Signal": true},
-                    {"Name": "restore", "StartState": "", "EndState": "on", "Signal": false}
-                  ]
-                }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [
+                  {"Name": "turn_on", "StartState": "off", "EndState": "on", "Signal": true},
+                  {"Name": "restore", "StartState": "", "EndState": "on", "Signal": false}
+                ]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -598,26 +554,17 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void observableApiRouteCannotOverlapAutonomousTransition() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [
-                    {"Name": "turn_on", "StartState": "off", "EndState": "on", "Signal": true}
-                  ],
-                  "Transitions": [{
-                    "Name": "automatic_on",
-                    "StartState": "off",
-                    "EndState": "on",
-                    "Trigger": {"Attribute": "Power", "Relation": "=", "Value": "off"},
-                    "Assignments": []
-                  }]
-                }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [
+                  {"Name": "turn_on", "StartState": "off", "EndState": "on", "Signal": true}
+                ],
+                "Transitions": [{
+                  "Name": "automatic_on",
+                  "StartState": "off",
+                  "EndState": "on",
+                  "Trigger": {"Attribute": "Power", "Relation": "=", "Value": "off"},
+                  "Assignments": []
+                }]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -680,23 +627,9 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void transitionAssignment_requiresTriggerAndDeclaredTarget() throws Exception {
-        JsonNode missingTrigger = objectMapper.readTree("""
-                {
-                  "Name": "Counter",
-                  "InternalVariables": [{
-                    "Name": "counterValue",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 10
-                  }],
-                  "Transitions": [{
-                    "Name": "reset",
-                    "Assignments": [{"Attribute": "counterValue", "Value": "0"}]
-                  }]
-                }
+        JsonNode missingTrigger = readCounterManifest("""
+                "Name": "reset",
+                "Assignments": [{"Attribute": "counterValue", "Value": "0"}]
                 """);
         BadRequestException missingTriggerException = assertThrows(BadRequestException.class, () ->
                 validator.validateRawManifest("Counter", missingTrigger));
@@ -704,24 +637,10 @@ class DeviceTemplateSchemaValidatorTest {
                 .contains("assigns variables but has no Trigger")
                 .contains("never execute");
 
-        JsonNode unknownTarget = objectMapper.readTree("""
-                {
-                  "Name": "Counter",
-                  "InternalVariables": [{
-                    "Name": "counterValue",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 10
-                  }],
-                  "Transitions": [{
-                    "Name": "reset",
-                    "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
-                    "Assignments": [{"Attribute": "missing", "Value": "0"}]
-                  }]
-                }
+        JsonNode unknownTarget = readCounterManifest("""
+                "Name": "reset",
+                "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
+                "Assignments": [{"Attribute": "missing", "Value": "0"}]
                 """);
         BadRequestException unknownTargetException = assertThrows(BadRequestException.class, () ->
                 validator.validateRawManifest("Counter", unknownTarget));
@@ -735,24 +654,10 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void transitionAssignment_valueMustFitDeclaredDomain() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Counter",
-                  "InternalVariables": [{
-                    "Name": "counterValue",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 10
-                  }],
-                  "Transitions": [{
-                    "Name": "overflow",
-                    "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
-                    "Assignments": [{"Attribute": "counterValue", "Value": "11"}]
-                  }]
-                }
+        JsonNode manifest = readCounterManifest("""
+                "Name": "overflow",
+                "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
+                "Assignments": [{"Attribute": "counterValue", "Value": "11"}]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -765,24 +670,10 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void triggeredTransitionAssignment_isRepresentable() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Counter",
-                  "InternalVariables": [{
-                    "Name": "counterValue",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 10
-                  }],
-                  "Transitions": [{
-                    "Name": "reset",
-                    "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
-                    "Assignments": [{"Attribute": "counterValue", "Value": "0"}]
-                  }]
-                }
+        JsonNode manifest = readCounterManifest("""
+                "Name": "reset",
+                "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"},
+                "Assignments": [{"Attribute": "counterValue", "Value": "0"}]
                 """);
 
         assertDoesNotThrow(() -> validator.validateRawManifest("Counter", manifest));
@@ -858,24 +749,10 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void statelessTransitionCannotPretendToChangeState() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Counter",
-                  "InternalVariables": [{
-                    "Name": "counterValue",
-                    "IsInside": true,
-                    "FalsifiableWhenCompromised": false,
-                    "Trust": "trusted",
-                    "Privacy": "public",
-                    "LowerBound": 0,
-                    "UpperBound": 10
-                  }],
-                  "Transitions": [{
-                    "Name": "phantom state",
-                    "EndState": "active",
-                    "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"}
-                  }]
-                }
+        JsonNode manifest = readCounterManifest("""
+                "Name": "phantom state",
+                "EndState": "active",
+                "Trigger": {"Attribute": "counterValue", "Relation": "=", "Value": "10"}
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class, () ->
@@ -910,6 +787,14 @@ class DeviceTemplateSchemaValidatorTest {
         org.assertj.core.api.Assertions.assertThat(invalidValueException.getMessage())
                 .contains("unknown value 'standby'")
                 .contains("Allowed values");
+
+        JsonNode validAliases = invalidValue.deepCopy();
+        var trigger = (ObjectNode) validAliases.at("/Transitions/0/Trigger");
+        trigger.put("Value", "off");
+        for (String alias : List.of("EQ", "==", "NEQ")) {
+            trigger.put("Relation", alias);
+            assertDoesNotThrow(() -> validator.validateRawManifest("Switch", validAliases), alias);
+        }
 
         JsonNode invalidRelation = objectMapper.readTree("""
                 {
@@ -1341,23 +1226,14 @@ class DeviceTemplateSchemaValidatorTest {
 
     @Test
     void apiAssignmentsFieldIsRejectedEvenWhenEmpty() throws Exception {
-        JsonNode manifest = objectMapper.readTree("""
-                {
-                  "Name": "Lamp",
-                  "Modes": ["Power"],
-                  "InitState": "off",
-                  "WorkingStates": [
-                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
-                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
-                  ],
-                  "APIs": [{
-                    "Name": "turn_on",
-                    "StartState": "off",
-                    "EndState": "on",
-                    "Signal": true,
-                    "Assignments": []
-                  }]
-                }
+        JsonNode manifest = readLampManifest("""
+                "APIs": [{
+                  "Name": "turn_on",
+                  "StartState": "off",
+                  "EndState": "on",
+                  "Signal": true,
+                  "Assignments": []
+                }]
                 """);
 
         BadRequestException exception = assertThrows(BadRequestException.class,
@@ -1366,6 +1242,41 @@ class DeviceTemplateSchemaValidatorTest {
         org.assertj.core.api.Assertions.assertThat(exception.getMessage())
                 .contains("unsupported Assignments field")
                 .contains("triggered Transition");
+    }
+
+    private JsonNode readLampManifest(String additionalFields) throws JsonProcessingException {
+        return objectMapper.readTree("""
+                {
+                  "Name": "Lamp",
+                  "Modes": ["Power"],
+                  "InitState": "off",
+                  "WorkingStates": [
+                    {"Name": "off", "Trust": "trusted", "Privacy": "public"},
+                    {"Name": "on", "Trust": "trusted", "Privacy": "public"}
+                  ],
+                  %s
+                }
+                """.formatted(additionalFields));
+    }
+
+    private JsonNode readCounterManifest(String transitionFields) throws JsonProcessingException {
+        return objectMapper.readTree("""
+                {
+                  "Name": "Counter",
+                  "InternalVariables": [{
+                    "Name": "counterValue",
+                    "IsInside": true,
+                    "FalsifiableWhenCompromised": false,
+                    "Trust": "trusted",
+                    "Privacy": "public",
+                    "LowerBound": 0,
+                    "UpperBound": 10
+                  }],
+                  "Transitions": [{
+                    %s
+                  }]
+                }
+                """.formatted(transitionFields));
     }
 
     private void assertVariableTrust(String templateName, String variableName, String expectedTrust)

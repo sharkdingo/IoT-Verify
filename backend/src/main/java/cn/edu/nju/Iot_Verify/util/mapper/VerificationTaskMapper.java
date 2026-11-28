@@ -10,6 +10,7 @@ import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.po.VerificationResultView;
+import cn.edu.nju.Iot_Verify.po.VerificationTaskView;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
@@ -72,49 +73,7 @@ public class VerificationTaskMapper {
                 .build();
     }
 
-    public VerificationTaskSummaryDto toSummaryDto(VerificationTaskSummaryProjection projection) {
-        if (projection == null) return null;
-        return toSummaryDto(VerificationTaskPo.builder()
-                .id(projection.getId())
-                .userId(projection.getUserId())
-                .initiator(projection.getInitiator())
-                .status(projection.getStatus())
-                .createdAt(projection.getCreatedAt())
-                .startedAt(projection.getStartedAt())
-                .completedAt(projection.getCompletedAt())
-                .processingTimeMs(projection.getProcessingTimeMs())
-                .isAttack(projection.getIsAttack())
-                .attackBudget(projection.getAttackBudget())
-                .modeledDeviceAttackPointCount(projection.getModeledDeviceAttackPointCount())
-                .modeledFalsifiableReadingDeviceCount(projection.getModeledFalsifiableReadingDeviceCount())
-                .modeledAutomationLinkAttackPointCount(projection.getModeledAutomationLinkAttackPointCount())
-                .enablePrivacy(projection.getEnablePrivacy())
-                .modelSnapshotJson(projection.getModelSnapshotJson())
-                .modelSemanticsJson(projection.getModelSemanticsJson())
-                .outcome(projection.getOutcome())
-                .violatedSpecCount(projection.getViolatedSpecCount())
-                .disabledRuleCount(projection.getDisabledRuleCount())
-                .skippedSpecCount(projection.getSkippedSpecCount())
-                .generationIssuesJson(projection.getGenerationIssuesJson())
-                .errorMessage(projection.getErrorMessage())
-                .progress(projection.getProgress())
-                .progressStage(projection.getProgressStage())
-                .build());
-    }
-
-    /**
-     * List<VerificationTaskPo> -> List<VerificationTaskDto>
-     */
-    public List<VerificationTaskDto> toDtoList(List<VerificationTaskPo> poList) {
-        if (poList == null) {
-            return List.of();
-        }
-        return poList.stream()
-                .map(this::toDto)
-                .toList();
-    }
-
-    public VerificationTaskSummaryDto toSummaryDto(VerificationResultView po) {
+    public VerificationTaskSummaryDto toSummaryDto(VerificationTaskView po) {
         if (po == null) {
             return null;
         }
@@ -231,7 +190,7 @@ public class VerificationTaskMapper {
                 .build();
     }
 
-    private VerificationOutcome taskOutcome(VerificationResultView po, String recordType) {
+    private VerificationOutcome taskOutcome(VerificationTaskView po, String recordType) {
         if (po.getStatus() == null) {
             throw new PersistedDataIntegrityException(
                     recordType, po.getId(), "status", "task status is missing");
@@ -251,7 +210,7 @@ public class VerificationTaskMapper {
         return po.getOutcome();
     }
 
-    private Boolean taskModelComplete(VerificationResultView po, VerificationOutcome outcome) {
+    private Boolean taskModelComplete(VerificationTaskView po, VerificationOutcome outcome) {
         if (outcome == null) {
             return null;
         }
@@ -294,13 +253,13 @@ public class VerificationTaskMapper {
                 });
     }
 
-    private List<ModelGenerationIssueDto> readGenerationIssues(VerificationResultView po) {
+    private List<ModelGenerationIssueDto> readGenerationIssues(VerificationTaskView po) {
         return JsonUtils.readPersisted("verification task", po.getId(), "generationIssuesJson",
                 () -> JsonUtils.fromJsonList(po.getGenerationIssuesJson(), ModelGenerationIssueDto.class));
     }
 
     private PersistedModelContextIntegrity.ValidatedContext modelContext(
-            VerificationResultView po, String recordType) {
+            VerificationTaskView po, String recordType) {
         return PersistedModelContextIntegrity.readVerification(
                 recordType, po.getId(), po.getIsAttack(), po.getAttackBudget(), po.getEnablePrivacy(),
                 po.getModeledDeviceAttackPointCount(), po.getModeledFalsifiableReadingDeviceCount(),
@@ -335,7 +294,7 @@ public class VerificationTaskMapper {
         return outcome;
     }
 
-    private void validateLifecycle(VerificationResultView po, String recordType) {
+    private void validateLifecycle(VerificationTaskView po, String recordType) {
         if (po.getId() == null || po.getId() < 1) {
             fail(recordType, po.getId(), "id", "task id is missing or invalid");
         }
@@ -357,37 +316,12 @@ public class VerificationTaskMapper {
         if (po.getProcessingTimeMs() != null && po.getProcessingTimeMs() < 0) {
             fail(recordType, po.getId(), "processingTimeMs", "processing time cannot be negative");
         }
-        validateTimeOrder(po, recordType);
+        PersistedTaskLifecycle.validateTimeOrder(recordType, po.getId(), po.getCreatedAt(),
+                po.getStartedAt(), po.getCompletedAt(), po.getProcessingTimeMs());
 
         VerificationTaskPo.TaskStatus status = po.getStatus();
-        boolean terminal = status == VerificationTaskPo.TaskStatus.COMPLETED
-                || status == VerificationTaskPo.TaskStatus.FAILED
-                || status == VerificationTaskPo.TaskStatus.CANCELLED;
-        if (status == VerificationTaskPo.TaskStatus.PENDING && po.getStartedAt() != null) {
-            fail(recordType, po.getId(), "startedAt", "pending task cannot have a start time");
-        }
-        if ((status == VerificationTaskPo.TaskStatus.RUNNING
-                || status == VerificationTaskPo.TaskStatus.COMPLETED)
-                && po.getStartedAt() == null) {
-            fail(recordType, po.getId(), "startedAt", "running or completed task start time is missing");
-        }
-        if (terminal) {
-            if (po.getCompletedAt() == null) {
-                fail(recordType, po.getId(), "completedAt", "terminal task completion time is missing");
-            }
-            // Only a COMPLETED run finished its work; a cancelled or failed one keeps the progress
-            // its last heartbeat reported. Requiring 100 of every terminal status made such a row
-            // unreadable, answering HTTP 500 for a run the user had cancelled partway.
-            if (status == VerificationTaskPo.TaskStatus.COMPLETED && po.getProgress() != 100) {
-                fail(recordType, po.getId(), "progress", "completed task progress must be 100");
-            }
-        } else if (po.getCompletedAt() != null) {
-            fail(recordType, po.getId(), "completedAt", "active task cannot have a completion time");
-        }
-        if (status == VerificationTaskPo.TaskStatus.FAILED
-                && (po.getErrorMessage() == null || po.getErrorMessage().isBlank())) {
-            fail(recordType, po.getId(), "errorMessage", "failed task error message is missing");
-        }
+        PersistedTaskLifecycle.validateStatus(recordType, po.getId(), status.name(),
+                po.getStartedAt(), po.getCompletedAt(), po.getProgress(), po::getErrorMessage);
         if (status == VerificationTaskPo.TaskStatus.COMPLETED) {
             if (po.getProcessingTimeMs() == null) {
                 fail(recordType, po.getId(), "processingTimeMs", "completed task processing time is missing");
@@ -395,22 +329,6 @@ public class VerificationTaskMapper {
             requireCompletedCount(recordType, po.getId(), "violatedSpecCount", po.getViolatedSpecCount());
             requireCompletedCount(recordType, po.getId(), "disabledRuleCount", po.getDisabledRuleCount());
             requireCompletedCount(recordType, po.getId(), "skippedSpecCount", po.getSkippedSpecCount());
-        }
-    }
-
-    private void validateTimeOrder(VerificationResultView po, String recordType) {
-        if (po.getStartedAt() != null && po.getStartedAt().isBefore(po.getCreatedAt())) {
-            fail(recordType, po.getId(), "startedAt", "task start time precedes creation time");
-        }
-        if (po.getCompletedAt() != null
-                && (po.getCompletedAt().isBefore(po.getCreatedAt())
-                || (po.getStartedAt() != null && po.getCompletedAt().isBefore(po.getStartedAt())))) {
-            fail(recordType, po.getId(), "completedAt", "task completion time is out of order");
-        }
-        if (po.getProcessingTimeMs() != null
-                && (po.getStartedAt() == null || po.getCompletedAt() == null)) {
-            fail(recordType, po.getId(), "processingTimeMs",
-                    "processing time requires start and completion times");
         }
     }
 

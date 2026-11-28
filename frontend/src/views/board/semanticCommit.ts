@@ -4,6 +4,11 @@ import type { ModelEnvironmentVariable } from '@/types/model'
 import type { RuleForm } from '@/types/rule'
 import type { Specification } from '@/types/spec'
 
+export interface BoardNodeSnapshotOptions {
+  externalRefresh?: boolean
+  locallyRemovedNodeId?: string
+}
+
 /**
  * The follow-ups every device/rule/specification mutation owes the rest of the board.
  *
@@ -18,6 +23,7 @@ import type { Specification } from '@/types/spec'
 export interface BoardSemanticScene {
   /** Authoritative device list, when the mutation returned one. */
   nodes?: DeviceNode[]
+  nodeSnapshotOptions?: BoardNodeSnapshotOptions
   /** Authoritative Environment Pool, when a device mutation changed its required variables. */
   environmentVariables?: ModelEnvironmentVariable[]
   /** Authoritative rule list, when the mutation returned one. */
@@ -50,7 +56,7 @@ export const reconcileBoardFocus = (
 })
 
 export interface BoardSemanticCommitPorts {
-  setNodes: (nodes: DeviceNode[]) => void
+  setNodes: (nodes: DeviceNode[], options?: BoardNodeSnapshotOptions) => void
   setEnvironmentVariables: (variables: ModelEnvironmentVariable[]) => void
   setRules: (rules: RuleForm[]) => void
   setSpecs: (specs: Specification[]) => void
@@ -60,8 +66,8 @@ export interface BoardSemanticCommitPorts {
    * A semantic change invalidates any displayed verdict; it described the previous model.
    *
    * Mutations that run inside the board mutation queue are already marked stale by its
-   * fingerprint comparison, so for them this is a harmless second call. It is load-bearing for
-   * undo/redo, whose queue deliberately opts out of a second fingerprint comparison.
+   * fingerprint comparison. Direct mutation receipts also withdraw stale verdict actions
+   * as soon as their authoritative collections are installed.
    */
   markVerificationResultStale: () => void
   /** Mirrors server-reported undo availability. Omitted availability must not clear real history. */
@@ -78,7 +84,7 @@ export interface BoardSemanticCommitPorts {
  */
 export const createBoardSemanticCommit = (ports: BoardSemanticCommitPorts) =>
   (scene: BoardSemanticScene): void => {
-    if (scene.nodes) ports.setNodes(scene.nodes)
+    if (scene.nodes) ports.setNodes(scene.nodes, scene.nodeSnapshotOptions)
     if (scene.environmentVariables) ports.setEnvironmentVariables(scene.environmentVariables)
     if (scene.rules) ports.setRules(scene.rules)
     if (scene.specs) ports.setSpecs(scene.specs)

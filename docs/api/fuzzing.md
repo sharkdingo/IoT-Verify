@@ -403,8 +403,8 @@ specification, trace-state, and input-event LONGTEXT. The run, presentation, and
 are captured in one read-only transaction. JSON validation and DTO assembly follow that capture,
 after a standalone read has returned its database connection; an enclosing transaction retains
 its ownership and original rollback propagation for decoding exceptions that escape the service.
-Run detail likewise captures its owned run and complete ordered findings together, then validates
-and assembles the captured evidence after releasing a standalone connection.
+Run detail and its findings collection likewise capture the owned run and complete ordered findings
+together, then validate and assemble the captured evidence after releasing a standalone connection.
 A separate bounded projection extracts
 only the specification array and token-source map from the owning run's version-`1`
 frozen-input envelope. MySQL validates and materializes each selected envelope as JSON once
@@ -497,8 +497,11 @@ was requested — see the workload section above.
 `finding: FuzzFindingDto` plus the owning run's validated `modelSnapshot` and
 `playbackScene`. This is the replay contract for a selected history item or
 `run=exploration:<runId>&finding=<findingId>` link: clients verify that
-`finding.fuzzTaskId` equals the URL's `runId`, then render only this frozen scene. A
-`FuzzFindingDto` is:
+`finding.fuzzTaskId` equals the URL's `runId`, then render only this frozen scene.
+The replay read captures the finding, its owned completed run, and the actual finding count in
+one read-only transaction and follows the [run history connection boundary](#run-results).
+
+A `FuzzFindingDto` is:
 
 | Field | Type | Meaning |
 | :--- | :--- | :--- |

@@ -1,5 +1,15 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
+import cn.edu.nju.Iot_Verify.component.aitool.simulation.SimulateModelAsyncTool;
+import cn.edu.nju.Iot_Verify.component.aitool.simulation.SimulateModelTool;
+import cn.edu.nju.Iot_Verify.component.aitool.verification.VerifyModelAsyncTool;
+import cn.edu.nju.Iot_Verify.component.aitool.verification.VerifyModelTool;
+import cn.edu.nju.Iot_Verify.security.UserContextHolder;
+import cn.edu.nju.Iot_Verify.service.SimulationService;
+import cn.edu.nju.Iot_Verify.service.VerificationService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -14,8 +24,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * An AI tool must reach the database through the service layer, never a repository.
@@ -84,41 +97,49 @@ class AiToolLayeringContractTest {
                         + "and BoardEditJournal.record — the mutation would commit but could never be undone");
     }
 
-    /*
-     * A tool must not describe a mode it rejects — the mirror of the divergence above.
-     *
-     * Consolidating the schema, I first wrote one description naming `exhaustive`. Simulation passes
-     * `allowExhaustive=false` to `attackScenarioArg` and offers `enum ["none","exact"]`, so that text told the
-     * model about a mode simulation refuses: the same defect as the original divergence, introduced from the
-     * other side while fixing it. The schema now takes the capability as an argument, and this pins that each
-     * tool passes the value matching its own `attackScenarioArg` call.
-     */
     @Test
     @DisplayName("each tool's attackPoints description matches the modes it accepts")
-    void attackPointsSchemaCapabilityMatchesTheValidator() throws IOException {
-        List<String> offenders = new ArrayList<>();
-        int inspected = 0;
-        try (Stream<Path> stream = Files.walk(Paths.get("src/main/java/cn/edu/nju/Iot_Verify/component/aitool"))) {
-            for (Path file : stream.filter(path -> path.toString().endsWith(".java")).toList()) {
-                String body = Files.readString(file, StandardCharsets.UTF_8);
-                if (!body.contains("attackPointsSchema(")) continue;
-                String name = file.getFileName().toString();
-                if (name.equals("AbstractAiTool.java")) continue;
-                inspected += 1;
-                boolean schemaAllowsExhaustive = body.contains("attackPointsSchema(true)");
-                boolean validatorAllowsExhaustive = body.contains("attackScenarioArg(args, true)");
-                if (schemaAllowsExhaustive != validatorAllowsExhaustive) {
-                    offenders.add(name + ": schema says exhaustive=" + schemaAllowsExhaustive
-                            + " but attackScenarioArg says " + validatorAllowsExhaustive);
-                }
-            }
+    void attackPointsSchemaCapabilityMatchesTheValidator() {
+        ObjectMapper mapper = new ObjectMapper();
+        SimulationService simulation = mock(SimulationService.class);
+        VerificationService verification = mock(VerificationService.class);
+        UserContextHolder.setUserId(1L);
+        try {
+            assertAll(
+                    () -> assertAttackPointsCapability(new SimulateModelTool(simulation, mapper), mapper, false),
+                    () -> assertAttackPointsCapability(new SimulateModelAsyncTool(simulation, mapper), mapper, false),
+                    () -> assertAttackPointsCapability(new VerifyModelTool(verification, mapper), mapper, true),
+                    () -> assertAttackPointsCapability(new VerifyModelAsyncTool(verification, mapper), mapper, true),
+                    () -> verifyNoInteractions(simulation, verification));
+        } finally {
+            UserContextHolder.clear();
         }
-        // A coverage floor, matching the sibling checks in this file. Without it an empty walk — a moved package, a
-        // renamed suffix — reports success, which is the failure mode this suite has already produced elsewhere.
-        assertTrue(inspected >= 4,
-                "expected at least 4 tools calling attackScenarioArg, inspected " + inspected
-                        + " — the scan is probably broken, so an empty offender list proves nothing");
-        assertTrue(offenders.isEmpty(),
-                "a tool described a mode it does not accept: " + offenders);
+    }
+
+    private static void assertAttackPointsCapability(AiTool tool, ObjectMapper mapper, boolean exhaustive)
+            throws IOException {
+        String name = tool.getName();
+        JsonNode schema = mapper.valueToTree(tool.getDefinition().parameters().properties);
+        String description = schema.path("attackPoints").path("description").asText();
+        assertTrue(description.contains("exact"), name + " attackPoints description must mention exact");
+        assertEquals(exhaustive, description.contains("exhaustive"), name + " attackPoints description");
+        JsonNode expectedModes = mapper.valueToTree(exhaustive ? List.of("none", "exact", "exhaustive")
+                : List.of("none", "exact"));
+        assertEquals(expectedModes, schema.path("attackMode").path("enum"), name + " attackMode enum");
+
+        ObjectNode args = mapper.createObjectNode().put("attackMode", "exhaustive");
+        args.putArray("attackPoints").addObject().put("kind", "device").put("deviceId", "d1");
+        if (exhaustive) {
+            args.put("attackBudget", 1);
+        }
+        JsonNode error = mapper.readTree(tool.execute(args.toString()));
+        assertEquals("VALIDATION_ERROR", error.path("errorCode").asText(), name);
+        assertEquals(400, error.path("status").asInt(), name);
+        String message = error.path("error").asText();
+        if (exhaustive) {
+            assertEquals("attackPoints must be omitted or empty when attackMode is exhaustive.", message, name);
+        } else {
+            assertTrue(message.startsWith("attackMode must be one of: "), name + " returned: " + message);
+        }
     }
 }

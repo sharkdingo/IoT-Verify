@@ -25,7 +25,7 @@ export const isBoardMutationRequest = (config: { url?: string; method?: string }
   const method = (config.method || 'get').toLowerCase()
   if (method === 'get' || method === 'head' || method === 'options') return false
   const path = (config.url || '').split('?')[0]
-  if (/^\/?board\/(?:rules\/check-(?:duplicate|similarity)|(?:rules|specs)\/recommend)$/.test(path)) return false
+  if (/^\/?board\/(?:rules\/check-(?:duplicate|similarity(?:\/batch)?)|(?:rules|specs)\/recommend)$/.test(path)) return false
   // `edits/availability` is a GET and already excluded above; `edits/undo|redo` change rules and
   // specifications when they apply, so other tabs must be invalidated exactly as for a direct
   // mutation. The response interceptor skips the no-op case (`applied: false`).

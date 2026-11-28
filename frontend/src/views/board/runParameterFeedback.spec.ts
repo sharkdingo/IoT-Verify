@@ -34,7 +34,7 @@ const setup = (kind: 'verification' | 'simulation', mode: string, locale: string
     boardRunBlockedReason: Vue.ref(''), boardAttackSurface: { points: [] },
     isVerifying: Vue.ref(false), isSimulating: false, synchronousSimulationRunning: Vue.ref(false),
     synchronousVerificationRunning: Vue.ref(false), isBoardDataReady: true, failedBoardDataKeys: [],
-    traceAnimationState: Vue.ref({ visible: false }), simulationAnimationState: Vue.ref({ visible: false }),
+    isModelPlaybackActive: Vue.ref(false),
     formalRunIssueMessage: () => '', attackBudgetMax: 2, attackSurfacePointCount: 2, attackBudgetIsCapped: false,
     setAttackMode: vi.fn(), toggleAttackPoint: vi.fn(), handleVerify: vi.fn(), runSimulation: vi.fn(),
     [`${kind}Form`]: Vue.reactive({ isAttack: true, attackMode: mode, attackBudget: 0,

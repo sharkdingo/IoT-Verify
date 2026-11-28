@@ -1,15 +1,24 @@
-export type AsyncTaskStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+const ASYNC_TASK_STATUS_VALUES = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED'] as const
+export type AsyncTaskStatus = typeof ASYNC_TASK_STATUS_VALUES[number]
 
-export type TaskProgressStage =
-  | 'QUEUED'
-  | 'STARTING'
-  | 'GENERATING_MODEL'
-  | 'EXECUTING_MODEL_CHECKER'
-  | 'PARSING_RESULTS'
-  | 'RUNNING_SIMULATION'
-  | 'PREPARING_EXPLORATION'
-  | 'EXPLORING_CANDIDATES'
-  | 'PERSISTING_RESULT'
+const TASK_PROGRESS_STAGE_VALUES = [
+  'QUEUED',
+  'STARTING',
+  'GENERATING_MODEL',
+  'EXECUTING_MODEL_CHECKER',
+  'PARSING_RESULTS',
+  'RUNNING_SIMULATION',
+  'PREPARING_EXPLORATION',
+  'EXPLORING_CANDIDATES',
+  'PERSISTING_RESULT'
+] as const
+export type TaskProgressStage = typeof TASK_PROGRESS_STAGE_VALUES[number]
+
+const taskStatuses = new Set<unknown>(ASYNC_TASK_STATUS_VALUES)
+const taskProgressStages = new Set<unknown>(TASK_PROGRESS_STAGE_VALUES)
+
+export const isAsyncTaskStatus = (value: unknown): value is AsyncTaskStatus => taskStatuses.has(value)
+export const isTaskProgressStage = (value: unknown): value is TaskProgressStage => taskProgressStages.has(value)
 
 export const INTERACTIVE_OPERATION_STAGES = [
   'QUEUED',

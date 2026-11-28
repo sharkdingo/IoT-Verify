@@ -8,7 +8,6 @@ import java.util.List;
 
 public interface DeviceNodeRepository extends JpaRepository<DeviceNodePo, DeviceNodeId> {
     List<DeviceNodePo> findByUserId(Long userId);
-    boolean existsByUserIdAndId(Long userId, String id);
 
     void deleteByUserId(Long userId);
 }

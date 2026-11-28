@@ -4,6 +4,8 @@ import cn.edu.nju.Iot_Verify.configure.DatabaseSchemaConstraints;
 import cn.edu.nju.Iot_Verify.configure.AsyncTaskAdmissionConfig;
 import cn.edu.nju.Iot_Verify.configure.FuzzAdmissionConfig;
 import cn.edu.nju.Iot_Verify.configure.ThreadPoolConfig;
+import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzFindingDto;
+import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzFindingReplayDto;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzRunSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzRunDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTraceDto;
@@ -12,6 +14,7 @@ import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRunDto;
+import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
 import cn.edu.nju.Iot_Verify.po.FuzzFindingPo;
 import cn.edu.nju.Iot_Verify.po.SimulationTracePo;
 import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
@@ -47,6 +50,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -67,6 +71,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
+import java.util.function.LongFunction;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -218,56 +224,78 @@ class HistoryReadTransactionMySqlIntegrationTest {
         }
     }
 
-    @Test
-    void explorationDetailCapturesFindingEvidenceBeforeReleasingItsConnection() {
+    private enum ExplorationDetail { RUN, FINDINGS, FINDING, REPLAY }
+
+    @ParameterizedTest
+    @EnumSource(ExplorationDetail.class)
+    void explorationDetailCapturesFindingEvidenceBeforeReleasingItsConnection(ExplorationDetail detail) {
         var transaction = new TransactionTemplate(transactions);
         var saved = transaction.execute(status -> {
             var run = fuzzTasks.saveAndFlush(FuzzTaskPo.builder().userId(ownerId)
                     .status(FuzzTaskPo.TaskStatus.COMPLETED).targetSpecIdsJson("[]")
                     .maxIterations(1).pathLength(2).populationSize(1).modelSnapshotJson("{}")
                     .modelInputSnapshotJson("{}").build());
-            findings.saveAndFlush(FuzzFindingPo.builder().userId(ownerId).fuzzTaskId(run.getId())
+            return findings.saveAndFlush(FuzzFindingPo.builder().userId(ownerId).fuzzTaskId(run.getId())
                     .violatedSpecId("spec-1").violatedSpecJson("{\"id\":\"spec-1\"}")
                     .firstViolationStep(0).statesJson("[{\"devices\":[]}]")
                     .inputEventsJson("[]").seed(17L).stateCount(1).build());
-            return run;
         });
+        Long runId = saved.getFuzzTaskId();
+        Long findingId = saved.getId();
+        var findingDto = FuzzFindingDto.builder().id(findingId).fuzzTaskId(runId).build();
         var mapper = mock(FuzzMapper.class);
         var callerTransaction = new AtomicBoolean(true);
         var decodeFailure = new IllegalStateException("detail decoding failed");
-        when(mapper.toRunDto(any(), anyList())).thenAnswer(invocation -> {
+        BiConsumer<FuzzTaskPo, FuzzFindingPo> decode = (run, finding) -> {
             requireStandaloneDecoder(callerTransaction, decodeFailure);
             transaction.executeWithoutResult(status -> {
-                findings.deleteByUserIdAndFuzzTaskId(ownerId, saved.getId());
-                fuzzTasks.deleteById(saved.getId());
+                findings.deleteByUserIdAndFuzzTaskId(ownerId, runId);
+                fuzzTasks.deleteById(runId);
             });
-            FuzzTaskPo run = invocation.getArgument(0);
-            List<FuzzFindingPo> evidence = invocation.getArgument(1);
-            assertEquals(saved.getId(), run.getId());
+            assertEquals(runId, run.getId());
             assertEquals("{}", run.getModelSnapshotJson());
+            assertEquals(findingId, finding.getId());
+            assertEquals(saved.getStatesJson(), finding.getStatesJson());
+            assertEquals(17L, finding.getSeed());
+        };
+        when(mapper.toRunDto(any(), anyList())).thenAnswer(invocation -> {
+            List<FuzzFindingPo> evidence = invocation.getArgument(1);
             assertEquals(1, evidence.size());
-            assertEquals(new ObjectMapper().readTree("[{\"devices\":[]}]"),
-                    new ObjectMapper().readTree(evidence.get(0).getStatesJson()));
-            assertEquals(17L, evidence.get(0).getSeed());
-            return FuzzRunDto.builder().id(run.getId()).build();
+            decode.accept(invocation.getArgument(0), evidence.get(0));
+            return FuzzRunDto.builder().id(runId).findings(List.of(findingDto)).build();
+        });
+        when(mapper.toFindingDto(any(), any(), eq(1L))).thenAnswer(invocation -> {
+            decode.accept(invocation.getArgument(0), invocation.getArgument(1));
+            return findingDto;
+        });
+        when(mapper.toFindingReplayDto(any(), any(), eq(1L))).thenAnswer(invocation -> {
+            decode.accept(invocation.getArgument(0), invocation.getArgument(1));
+            return FuzzFindingReplayDto.builder().finding(findingDto).build();
         });
         var target = new FuzzServiceImpl(fuzzTasks, findings, null, null, null, null,
                 new ModelFingerprint(new ObjectMapper()), mapper, null, new FuzzAdmissionConfig(),
                 new ThreadPoolConfig(), transaction, null, new ObjectMapper());
         try {
             FuzzService service = (FuzzService) transactionalProxy(target);
+            LongFunction<Long> readId = switch (detail) {
+                case RUN -> userId -> service.getRun(userId, runId).getId();
+                case FINDINGS -> userId -> service.getFindings(userId, runId).get(0).getId();
+                case FINDING -> userId -> service.getFinding(userId, findingId).getId();
+                case REPLAY -> userId -> service.getFindingReplay(userId, findingId).getFinding().getId();
+            };
+            assertThrows(ResourceNotFoundException.class, () -> readId.apply(ownerId + 1));
             assertCallerRollsBack(transaction,
-                    () -> fuzzTasks.findById(saved.getId()).orElseThrow().setMaxIterations(2),
-                    () -> service.getRun(ownerId, saved.getId()), decodeFailure);
-            assertEquals(1, fuzzTasks.findById(saved.getId()).orElseThrow().getMaxIterations());
+                    () -> fuzzTasks.findById(runId).orElseThrow().setMaxIterations(2),
+                    () -> readId.apply(ownerId), decodeFailure);
+            assertEquals(1, fuzzTasks.findById(runId).orElseThrow().getMaxIterations());
             callerTransaction.set(false);
-            assertEquals(saved.getId(), service.getRun(ownerId, saved.getId()).getId());
-            assertFalse(fuzzTasks.existsById(saved.getId()));
+            assertEquals(detail == ExplorationDetail.RUN ? runId : findingId, readId.apply(ownerId));
+            assertFalse(fuzzTasks.existsById(runId));
         } finally {
             target.stopTaskLeaseMaintenance();
             transaction.executeWithoutResult(status -> {
-                findings.deleteByUserIdAndFuzzTaskId(ownerId, saved.getId());
-                fuzzTasks.deleteById(saved.getId());
+                findings.deleteByUserIdAndFuzzTaskId(ownerId, runId);
+                fuzzTasks.deleteById(runId);
             });
         }
     }

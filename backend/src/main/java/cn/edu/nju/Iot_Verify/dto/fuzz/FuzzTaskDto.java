@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.dto.fuzz;
 
+import cn.edu.nju.Iot_Verify.dto.model.TaskToolState;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.dto.model.RunInitiator;
 
@@ -19,7 +20,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class FuzzTaskDto {
+public class FuzzTaskDto implements TaskToolState {
     private Long id;
     private RunInitiator initiator;
     private String status;

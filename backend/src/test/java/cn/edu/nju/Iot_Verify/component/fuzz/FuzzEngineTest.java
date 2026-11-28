@@ -26,6 +26,8 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -175,7 +177,7 @@ class FuzzEngineTest {
         FuzzModel model = FuzzModel.from(symmetricNumericSnapshot(List.of(specification)));
         PaperEventDomainSnapshot domain = model.paperEventDomain(3);
         long nonce = 0L;
-        while ("2".equals(domain.materializeInitialState(nonce).get(0).value())) {
+        while ("2".equals(domain.materializeInitialValues(nonce).get(0).value())) {
             nonce++;
         }
 
@@ -212,6 +214,7 @@ class FuzzEngineTest {
                 event.step() == 1
                         && event.kind() == FuzzInputEventKind.ENVIRONMENT_RATE
                         && event.source() == FuzzInputEventSource.SEED_EVENT
+                        && "environment".equals(event.targetId())
                         && "temperature".equals(event.property())
                         && "rate:1".equals(event.value())));
         assertTrue(withRate.inputEvents().stream().anyMatch(event ->
@@ -228,11 +231,28 @@ class FuzzEngineTest {
     }
 
     @Test
+    void paperSeedRejectsInvalidRatesAndPositionsBeforeSimulation() {
+        FuzzModel model = FuzzModel.from(symmetricNumericSnapshot(List.of()));
+        PaperEventDomainSnapshot domain = model.paperEventDomain(3);
+        String invalidRate = "Paper-compatible environment event is outside its legal domain.";
+        for (var entry : Map.of(
+                new PaperEvent(PaperEvent.Type.ENVIRONMENT, "temperature", "invalid", 2), invalidRate,
+                new PaperEvent(PaperEvent.Type.ENVIRONMENT, "temperature", "2", 2), invalidRate,
+                new PaperEvent(PaperEvent.Type.ENVIRONMENT, "temperature", "rate:1", 4),
+                "Paper-compatible event is outside the configured trace.").entrySet()) {
+            PaperSeed seed = new PaperSeed(7L, List.of(entry.getKey()));
+            var failure = assertThrows(FuzzModel.ModelException.class,
+                    () -> model.simulatePaperSeed(seed, domain, 3, () -> false));
+            assertEquals(entry.getValue(), failure.getMessage());
+        }
+    }
+
+    @Test
     void paperRateEventMatchesFigureFiveWithoutBaselineNaturalEvolution() {
         FuzzModel model = FuzzModel.from(paperFigureNumericSnapshot());
         PaperEventDomainSnapshot domain = model.paperEventDomain(3);
         long nonce = 0L;
-        while (!"26".equals(domain.materializeInitialState(nonce).get(0).value())) {
+        while (!"26".equals(domain.materializeInitialValues(nonce).get(0).value())) {
             nonce++;
         }
 
@@ -303,9 +323,9 @@ class FuzzEngineTest {
         FuzzModel model = FuzzModel.from(paperForcedEnvironmentAssignmentSnapshot());
         PaperEventDomainSnapshot domain = model.paperEventDomain(2);
         long nonce = 0L;
-        while (!"26".equals(domain.materializeInitialState(nonce).stream()
-                .filter(event -> event.type() == PaperEvent.Type.ENVIRONMENT
-                        && "temperature".equals(event.name()))
+        while (!"26".equals(domain.materializeInitialValues(nonce).stream()
+                .filter(event -> event.type() == PaperInitialValue.Type.ENVIRONMENT_VALUE
+                        && "temperature".equals(event.property()))
                 .findFirst()
                 .orElseThrow()
                 .value())) {
@@ -378,12 +398,12 @@ class FuzzEngineTest {
         PaperEventDomainSnapshot domain = model.paperEventDomain(3);
         long nonce = 0L;
         while (true) {
-            List<PaperEvent> initial = domain.materializeInitialState(nonce);
+            List<PaperInitialValue> initial = domain.materializeInitialValues(nonce);
             boolean startsCool = initial.stream().anyMatch(event ->
-                    event.type() == PaperEvent.Type.DEVICE && "cool".equals(event.value()));
+                    event.type() == PaperInitialValue.Type.DEVICE_STATE && "cool".equals(event.value()));
             boolean startsAtUpperBoundary = initial.stream().anyMatch(event ->
-                    event.type() == PaperEvent.Type.ENVIRONMENT
-                            && "temperature".equals(event.name())
+                    event.type() == PaperInitialValue.Type.ENVIRONMENT_VALUE
+                            && "temperature".equals(event.property())
                             && "100".equals(event.value()));
             if (startsCool && startsAtUpperBoundary) {
                 FuzzModel.Simulation baseline = model.simulatePaperSeed(
@@ -457,6 +477,8 @@ class FuzzEngineTest {
                 event.step() == 1
                         && event.kind() == FuzzInputEventKind.ENVIRONMENT_VALUE
                         && event.source() == FuzzInputEventSource.SEED_EVENT
+                        && "environment".equals(event.targetId())
+                        && "weather".equals(event.property())
                         && "rate:idle".equals(event.value())));
     }
 
@@ -480,9 +502,9 @@ class FuzzEngineTest {
                 List.of(), List.of(turnOnWhenRain), switchManifest()));
         PaperEventDomainSnapshot domain = model.paperEventDomain(3);
         long nonce = 0L;
-        while (domain.materializeInitialState(nonce).stream()
-                .filter(event -> event.type() == PaperEvent.Type.ENVIRONMENT)
-                .noneMatch(event -> "weather".equals(event.name())
+        while (domain.materializeInitialValues(nonce).stream()
+                .filter(event -> event.type() == PaperInitialValue.Type.ENVIRONMENT_VALUE)
+                .noneMatch(event -> "weather".equals(event.property())
                         && "calm".equals(event.value()))) {
             nonce++;
         }
@@ -621,8 +643,11 @@ class FuzzEngineTest {
                         && event.source() == FuzzInputEventSource.RANDOM_INITIAL_STATE
                         && "firmware".equals(event.property())));
         assertTrue(simulation.inputEvents().stream().anyMatch(event ->
-                event.kind() == FuzzInputEventKind.DEVICE_STATE
+                event.step() == 0
+                        && event.kind() == FuzzInputEventKind.DEVICE_STATE
                         && event.source() == FuzzInputEventSource.SEED_EVENT
+                        && "switch_1".equals(event.targetId())
+                        && "state".equals(event.property())
                         && "on".equals(event.value())));
     }
 
@@ -1604,8 +1629,9 @@ class FuzzEngineTest {
                         + "longer reach every candidate at that slot");
     }
 
-    @Test
-    void anExhaustedTimeBudgetEndsTheSearchAsBoundedRatherThanCancelled() {
+    @ParameterizedTest
+    @EnumSource(FuzzExplorationMode.class)
+    void anExhaustedTimeBudgetEndsTheSearchAsBoundedRatherThanCancelled(FuzzExplorationMode mode) {
         // A deadline is not a cancellation. Routing it through `cancelled` would make the service settle the
         // task as CANCELLED — reporting a timeout as something the user did, and persisting no result. It
         // ends the search the way a spent iteration budget does, and discloses why.
@@ -1613,15 +1639,19 @@ class FuzzEngineTest {
         BoardDataConverter.ModelInputSnapshot snapshot = snapshot(
                 List.of(unviolable), List.of(), switchManifest());
 
+        List<String> progress = new ArrayList<>();
         FuzzEngineResult result = engine.run(
-                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 500, 5, 4, 11L)),
-                null,
+                new FuzzEngineInput(snapshot, new FuzzEngineConfig(List.of(), 500, 5, 4, 11L, mode)),
+                (percent, message) -> progress.add(percent + ": " + message),
                 () -> false,
                 () -> true);
 
         assertEquals(FuzzEngineOutcome.BUDGET_EXHAUSTED, result.outcome());
         assertTrue(result.limitations().contains(FuzzEngine.TIME_BUDGET_EXHAUSTED_LIMITATION),
                 "a run the clock ended must disclose it, or it is indistinguishable from a full search");
+        assertEquals(mode == FuzzExplorationMode.PAPER_COMPATIBLE
+                        ? "100: Paper-compatible time budget exhausted" : "100: Time budget exhausted",
+                progress.get(progress.size() - 1));
         // Stopped before the requested budget, and says so truthfully rather than claiming the full run.
         assertTrue(result.iterations() < 500,
                 "iterations " + result.iterations() + " should be short of the requested budget");
@@ -2208,7 +2238,8 @@ class FuzzEngineTest {
                 deviceSmvMap,
                 AttackScenarioDto.none(),
                 true,
-                SmvGenerationContext.noop());
+                SmvGenerationContext.noop(),
+                List.of());
         int start = model.indexOf("next(a_weather)");
         int end = start < 0 ? -1 : model.indexOf("esac;", start);
         assertTrue(start >= 0 && end > start);

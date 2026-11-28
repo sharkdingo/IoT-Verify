@@ -1,7 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.node;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
-import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceLayoutDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceMutationResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
@@ -39,7 +38,7 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-public class EditDeviceTool extends AbstractAiTool {
+public class EditDeviceTool extends DeviceRuntimeAiTool {
 
     private final BoardStorageService boardStorageService;
 
@@ -110,12 +109,7 @@ public class EditDeviceTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "id", "field", "label", "state", "currentStateTrust", "currentStatePrivacy",
                     "variables", "privacies", "x", "y", "w", "h"));
@@ -187,7 +181,7 @@ public class EditDeviceTool extends AbstractAiTool {
         body.put("device", renamed);
         body.put("updatedSpecificationCount", result.getUpdatedSpecificationCount());
         body.put("environmentChanges", result.getEnvironmentChanges());
-        return successJson(body, "Device renamed.");
+        return successJson(body);
     }
 
     private String editRuntime(Long userId, String id, JsonNode args) throws ArgValidationException {
@@ -215,7 +209,7 @@ public class EditDeviceTool extends AbstractAiTool {
         body.put("field", "runtime");
         body.put("changedFields", result.getChangedFields());
         body.put("device", result.getCurrentDevice());
-        return successJson(body, "Device runtime updated.");
+        return successJson(body);
     }
 
     private String editLayout(Long userId, String id, JsonNode args) throws ArgValidationException {
@@ -244,7 +238,7 @@ public class EditDeviceTool extends AbstractAiTool {
         body.put("field", "layout");
         body.put("changedFields", result.getChangedFields());
         body.put("device", result.getCurrentDevice());
-        return successJson(body, "Device layout updated.");
+        return successJson(body);
     }
 
     private DeviceNodeDto requireDevice(Long userId, String id) {
@@ -282,7 +276,7 @@ public class EditDeviceTool extends AbstractAiTool {
                     List.of("public", "private"));
         }
         if (has(args, "variables")) {
-            parseVariables(args.path("variables"), List.of());
+            replacementVariables(args.path("variables"), List.of());
         }
         if (has(args, "privacies")) {
             parsePrivacies(args.path("privacies"));
@@ -321,48 +315,12 @@ public class EditDeviceTool extends AbstractAiTool {
                     "currentStatePrivacy", List.of("public", "private")));
         }
         if (has(args, "variables")) {
-            desired.setVariables(parseVariables(args.path("variables"), current.getVariables()));
+            desired.setVariables(replacementVariables(args.path("variables"), current.getVariables()));
         }
         if (has(args, "privacies")) {
             desired.setPrivacies(parsePrivacies(args.path("privacies")));
         }
         return desired;
-    }
-
-    private List<VariableStateDto> parseVariables(JsonNode node, List<VariableStateDto> current)
-            throws ArgValidationException {
-        if (!node.isArray()) throw validation("variables must be a JSON array.");
-        List<VariableStateDto> variables = new ArrayList<>();
-        int index = 0;
-        for (JsonNode item : node) {
-            String itemPath = "arguments.variables[" + index + "]";
-            requireOnlyFields(item, itemPath, Set.of("name", "value", "trust"));
-            String name = requiredTextField(item, "name", itemPath);
-            String value = requiredTextField(item, "value", itemPath);
-            String trust = has(item, "trust")
-                    ? requiredEnum(item.path("trust"), "variables[" + index + "].trust",
-                        List.of("trusted", "untrusted"))
-                    : existingVariableTrust(current, name);
-            variables.add(new VariableStateDto(name, value, trust));
-            index++;
-        }
-        return variables;
-    }
-
-    private List<PrivacyStateDto> parsePrivacies(JsonNode node) throws ArgValidationException {
-        if (!node.isArray()) throw validation("privacies must be a JSON array.");
-        List<PrivacyStateDto> privacies = new ArrayList<>();
-        int index = 0;
-        for (JsonNode item : node) {
-            String itemPath = "arguments.privacies[" + index + "]";
-            requireOnlyFields(item, itemPath, Set.of("name", "privacy"));
-            String name = requiredTextField(item, "name", itemPath);
-            String privacy = requiredEnum(item.path("privacy"), "privacies[" + index + "].privacy",
-                    List.of("public", "private"));
-            privacies.add(new PrivacyStateDto(name, privacy));
-            index++;
-        }
-        return privacies;
     }
 
     private List<VariableStateDto> copyVariables(List<VariableStateDto> values) {
@@ -428,16 +386,6 @@ public class EditDeviceTool extends AbstractAiTool {
         }
     }
 
-    private String existingVariableTrust(List<VariableStateDto> current, String name) {
-        if (current == null) return null;
-        return current.stream()
-                .filter(Objects::nonNull)
-                .filter(variable -> Objects.equals(variable.getName(), name))
-                .map(VariableStateDto::getTrust)
-                .findFirst()
-                .orElse(null);
-    }
-
     private void rejectUnexpected(JsonNode args, Set<String> allowed, String field)
             throws ArgValidationException {
         List<String> unexpected = new ArrayList<>();
@@ -449,21 +397,5 @@ public class EditDeviceTool extends AbstractAiTool {
         if (!unexpected.isEmpty()) {
             throw validation("field=" + field + " does not accept: " + String.join(", ", unexpected) + ".");
         }
-    }
-
-    private String requiredEnum(JsonNode node, String field, List<String> allowed) throws ArgValidationException {
-        if (node == null || node.isNull() || !node.isTextual()) {
-            throw validation(field + " must be one of: " + String.join(", ", allowed) + ".");
-        }
-        String value = trimToNull(node.textValue());
-        String normalized = value == null ? null : value.toLowerCase(Locale.ROOT);
-        if (normalized == null || !allowed.contains(normalized)) {
-            throw validation(field + " must be one of: " + String.join(", ", allowed) + ".");
-        }
-        return normalized;
-    }
-
-    private ArgValidationException validation(String message) {
-        return new ArgValidationException(errorJson(message, "VALIDATION_ERROR", 400));
     }
 }

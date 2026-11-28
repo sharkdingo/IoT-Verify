@@ -65,8 +65,9 @@ normalized to hash URLs during app startup.
 The auth store initializes from browser storage before the first route guard. The guard
 checks locally visible JWT expiry; backend authentication remains authoritative for each
 request. A board mount starts the semantic snapshot, task inbox, and saved layout reads
-concurrently. Accepting a snapshot adopts its edit history and refreshes model fingerprints once.
-Semantic-change watchers do not duplicate an already pending fingerprint read for that revision.
+concurrently. Accepting a snapshot installs its collections and edit history together, then
+compares the complete displayed scene once. An unchanged scene can reuse its last confirmed
+model fingerprints. A new scene without matching evidence reads the model comparison once.
 
 Layout restoration waits for the semantic snapshot so a narrow viewport can fit its devices,
 but does not wait for the task inbox. Task recovery can therefore finish independently of
@@ -74,9 +75,9 @@ restoring the user's viewport and panels. Initial hydration and failed-layout re
 the [board layout contract](../api/board.md). History result lists and full run details remain
 lazy; an incoming run deep link is restored after semantic board data is ready.
 
-Opening or refreshing a history layer reads current model fingerprints once. Result loading
-uses the fingerprint read already owned by the fuzzing-history loader; task loading starts its
-own read. A later explicit refresh still requests fresh fingerprints.
+Opening or explicitly refreshing a history layer reads current model fingerprints once.
+When the Board and history refresh together, snapshot adoption owns that comparison and
+the history lists load independently. Paging the exploration list reuses the current comparison.
 Opening a saved exploration result also keeps its awaited fingerprint read; displaying that
 result does not start another one. Newly completed exploration tasks still refresh before
 presenting their result.
@@ -95,7 +96,7 @@ frontend does **not** unwrap it uniformly:
 
 | Module | Returns | Caller must read |
 | :--- | :--- | :--- |
-| `board.ts`, `simulation.ts`, `fuzzing.ts`, `rules.ts` (rule recommendation only) | already-unwrapped `T` (via a local `unpack` that returns `response.data.data`) | the value directly; targeted rule mutations map backend `RuleDto` values back to `RuleForm` and return the authoritative current collection |
+| `board.ts`, `simulation.ts`, `fuzzing.ts`, `rules.ts` (rule recommendation only) | already-unwrapped `T` (via the shared `unpack` that returns `response.data.data`) | the value directly; targeted rule mutations map backend `RuleDto` values back to `RuleForm` and return the authoritative current collection |
 | `auth.ts` | the full `Result<T>` (returns `response.data`) | `.data` for payload endpoints, `.code` for status; void responses may omit `data` |
 
 So `authApi.login(...)` resolves to `Result<LoginResponse>` — after confirming
@@ -292,20 +293,31 @@ Non-exhaustive:
   Environment values are required and use their template's declared integer or enum domain.
   Device-local overrides use the same domain validation but may be omitted to use the
   template default. Rejections stay beside the relevant draft without replacing canonical state.
-  An unconfirmed runtime write is reconciled before another submission: a successful
-  read distinguishes a matching configuration from a difference; a failed read leaves
-  the write outcome explicitly unknown and asks the user to reload before resubmitting.
+  Rename and runtime edits use the same write receipt and queued snapshot recovery as
+  device creation. The editors preserve the draft and show the unconfirmed receipt even
+  when the authoritative device already matches the request. They block the same edit
+  in the current session while allowing a different valid draft. A successful recovery
+  adopts the device and edit-history revision together. A failed read asks the user to
+  reload the Board before resubmitting. A server conflict remains a rejection and retains
+  the existing name check or runtime draft merge.
 - Device creation supports single, batch, and JSON/CSV import modes in the Devices tab.
   Single-device local values use the shared template-domain validation before submission;
   invalid values retain an inline field reason and block creation, while omitted values
   continue to use defaults. A definitive server rejection retains its declared fields in
-  the form without a duplicate message. Once submission settles, focus the failure and
-  bring its cause and creation button into view only if they still belong to the current draft.
-  Editing or leaving that draft retires its feedback;
-  a late successful save must not clear a newer draft. An unconfirmed creation refreshes
-  the affected state before reporting an observed device or an explicitly unknown outcome.
-  Batch/import are frontend conveniences over the targeted `addNodes` contract: parse,
-  preview, generate unique labels, then append the accepted devices once. Device create,
+  the form without a duplicate message. Focus that rejection and bring its cause and
+  creation button into view only if they still belong to the current draft.
+  Editing the draft retires its feedback. Leaving the form hides its ordinary feedback,
+  and a late successful save leaves a newer draft intact.
+  The Devices form, template drop dialog, and recommendation application share one
+  device write receipt. When the save is unconfirmed, the recovery snapshot can show
+  devices by their attempted IDs while the receipt stays unconfirmed. An unresolved
+  draft or recommendation cannot submit the same attempt again, and a recommendation
+  batch stops at that item.
+  Batch creation and JSON/CSV import use the same receipt. They append the previewed
+  devices and any Environment Pool patches in one write and one undo entry. After an
+  unconfirmed save the form shows how many requested devices it found in the refreshed
+  Board and blocks the submitted draft even if the preview would now allocate new names.
+  Device create,
   layout/runtime/rename/delete, rule/spec create/delete/reorder, Environment Pool edits,
   device-type import/delete/default reset, and confirmed scene replacement share one
   client-side mutation queue. Each operation applies its authoritative response or
@@ -313,17 +325,29 @@ Non-exhaustive:
   response cannot overwrite a newer local action. This is frontend response ordering,
   not a claim that separate ordinary REST calls form one transaction; only one batch
   replacement request is atomic as a group.
+  When an edit needs recovery after a conflict or an unconfirmed response, it reads
+  one complete Board snapshot inside its existing queue slot. That snapshot supplies
+  both the visible collections and the edit-history revision. Undo and redo recover
+  in the same slot, so a waiting edit cannot start before reconciliation finishes.
+  The queue compares semantic state after both applied and recovered undo or redo,
+  keeping layout-only changes independent of result freshness.
   A successful REST mutation of Board semantics, including portable scene import
   through `/board/scene`, publishes a same-user `BroadcastChannel` invalidation.
   A streamed assistant change publishes on receipt, even when the sending tab cannot refresh.
   Receiving tabs enqueue one coalesced semantic snapshot refresh through the same mutation queue.
   An invalidation received while hidden or while another refresh is running remains pending.
+  A previously loaded canvas remains available for pan and zoom during a background refresh.
+  Editing still waits for the authoritative snapshot, and the initial loading banner is reserved
+  for the first snapshot. A failed background read keeps the last canvas available for navigation
+  and exposes the same error and Retry action.
   Visibility and focus refreshes remain as the recovery path when `BroadcastChannel` is not
   available. This reconciles device, template, Environment Pool, rule, and specification
   changes made in another tab without overwriting the current tab's pending mutation;
   initial mount, manual retry, and invalidation reads all use the same coordinator. A delayed
   initial response must complete before the pending invalidation fetch begins, so it cannot
   arrive after and overwrite a newer cross-tab snapshot.
+  Leaving the Board cancels queued snapshot reads that have not started; this is not a load
+  failure, and the retired view does not start a follow-up read.
   History removals and task changes use the same channel. History invalidations refresh
   saved results and the task inbox, while confirmed REST cancellations and dismissals
   refresh the inbox alone. Each refresh leaves the Board snapshot and its editor state in place.
@@ -335,11 +359,9 @@ Non-exhaustive:
   label. Renaming a device therefore never changes rule/spec identity, and labels are
   compared case-insensitively without applying NuSMV normalization rules to what the
   user sees. Single creation and rename keep the exact typed label and block a conflict;
-  they do not commit an unconfirmed suffix. Rename conflicts and uncertain rename outcomes
-  reconcile from one complete Board snapshot rather than independent collection reads.
-  Batch/import deliberately allocate unique
-  suffixes in the visible preview, then abort the whole append if the current Board has
-  drifted and those previewed names are no longer available.
+  they do not commit an unconfirmed suffix. Batch creation and import allocate unique
+  suffixes in the visible preview and abort the whole append if those previewed names
+  are no longer available.
   Device import accepts either one JSON object or a JSON array with
   `template`/`templateName`/`type` plus `name`/`label`/`deviceName`, or CSV/tab-separated
   rows with two columns: template name, device name. A `template,name` header is optional.
@@ -459,19 +481,21 @@ Non-exhaustive:
   template ids/flags, condition display caches, or state-label fields that file import
   would reject. Optional rule titles stay optional and never cause a semantically valid
   AI rule to be filtered.
-- Every recommendation attempt owns a fresh opaque request id. Stop makes five short backend
-  cancellation attempts to cover registration races and aborts the POST transport only after
-  one is accepted, then keeps the panel in a truthful stopping state until the status API
-  reports `FINISHED`. An early `404` is treated as a possible registration race. Thirty
-  consecutive unavailable status reads end recovery with a visible outcome-unknown warning
-  rather than claiming cancellation or spinning forever. Sign-out and component teardown retain
-  the request owner's identity and credential before retrying; same-user token renewal updates that
-  credential, while a later account switch cannot make POST, status, or cancellation calls use
-  another user's credential. A recommendation POST that receives no HTTP response retains its
-  request id, controller, owner credential, and busy state while the same bounded cancellation/status
-  recovery runs; it cannot allocate a second request id. A received HTTP response, including a
-  client-side validation failure of that response, is terminal only for its own request. Sign-out
-  accepts either acknowledged cancellation or owner-authenticated `FINISHED` status. Applying one
+- Rule, device, and specification generation share the Board's request lifecycle. Each attempt
+  owns a fresh opaque request id. A new request or scene invalidates older candidate responses.
+  Stop retires candidate adoption, makes five short cancellation attempts to cover registration
+  races, and aborts the POST transport after an accepted stop or confirmed terminal status. A
+  worker still reporting active status keeps a foreground stop busy, even if its POST returned
+  first. An early `404` can be a registration race. When a POST receives no HTTP response or
+  a stop has five consecutive unavailable status reads, the panel reports an unknown outcome
+  and verification and other Board tools remain available. Status checks back off and keep the
+  original request id and owner credential. **Check request status** checks that request immediately.
+  All recommendation panels wait for the original request to settle before starting a new one.
+  A status read started after the POST response can settle a `404` when cancellation was never
+  acknowledged. Repeated `404` replies alone retain ownership. Outside recovery, an HTTP response,
+  including failure to validate its contents, settles only its own request. Sign-out and teardown
+  retain the original owner credential for retries. Same-user renewal can update that credential. Sign-out accepts
+  either acknowledged cancellation or owner-authenticated `FINISHED` status. Applying one
   standalone recommendation retains only that applied item as a disabled confirmation; all other
   candidates from the now-stale Board context are discarded.
 - Device creation: manual creation, device-list JSON import, standalone AI device
@@ -552,11 +576,16 @@ declared field diagnostics in the editor, including invalid values and reference
 by another entry point. Guidance identifies a duplicate only from its declared reason code.
 Specification save feedback appears after the editable conditions and before the generated
 description/formula preview, so correction takes priority over the preview.
-Concurrent duplicate rule/specification rejections keep the submitted draft and correction
+Concurrent rule/specification creation duplicates keep the submitted draft and correction
 feedback in the editor. They reconcile the corresponding authoritative collection and undo
 availability, since another entry point may have created the item. Read failure leaves that
 collection unavailable rather than describing the rejected save as successful. Late partial
 reads cannot publish into a different account or a disposed Board view.
+Rule and specification edits submit the item as opened alongside the desired change. A stale
+baseline stays rejected, with the draft available for comparison after refresh. A lost edit
+response reads one full Board snapshot in the same queue slot. The list and undo revision
+follow that snapshot while the editor keeps the unconfirmed draft and blocks resubmitting it.
+The draft keeps its original baseline while the refreshed list shows the current item.
 Verification/simulation request builders send only run options. The backend captures the saved
 Board and converts device references to model `varName` values. `utils/modelRequest.ts`
 normalizes local references and builds run options; model comparison reads the authoritative
@@ -776,12 +805,13 @@ while (true) {
 // cancel: await boardApi.cancelTask(taskId);
 ```
 
-Use a serial `while`/`await sleep` loop rather than `setInterval(async ...)` so polling
-does not re-enter while a previous request is still in flight. Keep any page-level
-`isVerifying`/loading state alive until this loop exits, including the cancelled and
-failed terminal states.
-When a board view unmounts, stop client-side polling and skip any late state writes.
-The backend task should keep running unless the user explicitly calls the cancel API.
+Verification, simulation, and exploration share the Board's serial watched-task
+polling loop. It publishes progress and processes status errors only while the watch
+still owns the task. A confirmed cancellation takes precedence over a status response
+still in flight. Transient read failures retry within the polling budget while
+permanent failures end the watch. Each task type handles its own completed result and
+recovery. Keep the page's running state until its watch exits. Unmount ends the
+client watch and discards late updates. The backend task continues unless cancelled.
 For a background-task UI, do not trap the user inside the submit panel. Allow the panel
 to close and keep a global mini task indicator visible while active tasks exist. Run
 history has two user layers, not three peer artifact tabs:
@@ -1053,11 +1083,10 @@ hidden as optional help.
 
 ## Rule recommendation — `api/rules.ts`
 
-This module owns **rule recommendation only**: named exports `recommendRules` and
-`cancelRecommendRules` (cancellable via `cancelRecommendRules()`), plus a default-export
-object of the same two. **Rule persistence is not here**: targeted `getRules`/`addRule`/
-`removeRule` methods live on `boardApi` (`api/board.ts`), which owns the `RuleDto` to
-`RuleForm` mapping.
+Board supplies `recommendRules` with the request ID, initiating credential, and `AbortSignal`.
+See the [recommendation request lifecycle](../api/board.md#recommendation-duplicate-check-and-ai-similarity-check).
+Targeted `getRules`, `addRule`, and `removeRule` live on `boardApi` (`api/board.ts`),
+which owns the `RuleDto` to `RuleForm` mapping.
 
 ---
 
@@ -1203,9 +1232,12 @@ confirmation when the backend tool outcome remains unknown. SSE `401` responses 
 authentication and navigate to login only when the stream's original token is still current;
 a delayed stream from another account is isolated. `403` responses remain authorization
 errors and do not discard a valid login session.
-Board collection refreshes triggered by chat are serialized through the same mutation
-queue. A pending scene replacement disables new assistant requests. Read-only trace
-playback still locks Board mutations, but it does not disable the assistant composer;
+Assistant changes to Board collections are reconciled through the mutation queue using
+one workspace snapshot, so dependent collections and edit history come from the same
+read. List refresh commands in one turn reuse the first successful snapshot, while
+each action receipt still waits for that read. Run history can refresh independently.
+A pending scene replacement disables new assistant requests. Read-only trace playback
+still locks Board mutations, but it does not disable the assistant composer;
 sending a new assistant turn first closes the visible trace/simulation playback and then
 starts the request. Starting playback or scene replacement while an assistant stream is
 active remains blocked until the stream stops and its authoritative refresh can complete.

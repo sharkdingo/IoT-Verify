@@ -3,7 +3,12 @@ package cn.edu.nju.Iot_Verify.component.aitool;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackPointDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
+import cn.edu.nju.Iot_Verify.dto.model.TaskToolState;
+import cn.edu.nju.Iot_Verify.dto.simulation.SimulationRequestDto;
+import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.BaseException;
+import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.util.DeviceNameNormalizer;
 import cn.edu.nju.Iot_Verify.util.RecommendationInputs;
@@ -11,14 +16,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
 /**
  * AI Tool 公共基类。
@@ -56,7 +65,7 @@ public abstract class AbstractAiTool implements AiTool {
      * @implSpec 实现类必须：
      * <ol>
      *   <li>需要解析参数时调用 {@link #parseArgs(String)} 而非自行 readTree；</li>
-     *   <li>包含完整的 try-catch 链并返回 {@link #errorJson}，以保留每个 Tool 特有的错误文案（契约不变）；</li>
+     *   <li>包含完整的 try-catch 链，可通过 {@link #errorJson} 或 {@link #readOnlyToolFailure} 返回 Tool 专属错误文案；</li>
      *   <li>catch-all 中使用 Tool 专属文案（如 "Failed to query verification task."），
      *       不得省略——否则异常会穿透到 {@link AiToolManager} 并返回通用 TOOL_EXECUTION_ERROR。</li>
      * </ol>
@@ -74,9 +83,9 @@ public abstract class AbstractAiTool implements AiTool {
      * 也必须解析并拒绝未知字段，避免调用者以为一个不支持的选项已经生效。
      *
      * @return 解析后的 JsonNode
-     * @throws ArgParseException 包装了 errorJson 返回值，调用方应直接 catch 并 return
+     * @throws ArgValidationException 包装了由工具入口返回的 errorJson 结果
      */
-    protected final JsonNode parseArgs(String argsJson) throws ArgParseException {
+    protected final JsonNode parseArgs(String argsJson) throws ArgValidationException {
         try {
             return objectMapper.reader()
                     .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS,
@@ -84,28 +93,13 @@ public abstract class AbstractAiTool implements AiTool {
                     .readTree(
                     argsJson == null || argsJson.isBlank() ? "{}" : argsJson);
         } catch (Exception e) {
-            throw new ArgParseException(
+            throw new ArgValidationException(
                     errorJson("Invalid JSON arguments.", "VALIDATION_ERROR", 400));
         }
     }
 
     /**
-     * 仅用于 {@link #parseArgs} 的控制流异常，不是业务异常。
-     */
-    protected static final class ArgParseException extends Exception {
-        private final String errorResponse;
-
-        ArgParseException(String errorResponse) {
-            this.errorResponse = errorResponse;
-        }
-
-        public String getErrorResponse() {
-            return errorResponse;
-        }
-    }
-
-    /**
-     * Used by helper methods that validate parsed tool arguments.
+     * Carries the response for rejected JSON or arguments.
      */
     protected static final class ArgValidationException extends Exception {
         private final String errorResponse;
@@ -279,6 +273,21 @@ public abstract class AbstractAiTool implements AiTool {
                 "type", "integer",
                 "description", "Upper bound from 1 to 50 for attackMode exhaustive. Omit it, or send 0, for "
                         + "none and exact.");
+    }
+
+    protected final SimulationRequestDto simulationRequest(JsonNode args) throws ArgValidationException {
+        SimulationRequestDto request = new SimulationRequestDto();
+        request.setSteps(intArgInRange(args, "steps", 10, 1, 100));
+        request.setAttackScenario(attackScenarioArg(args, false));
+        request.setEnablePrivacy(booleanArg(args, "enablePrivacy", false));
+        return request;
+    }
+
+    protected final VerificationRequestDto verificationRequest(JsonNode args) throws ArgValidationException {
+        VerificationRequestDto request = new VerificationRequestDto();
+        request.setAttackScenario(attackScenarioArg(args, true));
+        request.setEnablePrivacy(booleanArg(args, "enablePrivacy", false));
+        return request;
     }
 
     protected final AttackScenarioDto attackScenarioArg(JsonNode args,
@@ -496,6 +505,21 @@ public abstract class AbstractAiTool implements AiTool {
         return path == null || path.isBlank() ? field : path + "." + field;
     }
 
+    /** Maps the standard failure handling for tools that only read domain state. */
+    protected final String readOnlyToolFailure(Logger toolLogger, String toolName,
+                                               Exception failure, String fallbackMessage) {
+        if (failure instanceof ServiceUnavailableException busy) {
+            toolLogger.warn(toolName + " busy: {}", busy.getMessage());
+            return errorJson(busy.getMessage(), "SERVICE_UNAVAILABLE", 503);
+        }
+        if (failure instanceof BaseException business) {
+            toolLogger.warn(toolName + " business error [{}]: {}", business.getCode(), business.getMessage());
+            return errorJson(business.getMessage(), "BUSINESS_ERROR", business.getCode());
+        }
+        toolLogger.error(toolName + " failed", failure);
+        return errorJson(fallbackMessage, "INTERNAL_ERROR", 500);
+    }
+
     protected final String errorJson(String message, String errorCode, int status) {
         return AiToolResponseHelper.error(objectMapper, message, errorCode, status);
     }
@@ -505,32 +529,42 @@ public abstract class AbstractAiTool implements AiTool {
         return AiToolResponseHelper.error(objectMapper, message, errorCode, status, extras);
     }
 
-    protected final String successJson(Map<String, Object> body, String fallbackMessage) {
-        return AiToolResponseHelper.success(objectMapper, body, fallbackMessage);
+    protected final String successJson(Map<String, Object> body) {
+        return AiToolResponseHelper.success(objectMapper, body);
     }
 
-    protected final String readOnlySuccessJson(Map<String, Object> body, String fallbackMessage) {
-        return AiToolResponseHelper.success(objectMapper, body, fallbackMessage, false);
+    protected final String readOnlySuccessJson(Map<String, Object> body) {
+        return AiToolResponseHelper.success(objectMapper, body, false);
     }
 
-    protected final String acceptedAsyncTaskJson(Map<String, Object> body,
-                                                 long taskId,
-                                                 String statusTool) {
-        return AiToolResponseHelper.acceptedAsyncTask(objectMapper, body, taskId, statusTool);
-    }
-
-    protected final String acceptedAsyncTaskResultUnavailable(long taskId, String statusTool) {
-        return AiToolResponseHelper.acceptedAsyncTaskResultUnavailable(
-                objectMapper, taskId, statusTool);
+    protected final <T extends TaskToolState> String acceptedAsyncTaskJson(
+            Long taskId, String taskLabel, String statusTool, String acceptedMessage,
+            Supplier<T> load, BiConsumer<Map<String, Object>, T> appendDetails) {
+        if (taskId == null || taskId <= 0) {
+            throw new IllegalStateException(taskLabel + " submission returned no usable task id");
+        }
+        try {
+            T task = load.get();
+            if (task == null) {
+                throw new IllegalStateException("Accepted " + taskLabel.toLowerCase(Locale.ROOT) + " task was not readable");
+            }
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("message", acceptedMessage);
+            response.put("taskAccepted", true);
+            response.put("taskId", taskId);
+            response.put("taskStatus", task.getStatus());
+            response.put("progress", task.getProgress());
+            appendDetails.accept(response, task);
+            return AiToolResponseHelper.acceptedAsyncTask(objectMapper, response, taskId, statusTool);
+        } catch (Exception e) {
+            log.error("{} task {} was accepted, but its status response is unavailable", taskLabel, taskId, e);
+            return AiToolResponseHelper.acceptedAsyncTaskResultUnavailable(objectMapper, taskId, statusTool);
+        }
     }
 
     protected final String asyncTaskDispatchOutcomeUnknown(long taskId, String statusTool) {
         return AiToolResponseHelper.asyncTaskDispatchOutcomeUnknown(
                 objectMapper, taskId, statusTool);
-    }
-
-    protected final String successJson(String fallbackMessage) {
-        return AiToolResponseHelper.success(objectMapper, fallbackMessage);
     }
 
     protected final <T> List<T> safeList(List<T> list) {

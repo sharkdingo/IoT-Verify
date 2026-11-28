@@ -14,7 +14,6 @@ public interface VerificationTraceContextProjection {
     Integer getModeledFalsifiableReadingDeviceCount();
     Integer getModeledAutomationLinkAttackPointCount();
     String getRequestJson();
-    String getTemplateSnapshotsJson();
     String getModelSnapshotJson();
     String getModelSemanticsJson();
     Integer getDisabledRuleCount();

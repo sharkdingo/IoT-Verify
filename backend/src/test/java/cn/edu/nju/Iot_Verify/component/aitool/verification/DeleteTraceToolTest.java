@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.verification;
 
-import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
@@ -15,6 +14,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
@@ -34,7 +34,7 @@ class DeleteTraceToolTest {
     void setUp() {
         objectMapper = new ObjectMapper();
         tool = new DeleteTraceTool(
-                verificationService, objectMapper, new AiDestructiveActionGuard(objectMapper));
+                verificationService, objectMapper, inMemoryActionGuard(objectMapper));
         UserContextHolder.clear();
         UserContextHolder.setChatSessionId("trace-test-session");
     }

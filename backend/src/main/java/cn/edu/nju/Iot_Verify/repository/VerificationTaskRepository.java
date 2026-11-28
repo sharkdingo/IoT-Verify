@@ -9,6 +9,7 @@ import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjec
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskProgressProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationTraceContextProjection;
+import cn.edu.nju.Iot_Verify.repository.projection.VerificationRepairTraceContextProjection;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -99,6 +100,9 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
 
     List<VerificationTraceContextProjection> findTraceContextsByUserIdAndIdInAndStatus(
             Long userId, List<Long> ids, VerificationTaskPo.TaskStatus status);
+
+    Optional<VerificationRepairTraceContextProjection> findRepairTraceContextByIdAndUserIdAndStatus(
+            Long id, Long userId, VerificationTaskPo.TaskStatus status);
 
     long countByUserId(Long userId);
 
@@ -310,28 +314,4 @@ public interface VerificationTaskRepository extends JpaRepository<VerificationTa
                                @Param("stage") TaskProgressStage stage,
                                @Param("workerId") String workerId,
                                @Param("currentTime") LocalDateTime currentTime);
-
-    /** Persist the assumptions under which this task will run without replacing task state. */
-    @Transactional
-    @Modifying(clearAutomatically = true)
-    @Query("UPDATE VerificationTaskPo t SET t.isAttack = :isAttack, "
-         + "t.attackBudget = :attackBudget, t.enablePrivacy = :enablePrivacy, "
-         + "t.modeledDeviceAttackPointCount = :devicePointCount, "
-         + "t.modeledFalsifiableReadingDeviceCount = :falsifiableReadingDeviceCount, "
-         + "t.modeledAutomationLinkAttackPointCount = :linkPointCount, "
-         + "t.modelSnapshotJson = :modelSnapshotJson, "
-         + "t.modelSemanticsJson = :modelSemanticsJson, "
-         + "t.requestJson = :requestJson, t.templateSnapshotsJson = :templateSnapshotsJson "
-         + "WHERE t.id = :taskId")
-    int updateModelContext(@Param("taskId") Long taskId,
-                           @Param("isAttack") boolean isAttack,
-                           @Param("attackBudget") int attackBudget,
-                           @Param("enablePrivacy") boolean enablePrivacy,
-                           @Param("devicePointCount") int devicePointCount,
-                           @Param("falsifiableReadingDeviceCount") int falsifiableReadingDeviceCount,
-                           @Param("linkPointCount") int linkPointCount,
-                           @Param("modelSnapshotJson") String modelSnapshotJson,
-                           @Param("modelSemanticsJson") String modelSemanticsJson,
-                           @Param("requestJson") String requestJson,
-                           @Param("templateSnapshotsJson") String templateSnapshotsJson);
 }

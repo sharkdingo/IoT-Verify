@@ -21,7 +21,7 @@ public interface BoardEditJournalRepository extends JpaRepository<BoardEditJourn
 
     Optional<BoardEditJournalPo> findFirstByUserIdOrderBySequenceDesc(Long userId);
 
-    /** Oldest-first, for trimming the account's history to its depth limit. */
+    /** Entries in sequence order for the account's clear-history preview. */
     List<BoardEditJournalPo> findByUserIdOrderBySequenceAsc(Long userId);
 
     long countByUserId(Long userId);
@@ -55,10 +55,6 @@ public interface BoardEditJournalRepository extends JpaRepository<BoardEditJourn
 
     /** Consistent read used to avoid an empty-range delete and its MySQL next-key lock. */
     boolean existsByUserIdAndUndoneTrue(Long userId);
-
-    long countByUserIdAndUndoneFalse(Long userId);
-
-    long countByUserIdAndUndoneTrue(Long userId);
 
     @Query("SELECT new cn.edu.nju.Iot_Verify.service.board.BoardUndoAvailability("
             + "MAX(e.id), MAX(CASE WHEN e.undone = false THEN e.sequence END), "

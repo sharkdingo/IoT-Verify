@@ -62,30 +62,25 @@ public class DistributedInteractiveExecutionStore {
                     + "if redis.call('get', KEYS[4]) == ARGV[1] or redis.call('exists', KEYS[5]) == 1 "
                     + "then return 1 else return 0 end",
             Long.class);
+    private static final String SETTLE_OWNED_EXECUTION =
+            "redis.call('hset', KEYS[3], 'state', 'FINISHED'); "
+                    + "redis.call('hset', KEYS[3], 'stage', ARGV[2]); "
+                    + "redis.call('hset', KEYS[3], 'startedAt', ARGV[3]); "
+                    + "redis.call('hset', KEYS[3], 'token', ARGV[1]); "
+                    + "redis.call('pexpire', KEYS[3], ARGV[4]); "
+                    + "if redis.call('get', KEYS[4]) == ARGV[1] then redis.call('del', KEYS[4]) end; "
+                    + "if ARGV[5] == '1' and redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end; "
+                    + "redis.call('del', KEYS[1]); return 1";
     private static final DefaultRedisScript<Long> COMPLETE_SUCCESS_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('get', KEYS[1]) ~= ARGV[1] then return -1 end; "
                     + "if ARGV[5] == '1' and redis.call('get', KEYS[2]) ~= ARGV[1] then return -1 end; "
                     + "if redis.call('get', KEYS[4]) == ARGV[1] or redis.call('exists', KEYS[5]) == 1 "
                     + "then return 0 end; "
-                    + "redis.call('hset', KEYS[3], 'state', 'FINISHED'); "
-                    + "redis.call('hset', KEYS[3], 'stage', ARGV[2]); "
-                    + "redis.call('hset', KEYS[3], 'startedAt', ARGV[3]); "
-                    + "redis.call('hset', KEYS[3], 'token', ARGV[1]); "
-                    + "redis.call('pexpire', KEYS[3], ARGV[4]); "
-                    + "if redis.call('get', KEYS[4]) == ARGV[1] then redis.call('del', KEYS[4]) end; "
-                    + "if ARGV[5] == '1' and redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end; "
-                    + "redis.call('del', KEYS[1]); return 1",
+                    + SETTLE_OWNED_EXECUTION,
             Long.class);
     private static final DefaultRedisScript<Long> FINISH_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end; "
-                    + "redis.call('hset', KEYS[3], 'state', 'FINISHED'); "
-                    + "redis.call('hset', KEYS[3], 'stage', ARGV[2]); "
-                    + "redis.call('hset', KEYS[3], 'startedAt', ARGV[3]); "
-                    + "redis.call('hset', KEYS[3], 'token', ARGV[1]); "
-                    + "redis.call('pexpire', KEYS[3], ARGV[4]); "
-                    + "if redis.call('get', KEYS[4]) == ARGV[1] then redis.call('del', KEYS[4]) end; "
-                    + "if ARGV[5] == '1' and redis.call('get', KEYS[2]) == ARGV[1] then redis.call('del', KEYS[2]) end; "
-                    + "redis.call('del', KEYS[1]); return 1",
+                    + SETTLE_OWNED_EXECUTION,
             Long.class);
     private static final DefaultRedisScript<Long> ABANDON_SCRIPT = new DefaultRedisScript<>(
             "if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end; "

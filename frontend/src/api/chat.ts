@@ -1,11 +1,9 @@
 // src/api/chat.ts - Chat API
 import api from '@/api/http'
+import { unpack } from './resultEnvelope'
 import type {
     ChatConfirmationCommand,
-    ChatConfirmationKind,
-    ChatExecutionStatus,
     ChatHistoryPage,
-    ChatMessage,
     PersistedChatMessage,
     ChatPendingConfirmation,
     ChatSession,
@@ -14,7 +12,18 @@ import type {
     StreamProgress,
     StreamTerminal
 } from "@/types/chat"
-import { ASSISTANT_ACTIONS, CLAIM_REVIEW_REASONS, STREAM_REFRESH_TARGETS } from '@/types/chat'
+import {
+    ASSISTANT_ACTIONS,
+    CHAT_CONFIRMATION_KINDS,
+    CHAT_EXECUTION_STATUSES,
+    CHAT_MESSAGE_ROLES,
+    CLAIM_REVIEW_OUTCOMES,
+    CLAIM_REVIEW_REASONS,
+    EXECUTION_GUARD_OUTCOMES,
+    STREAM_PROGRESS_STAGES_WITHOUT_OUTCOME,
+    isStreamRefreshTarget,
+    TOOL_RESULT_OUTCOMES
+} from '@/types/chat'
 import { useAuth } from '@/stores/auth'
 import { redirectToLogin } from '@/router/loginRedirect'
 import i18n from '@/assets/i18n'
@@ -56,48 +65,6 @@ export class ChatStreamError extends Error {
     }
 }
 
-const unpack = <T>(response: any): T => {
-  return response.data.data;
-};
-
-const CHAT_EXECUTION_STATUSES: ReadonlySet<ChatExecutionStatus> = new Set([
-  'COMPLETED',
-  'AWAITING_CONFIRMATION',
-  'PARTIAL',
-  'STOPPED',
-  'DISCONNECTED',
-  'FAILED'
-]);
-const CHAT_CONFIRMATION_KINDS: ReadonlySet<ChatConfirmationKind> = new Set([
-  'DESTRUCTIVE',
-  'DEFAULT_TEMPLATE_RESET',
-  'SCENE_REPLACEMENT'
-]);
-
-const CHAT_ROLES = new Set<ChatMessage['role']>(['user', 'assistant']);
-const STREAM_PROGRESS_STAGES = new Set<StreamProgress['stage']>([
-  'CONTEXT_READY',
-  'TASK_RESUMED',
-  'PLANNING',
-  'REASONING',
-  'TOOL_EXECUTION',
-  'TOOL_RESULT',
-  'EXECUTION_GUARD',
-  'CLAIM_REVIEW',
-  'WRITING_RESPONSE'
-]);
-const STREAM_PROGRESS_OUTCOMES = new Set<NonNullable<StreamProgress['outcome']>>([
-  'USABLE',
-  'PARTIAL',
-  'FAILED',
-  'RESULT_UNAVAILABLE',
-  'CONFIRMATION_REQUIRED',
-  'NO_PROGRESS',
-  'EMERGENCY_LIMIT',
-  'REPLACED',
-  'HIDDEN'
-]);
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -108,27 +75,18 @@ const isOptionalNonNegativeInteger = (value: unknown) =>
   value === undefined || value === null
     || (Number.isSafeInteger(value) && Number(value) >= 0);
 
-const TOOL_RESULT_OUTCOMES: ReadonlySet<NonNullable<StreamProgress['outcome']>> = new Set([
-  'USABLE',
-  'PARTIAL',
-  'FAILED',
-  'RESULT_UNAVAILABLE',
-  'CONFIRMATION_REQUIRED'
-]);
-const EXECUTION_GUARD_OUTCOMES: ReadonlySet<NonNullable<StreamProgress['outcome']>> = new Set([
-  'NO_PROGRESS',
-  'EMERGENCY_LIMIT'
-]);
-// Derived from the wire contract rather than repeated: a target added to types/chat.ts but missed
-// here would make the validator reject a frame the server is entitled to send.
-const REFRESH_TARGET_NAMES: ReadonlySet<string> = new Set(STREAM_REFRESH_TARGETS);
+const CHAT_EXECUTION_STATUS_NAMES = new Set<unknown>(CHAT_EXECUTION_STATUSES);
+const CHAT_CONFIRMATION_KIND_NAMES = new Set<unknown>(CHAT_CONFIRMATION_KINDS);
+const CHAT_ROLE_NAMES = new Set<unknown>(CHAT_MESSAGE_ROLES);
+const PROGRESS_STAGES_WITHOUT_OUTCOME = new Set<unknown>(STREAM_PROGRESS_STAGES_WITHOUT_OUTCOME);
+const TOOL_RESULT_OUTCOME_NAMES = new Set<unknown>(TOOL_RESULT_OUTCOMES);
+const EXECUTION_GUARD_OUTCOME_NAMES = new Set<unknown>(EXECUTION_GUARD_OUTCOMES);
+const CLAIM_REVIEW_OUTCOME_NAMES = new Set<unknown>(CLAIM_REVIEW_OUTCOMES);
 const ASSISTANT_ACTION_NAMES: ReadonlySet<string> = new Set(ASSISTANT_ACTIONS);
 const CLAIM_REVIEW_REASON_NAMES: ReadonlySet<string> = new Set(CLAIM_REVIEW_REASONS);
 
 const isStreamProgress = (value: unknown): value is StreamProgress => {
   if (!isRecord(value)
-      || typeof value.stage !== 'string'
-      || !STREAM_PROGRESS_STAGES.has(value.stage as StreamProgress['stage'])
       || !isOptionalString(value.toolName)
       || !isOptionalString(value.detail)
       || !isOptionalNonNegativeInteger(value.round)
@@ -138,14 +96,9 @@ const isStreamProgress = (value: unknown): value is StreamProgress => {
     return false;
   }
   const outcome = value.outcome;
-  if (outcome !== undefined && outcome !== null
-      && (typeof outcome !== 'string'
-        || !STREAM_PROGRESS_OUTCOMES.has(outcome as NonNullable<StreamProgress['outcome']>))) {
-    return false;
-  }
   if (value.stage === 'CLAIM_REVIEW') {
     const review = value.claimReview;
-    return (outcome === 'REPLACED' || outcome === 'HIDDEN')
+    return CLAIM_REVIEW_OUTCOME_NAMES.has(outcome)
       && (value.toolName === undefined || value.toolName === null)
       && isRecord(review) && Object.keys(review).length === 3
       && typeof review.reasonCode === 'string' && CLAIM_REVIEW_REASON_NAMES.has(review.reasonCode)
@@ -155,14 +108,12 @@ const isStreamProgress = (value: unknown): value is StreamProgress => {
   }
   if (value.claimReview !== undefined && value.claimReview !== null) return false;
   if (value.stage === 'TOOL_RESULT') {
-    return typeof outcome === 'string'
-      && TOOL_RESULT_OUTCOMES.has(outcome as NonNullable<StreamProgress['outcome']>);
+    return TOOL_RESULT_OUTCOME_NAMES.has(outcome);
   }
   if (value.stage === 'EXECUTION_GUARD') {
-    return typeof outcome === 'string'
-      && EXECUTION_GUARD_OUTCOMES.has(outcome as NonNullable<StreamProgress['outcome']>);
+    return EXECUTION_GUARD_OUTCOME_NAMES.has(outcome);
   }
-  return outcome === undefined || outcome === null;
+  return PROGRESS_STAGES_WITHOUT_OUTCOME.has(value.stage) && (outcome === undefined || outcome === null);
 };
 
 export const hasCompletedToolEvidence = (trace: unknown): boolean => {
@@ -218,8 +169,7 @@ const validateStreamCommand = (value: unknown): StreamCommand => {
       || payloadKeys.some(key => key !== 'target'
           && key !== 'assistantAction'
           && key !== 'assistantSummary')
-      || typeof value.payload.target !== 'string'
-      || !REFRESH_TARGET_NAMES.has(value.payload.target)
+      || !isStreamRefreshTarget(value.payload.target)
       || (value.payload.assistantAction !== undefined
           && (typeof value.payload.assistantAction !== 'string'
               || !ASSISTANT_ACTION_NAMES.has(value.payload.assistantAction)))
@@ -237,8 +187,7 @@ const validateStreamTerminal = (value: unknown, expectedTurnId: string): StreamT
       || Object.keys(value).length !== 2
       || typeof value.turnId !== 'string'
       || value.turnId !== expectedTurnId
-      || typeof value.executionStatus !== 'string'
-      || !CHAT_EXECUTION_STATUSES.has(value.executionStatus as ChatExecutionStatus)) {
+      || !CHAT_EXECUTION_STATUS_NAMES.has(value.executionStatus)) {
     throw new Error('Chat stream terminal is incomplete');
   }
   return value as unknown as StreamTerminal;
@@ -251,8 +200,7 @@ const validateChatHistoryMessages = (
   if (!Array.isArray(value)) throw new Error('Chat history messages are incomplete');
   value.forEach((candidate, index) => {
     if (!isRecord(candidate)
-        || typeof candidate.role !== 'string'
-        || !CHAT_ROLES.has(candidate.role as ChatMessage['role'])
+        || !CHAT_ROLE_NAMES.has(candidate.role)
         || typeof candidate.content !== 'string'
         || candidate.sessionId !== expectedSessionId
         || typeof candidate.turnId !== 'string'
@@ -268,9 +216,7 @@ const validateChatHistoryMessages = (
       throw new Error(`Chat history message ${index} is incomplete`);
     }
     const status = candidate.executionStatus;
-    if (status !== undefined && status !== null
-        && (typeof status !== 'string'
-            || !CHAT_EXECUTION_STATUSES.has(status as ChatExecutionStatus))) {
+    if (status !== undefined && status !== null && !CHAT_EXECUTION_STATUS_NAMES.has(status)) {
       throw new Error(`Chat history message ${index} has an unknown execution status`);
     }
     if (status === 'COMPLETED' && !hasCompletedToolEvidence(candidate.executionTrace)) {
@@ -304,8 +250,7 @@ const validateChatSession = (value: unknown, context: string): ChatSession => {
           || !Number.isSafeInteger(session.latestTerminalMessageId)
           || session.latestTerminalMessageId <= 0))
       || (session.latestExecutionStatus !== null
-        && (typeof session.latestExecutionStatus !== 'string'
-          || !CHAT_EXECUTION_STATUSES.has(session.latestExecutionStatus as ChatExecutionStatus)))
+        && !CHAT_EXECUTION_STATUS_NAMES.has(session.latestExecutionStatus))
       || typeof session.hasUnreadUpdate !== 'boolean'
       || ((session.latestTerminalMessageId == null) !== (session.latestExecutionStatus == null))
       || (session.hasUnreadUpdate && session.latestTerminalMessageId == null)) {
@@ -418,7 +363,7 @@ export const getPendingConfirmation = async (
       || pending.sessionId !== sessionId
       || !Array.isArray(pending.actions)
       || pending.actions.some(action => !action || typeof action !== 'object'
-        || !CHAT_CONFIRMATION_KINDS.has(action.kind)
+        || !CHAT_CONFIRMATION_KIND_NAMES.has(action.kind)
         || typeof action.confirmationId !== 'string' || !action.confirmationId.trim()
         || typeof action.toolName !== 'string' || !action.toolName.trim()
         || typeof action.target !== 'string' || !action.target.trim())

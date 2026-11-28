@@ -30,7 +30,9 @@ import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.service.FormalOperationAdmission;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.EnvironmentProvenanceCollector;
+import cn.edu.nju.Iot_Verify.testutil.SqlStatementCapture;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
+import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
 import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.TraceMapper;
@@ -68,6 +70,7 @@ import static org.mockito.Mockito.when;
 @DataJpaTest(properties = {
         "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
         "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
+        "spring.jpa.properties.hibernate.session_factory.statement_inspector=cn.edu.nju.Iot_Verify.testutil.SqlStatementCapture",
         "spring.jpa.hibernate.ddl-auto=create-drop"
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)
@@ -120,7 +123,11 @@ class VerificationTraceAuthorityIntegrationTest {
         assertEquals(task.getModelSnapshotJson(), contexts.get(0).getModelSnapshotJson());
         assertEquals(task.getModelSemanticsJson(), contexts.get(0).getModelSemanticsJson());
         assertEquals(task.getRequestJson(), contexts.get(0).getRequestJson());
-        assertEquals(task.getTemplateSnapshotsJson(), contexts.get(0).getTemplateSnapshotsJson());
+        var repairContext = tasks.findRepairTraceContextByIdAndUserIdAndStatus(
+                task.getId(), user.getId(), VerificationTaskPo.TaskStatus.COMPLETED).orElseThrow();
+        assertEquals(task.getTemplateSnapshotsJson(), repairContext.getTemplateSnapshotsJson());
+        assertTrue(tasks.findRepairTraceContextByIdAndUserIdAndStatus(
+                task.getId(), user.getId() + 1, VerificationTaskPo.TaskStatus.COMPLETED).isEmpty());
         List<TracePo> savedTraces = traces.findByUserIdAndVerificationTaskId(user.getId(), task.getId());
         assertEquals(2, savedTraces.size());
         assertTrue(savedTraces.stream().allMatch(trace -> task.getId().equals(trace.getVerificationTaskId())));
@@ -165,7 +172,9 @@ class VerificationTraceAuthorityIntegrationTest {
                         + "states_json = ? FORMAT JSON WHERE id = ?",
                 recorded.getViolatedSpecJson(), JsonUtils.toJson(recorded.getStates()), recorded.getId()));
 
+        SqlStatementCapture.take();
         TraceDto current = service.getTrace(user.getId(), recorded.getId());
+        assertFalse(onlyVerificationTaskSelect().contains("template_snapshots_json"));
         assertEquals(ModelSemanticsVersion.CURRENT, current.getModelSnapshot().getModelSemanticsVersion());
         assertTrue(current.getModelComplete());
         ObjectNode archivedSnapshot = JsonUtils.fromJson(
@@ -193,22 +202,33 @@ class VerificationTraceAuthorityIntegrationTest {
                 .thenAnswer(call -> call.<Supplier<?>>getArgument(1).get());
         JwtConfig jwt = new JwtConfig();
         jwt.setSecret("verification-trace-authority-fixture-key");
-        var tokens = new FixSuggestionTokenService(new ObjectMapper(), jwt);
+        var mapper = new ObjectMapper();
+        var tokens = new FixSuggestionTokenService(mapper, jwt);
         FixServiceImpl fixes = new FixServiceImpl(traces, tasks, new TraceMapper(), generator,
                 mock(RuleFixer.class), new FixConfig(), board, mock(BoardDataConverter.class),
-                tokens, admission);
+                tokens, admission, new ModelFingerprint(mapper));
 
         assertThrows(ModelSemanticsChangedException.class,
                 () -> fixes.fix(user.getId(), recorded.getId(), List.of("remove"), null));
         assertThrows(ModelSemanticsChangedException.class,
                 () -> fixes.localizeFault(user.getId(), recorded.getId()));
+        SqlStatementCapture.take();
         assertThrows(ModelSemanticsChangedException.class,
                 () -> fixes.requireCurrentVerificationSource(user.getId(), recorded.getId()));
+        assertTrue(onlyVerificationTaskSelect().contains("template_snapshots_json"));
         var suggestion = FixSuggestionDto.builder().strategy("remove").removedRuleIndices(List.of(0)).build();
         String signed = tokens.issue(user.getId(), recorded.getId(), suggestion, null);
         assertThrows(ModelSemanticsChangedException.class,
                 () -> fixes.applyFix(user.getId(), recorded.getId(), "remove", suggestion, signed, null));
         verifyNoInteractions(generator, board);
+    }
+
+    private static String onlyVerificationTaskSelect() {
+        List<String> selects = SqlStatementCapture.take().stream()
+                .filter(sql -> sql.startsWith("select ") && sql.contains(" from verification_task "))
+                .toList();
+        assertEquals(1, selects.size());
+        return selects.get(0);
     }
 
     @Test
@@ -229,8 +249,8 @@ class VerificationTraceAuthorityIntegrationTest {
 
         assertTrue(complete(task, List.of()));
 
-        var context = tasks.findTraceContextsByUserIdAndIdInAndStatus(
-                user.getId(), List.of(task.getId()), VerificationTaskPo.TaskStatus.COMPLETED).get(0);
+        var context = tasks.findRepairTraceContextByIdAndUserIdAndStatus(
+                task.getId(), user.getId(), VerificationTaskPo.TaskStatus.COMPLETED).orElseThrow();
         assertEquals(task.getRequestJson(), context.getRequestJson());
         assertEquals(task.getTemplateSnapshotsJson(), context.getTemplateSnapshotsJson());
         assertEquals(0, traces.countByUserIdAndVerificationTaskId(user.getId(), task.getId()));

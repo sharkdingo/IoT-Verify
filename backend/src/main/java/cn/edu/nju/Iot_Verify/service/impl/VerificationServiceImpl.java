@@ -10,6 +10,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.NusmvResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor.SpecCheckResult;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.configure.AsyncTaskAdmissionConfig;
 import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.Result;
@@ -94,7 +95,6 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyOptionalList;
 import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyRequiredList;
@@ -109,7 +109,6 @@ import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.cop
 public class VerificationServiceImpl extends AbstractAsyncTaskService<VerificationTaskPo> implements VerificationService {
 
     private static final Duration TASK_LEASE_DURATION = Duration.ofMinutes(2);
-    private static final long LEASE_MAINTENANCE_SECONDS = 10L;
     private static final List<VerificationTaskPo.TaskStatus> ACTIVE_STATUSES = List.of(
             VerificationTaskPo.TaskStatus.PENDING,
             VerificationTaskPo.TaskStatus.RUNNING);
@@ -134,14 +133,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     /** Reads the board that defines what a run verifies; the request only chooses run parameters. */
     private final BoardDataConverter boardDataConverter;
     private final String workerId = UUID.randomUUID().toString();
-    private final ScheduledExecutorService leaseMaintenanceExecutor =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "verification-task-lease-maintenance");
-                thread.setDaemon(true);
-                return thread;
-            });
-    private final ConcurrentHashMap<Long, LocalVerificationExecution> localExecutions =
-            new ConcurrentHashMap<>();
+    private final TaskLeaseMaintenance leaseMaintenance = new TaskLeaseMaintenance("verification-task-lease-maintenance");
 
     @Autowired
     public VerificationServiceImpl(SmvGenerator smvGenerator,
@@ -184,113 +176,36 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         this.taskAdmissionLimits = taskAdmissionConfig.getVerification();
     }
 
-    VerificationServiceImpl(SmvGenerator smvGenerator,
-                            EnvironmentProvenanceCollector provenanceCollector,
-                            SmvTraceParser smvTraceParser,
-                            NusmvExecutor nusmvExecutor,
-                            NusmvConfig nusmvConfig,
-                            VerificationTaskRepository taskRepository,
-                            TraceRepository traceRepository,
-                            TraceMapper traceMapper,
-                            UserRepository userRepository,
-                            SpecificationMapper specificationMapper,
-                            VerificationTaskMapper verificationTaskMapper,
-                            ObjectMapper objectMapper,
-                            ThreadPoolTaskExecutor verificationTaskExecutor,
-                            ThreadPoolTaskExecutor syncVerificationExecutor,
-                            TransactionTemplate transactionTemplate,
-                            ChatExecutionLeaseGuard chatExecutionLeaseGuard,
-                            FormalOperationAdmission formalOperationAdmission,
-                            BoardDataConverter boardDataConverter) {
-        this(smvGenerator, provenanceCollector, smvTraceParser, nusmvExecutor, nusmvConfig, taskRepository,
-                traceRepository, traceMapper, userRepository, specificationMapper,
-                verificationTaskMapper, objectMapper, verificationTaskExecutor,
-                syncVerificationExecutor, transactionTemplate, chatExecutionLeaseGuard,
-                formalOperationAdmission,
-                new AsyncTaskAdmissionConfig(),
-                boardDataConverter);
-    }
-
     private void requireChatExecutionLease() {
         chatExecutionLeaseGuard.requireCurrentExecutionLease();
     }
 
     @PostConstruct
     void initializeTaskLeaseMaintenance() {
-        maintainTaskLeases();
-        leaseMaintenanceExecutor.scheduleWithFixedDelay(
-                this::maintainTaskLeases,
-                LEASE_MAINTENANCE_SECONDS,
-                LEASE_MAINTENANCE_SECONDS,
-                TimeUnit.SECONDS);
+        leaseMaintenance.start(this::maintainTaskLeases);
     }
 
     @PreDestroy
     void stopTaskLeaseMaintenance() {
-        leaseMaintenanceExecutor.shutdownNow();
+        leaseMaintenance.stop();
     }
 
     void maintainTaskLeases() {
-        List<LocalVerificationExecution> executions = List.copyOf(localExecutions.values());
-        try {
-            databaseNow();
-        } catch (RuntimeException e) {
-            stopVerificationExecutionsWithExpiredConfirmation(executions);
-            log.warn("Could not read database time while maintaining verification task leases", e);
-            return;
-        }
-        for (LocalVerificationExecution execution : executions) {
-            try {
-                TaskLeaseRenewal.RenewalResult renewal = TaskLeaseRenewal.renewWithConfirmation(
-                        transactionTemplate,
-                        () -> taskRepository.findByIdForUpdate(execution.taskId),
-                        this::databaseNow,
-                        taskRepository::saveAndFlush,
-                        workerId,
-                        TASK_LEASE_DURATION);
-                if (!renewal.renewed()) {
-                    execution.requestStop();
-                } else {
-                    execution.leaseConfirmation.confirmAt(renewal.confirmationStartedNanos());
-                }
-            } catch (RuntimeException e) {
-                if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                    execution.requestStop();
-                    log.warn("Stopped local verification task {} after its lease could not be confirmed for a full TTL",
-                            execution.taskId);
-                } else {
-                    log.warn("Could not renew verification task lease {}; the next cycle will retry",
-                            execution.taskId, e);
-                }
-            }
-        }
-        try {
-            LocalDateTime recoveryTime = databaseNow();
-            String message = "The verification worker stopped before the task completed";
-            String checkLogs = serializeCheckLogs(List.of(message));
-            int recovered = TaskLeaseRenewal.failExpiredTasks(
-                    transactionTemplate,
-                    taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
-                    taskRepository::findByIdForUpdate,
-                    taskId -> taskRepository.failExpiredTask(taskId, VerificationTaskPo.TaskStatus.FAILED,
-                            recoveryTime, VerificationOutcome.INCONCLUSIVE, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
-            if (recovered > 0) {
-                log.warn("Recovered {} expired verification task lease(s)", recovered);
-            }
-        } catch (RuntimeException e) {
-            log.warn("Could not recover expired verification task leases; the next cycle will retry", e);
-        }
-    }
-
-    private void stopVerificationExecutionsWithExpiredConfirmation(
-            List<LocalVerificationExecution> executions) {
-        for (LocalVerificationExecution execution : executions) {
-            if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                execution.requestStop();
-                log.warn("Stopped local verification task {} after the database could not confirm its lease for a full TTL",
-                        execution.taskId);
-            }
-        }
+        TaskLeaseMaintenance.sweep(localLeases(),
+                TASK_LEASE_DURATION, this::databaseNow,
+                taskId -> TaskLeaseRenewal.renewWithConfirmation(
+                        transactionTemplate, () -> taskRepository.findByIdForUpdate(taskId),
+                        this::databaseNow, taskRepository::saveAndFlush, workerId, TASK_LEASE_DURATION),
+                recoveryTime -> {
+                    String message = "The verification worker stopped before the task completed";
+                    String checkLogs = serializeCheckLogs(List.of(message));
+                    return TaskLeaseRenewal.failExpiredTasks(
+                            transactionTemplate,
+                            taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                            taskRepository::findByIdForUpdate,
+                            taskId -> taskRepository.failExpiredTask(taskId, VerificationTaskPo.TaskStatus.FAILED,
+                                    recoveryTime, VerificationOutcome.INCONCLUSIVE, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
+                }, log, "verification");
     }
 
     // ==================== 同步验证 ====================
@@ -314,7 +229,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         try {
             future = syncVerificationExecutor.submit(() -> doVerify(userId, input, null));
         } catch (RejectedExecutionException e) {
-            log.warn("Sync verification request rejected: executor is saturated ({})", syncVerificationExecutorSnapshot());
+            log.warn("Sync verification request rejected: executor is saturated ({})",
+                    SynchronousRunExecutorSupport.snapshot(syncVerificationExecutor));
             throw new ServiceUnavailableException("Verification service is busy, please retry later", e);
         }
 
@@ -322,8 +238,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         try {
             result = future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            future.cancel(true);
-            purgeCancelledSyncTasks();
+            SynchronousRunExecutorSupport.cancelAndPurge(future, syncVerificationExecutor);
             log.warn("Sync verification timed out after {}ms", timeoutMs);
             result = applyRunContext(buildErrorResult("", List.of("Verification timed out")),
                     input.attackScenario(), input.enablePrivacy(), input.attackSurface(), input.modelSnapshot(),
@@ -336,8 +251,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             log.error("Sync verification failed", cause);
             throw new InternalServerException("Verification failed: " + cause.getMessage());
         } catch (InterruptedException e) {
-            future.cancel(true);
-            purgeCancelledSyncTasks();
+            SynchronousRunExecutorSupport.cancelAndPurge(future, syncVerificationExecutor);
             Thread.currentThread().interrupt();
             throw new ServiceUnavailableException("Verification was interrupted before completion", e);
         }
@@ -385,6 +299,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         try {
             if (taskId != null) {
                 updateTaskProgress(taskId, 20, TaskProgressStage.GENERATING_MODEL);
+                if (isExecutionStopped(taskId)) return null;
             }
             checkLogs.add("Generating NuSMV model...");
             SmvGenerator.GenerateResult genResult = generateResolvedModel(
@@ -405,13 +320,14 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 return finalResult;
             }
             checkLogs.add("Model generated: " + smvFile.getName());
-            saveRequestJson(smvFile, input.requestJson());
+            saveRequestJson(smvFile, input.requestJson(), log, "Verification");
 
             // Read SMV content for persistence before NuSMV execution
             String smvModelContent = readSmvModelContent(smvFile);
 
             if (taskId != null) {
                 updateTaskProgress(taskId, 50, TaskProgressStage.EXECUTING_MODEL_CHECKER);
+                if (isExecutionStopped(taskId)) return null;
             }
             checkLogs.add("Executing NuSMV verification...");
             NusmvResult result = nusmvExecutor.execute(smvFile);
@@ -435,6 +351,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
 
             if (taskId != null) {
                 updateTaskProgress(taskId, 80, TaskProgressStage.PARSING_RESULTS);
+                if (isExecutionStopped(taskId)) return null;
             }
             // Build per-spec results and reuse deviceSmvMap from generation stage.
             finalResult = buildVerificationResult(result, input.devices(), input.rules(), input.specs(),
@@ -491,34 +408,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
             if (finalResult != null) {
                 applyRunContext(finalResult, input.attackScenario(), input.enablePrivacy(),
                         input.attackSurface(), input.modelSnapshot(), input.request());
-                saveResultJson(smvFile, finalResult);
+                saveResultJson(smvFile, finalResult, this::wrapResultForDebugFile, log, "Verification",
+                        "Failed to save result JSON: {}");
             }
-            cleanupTempFile(smvFile);
-        }
-    }
-
-    private void saveResultJson(File smvFile, VerificationResultDto verificationResult) {
-        if (smvFile == null || smvFile.getParentFile() == null) return;
-        try {
-            File jsonFile = new File(smvFile.getParentFile(), "result.json");
-            Result<VerificationResultDto> wrapped = wrapResultForDebugFile(verificationResult);
-            byte[] payload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(wrapped);
-            java.nio.file.Files.write(jsonFile.toPath(), payload);
-            log.debug("Verification result JSON saved to: {}", jsonFile.getAbsolutePath());
-        } catch (IOException e) {
-            log.warn("Failed to save result JSON: {}", e.getMessage());
-        }
-    }
-
-    private void saveRequestJson(File smvFile, String requestJson) {
-        if (smvFile == null || smvFile.getParentFile() == null || requestJson == null || requestJson.isBlank()) return;
-        try {
-            File jsonFile = new File(smvFile.getParentFile(), "request.json");
-            objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValue(jsonFile, objectMapper.readTree(requestJson));
-            log.debug("Verification request JSON saved to: {}", jsonFile.getAbsolutePath());
-        } catch (IOException e) {
-            log.warn("Failed to save verification request JSON: {}", e.getMessage());
         }
     }
 
@@ -564,7 +456,8 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         snapshot.setSpecs(specs);
         snapshot.setEnvironmentVariables(environmentVariables);
         snapshot.setAttackScenario(attackScenario);
-        snapshot.setEnablePrivacy(snapshot.isEnablePrivacy() || specificationsRequirePrivacy(specs));
+        snapshot.setEnablePrivacy(snapshot.isEnablePrivacy()
+                || specs.stream().anyMatch(ManifestConditionSemantics::specificationRequiresPrivacy));
 
         Map<String, String> errors = NusmvRequestValidator.newErrors();
         NusmvRequestValidator.validateDevices(devices, errors);
@@ -597,21 +490,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 modelInput.templateManifests(), modelInput.modelSnapshot(), attackSurface,
                 buildRequestSnapshot(snapshot), buildTemplateSnapshotsJson(
                         modelInput.templateManifests(), modelInput.deviceSmvMap()));
-    }
-
-    private boolean specificationsRequirePrivacy(List<SpecificationDto> specs) {
-        if (specs == null) {
-            return false;
-        }
-        return specs.stream()
-                .filter(Objects::nonNull)
-                .flatMap(spec -> java.util.stream.Stream.of(
-                        spec.getAConditions(), spec.getIfConditions(), spec.getThenConditions()))
-                .filter(Objects::nonNull)
-                .flatMap(Collection::stream)
-                .filter(Objects::nonNull)
-                .map(SpecConditionDto::getTargetType)
-                .anyMatch(type -> type != null && "privacy".equalsIgnoreCase(type.trim()));
     }
 
     private VerificationResultDto applyModelContext(VerificationResultDto result,
@@ -769,26 +647,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         return taskId;
     }
 
-    // Service-internal: task creation is only reachable through submitVerification and
-    // the package-private async path below; it is no longer part of the public interface.
-    // Deliberately not @Transactional: self-invocation bypasses the proxy, so the annotation would
-    // never start one. The transaction lives in the private overload's transactionTemplate.
-    Long createTask(Long userId,
-                    AttackScenarioDto attackScenario,
-                    boolean enablePrivacy,
-                    int devicePointCount,
-                    int linkPointCount,
-                    int falsifiableReadingDeviceCount,
-                    ModelRunSnapshotDto modelSnapshot) {
-        AttackScenarioDto requiredScenario = Objects.requireNonNull(
-                attackScenario, "attackScenario is required");
-        return createTask(userId, requiredScenario, enablePrivacy,
-                devicePointCount, linkPointCount, falsifiableReadingDeviceCount, modelSnapshot,
-                JsonUtils.toJson(ModelSemanticsDto.forRun(
-                        requiredScenario, enablePrivacy, devicePointCount, linkPointCount,
-                        falsifiableReadingDeviceCount)), null, null);
-    }
-
     private Long createTask(Long userId,
                             AttackScenarioDto attackScenario,
                             boolean enablePrivacy,
@@ -842,109 +700,30 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
         });
     }
 
-    // Service-internal failure compensation, reachable only from the submit/async paths below.
-    // Deliberately not @Transactional: self-invocation bypasses the proxy. failTask owns the
-    // transaction.
-    void failTaskById(Long taskId, String errorMessage) {
-        taskRepository.findById(Objects.requireNonNull(taskId, "taskId must not be null"))
-                .ifPresent(task -> failTask(task, errorMessage));
-    }
-
-    // Package-private async entry: assumes the caller already created the task and passes a
-    // non-null taskId. Production code goes through submitVerification; retained at this
-    // visibility so same-package tests can drive the "execute with a fixed taskId" path.
-    void verifyAsync(Long userId, Long taskId, VerificationRequestDto request) {
-        Long requiredTaskId = requireTaskId(taskId);
-        VerificationInput input;
-        try {
-            input = validateAndNormalize(userId, request);
-        } catch (ValidationException e) {
-            failTaskById(requiredTaskId, e.getMessage());
-            throw e;
-        }
-        try {
-            persistTaskModelContext(requiredTaskId, input.attackScenario(), input.enablePrivacy(),
-                    input.modeledDeviceAttackPointCount(), input.modeledAutomationLinkAttackPointCount(),
-                    input.modeledFalsifiableReadingDeviceCount(), input.modelSnapshot(),
-                    JsonUtils.toJson(ModelSemanticsDto.forRun(
-                            input.attackScenario(), input.enablePrivacy(), input.attackSurface())),
-                    input.requestJson(), input.templateSnapshotsJson());
-            enqueueVerificationTask(userId, requiredTaskId, input);
-        } catch (RuntimeException e) {
-            String message = e instanceof TaskRejectedException
-                    ? "Server busy, please try again later"
-                    : "Task dispatch failed before execution: " + e.getClass().getSimpleName();
-            failTaskById(requiredTaskId, message);
-            if (e instanceof TaskRejectedException) {
-                throw new ServiceUnavailableException("Server busy, please try again later", e);
-            }
-            throw e;
-        }
-    }
-
     private boolean cleanupUndispatchedTask(Long userId, Long taskId, RuntimeException failure) {
-        try {
-            int deleted = taskRepository.deleteUndispatchedTask(
-                    taskId, userId, workerId, VerificationTaskPo.TaskStatus.PENDING);
-            if (deleted == 1) return true;
-            boolean absent = taskRepository.findByIdAndUserId(taskId, userId).isEmpty();
-            if (!absent) {
-                log.error("Could not remove verification task {} after failure before dispatch", taskId);
-            }
-            return absent;
-        } catch (RuntimeException cleanupError) {
-            failure.addSuppressed(cleanupError);
-            log.error("Could not remove verification task {} after failure before dispatch",
-                    taskId, cleanupError);
-            return false;
-        }
+        return removeUndispatchedTask(taskId, "verification", log, failure,
+                () -> taskRepository.deleteUndispatchedTask(
+                        taskId, userId, workerId, VerificationTaskPo.TaskStatus.PENDING),
+                () -> taskRepository.findByIdAndUserId(taskId, userId).isEmpty());
     }
 
     private void enqueueVerificationTask(Long userId, Long taskId, VerificationInput input) {
         Long requiredTaskId = requireTaskId(taskId);
         VerificationInput requiredInput = Objects.requireNonNull(input, "verification input must not be null");
-        LocalVerificationExecution execution =
-                new LocalVerificationExecution(userId, requiredTaskId, requiredInput);
-        if (localExecutions.putIfAbsent(requiredTaskId, execution) != null) {
-            throw new IllegalStateException("Duplicate local verification task execution " + requiredTaskId);
-        }
-        try {
-            if (taskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
-                    .filter(task -> task.getStatus() == VerificationTaskPo.TaskStatus.PENDING).isEmpty()
-                    || execution.futureTask.isCancelled()) {
-                execution.requestStop();
-                return;
-            }
-            verificationTaskExecutor.execute(execution.futureTask);
-            if (execution.futureTask.isCancelled()) {
-                purgeCancelledVerificationTasks();
-            }
-        } catch (RuntimeException e) {
-            execution.requestStop();
-            throw e;
-        }
+        LocalTaskExecution execution = new LocalTaskExecution(requiredTaskId,
+                () -> runVerificationTask(userId, requiredTaskId, requiredInput),
+                () -> LocalTaskExecution.purgeCancelledTasks(verificationTaskExecutor, log, "verification"),
+                completed -> retireLocalExecution(requiredTaskId, completed));
+        registerLocalExecution(requiredTaskId, execution, "verification");
+        execution.dispatchIfPending(verificationTaskExecutor,
+                () -> taskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
+                        .filter(task -> task.getStatus() == VerificationTaskPo.TaskStatus.PENDING).isPresent());
     }
 
     private LocalDateTime databaseNow() {
         return Objects.requireNonNull(
                 taskRepository.currentDatabaseTime(),
                 "Database current timestamp must not be null");
-    }
-
-    private void purgeCancelledVerificationTasks() {
-        try {
-            ThreadPoolExecutor executor = verificationTaskExecutor.getThreadPoolExecutor();
-            if (executor != null) executor.purge();
-        } catch (RuntimeException e) {
-            log.warn("Could not purge cancelled verification tasks from the local executor queue", e);
-        }
-    }
-
-    private Long requireTaskId(Long taskId) {
-        if (taskId == null) {
-            throw new ValidationException("taskId", "Task id cannot be null");
-        }
-        return taskId;
     }
 
     private void runVerificationTask(Long userId, Long taskId, VerificationInput input) {
@@ -982,9 +761,9 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 log.warn("Verification task {} lease expired before its start was committed", taskId);
                 return;
             }
-            LocalVerificationExecution localExecution = localExecutions.get(taskId);
+            LocalTaskExecution localExecution = findLocalExecution(taskId);
             if (localExecution != null) {
-                localExecution.leaseConfirmation.confirmAt(start.confirmationStartedNanos());
+                localExecution.confirmLeaseAt(start.confirmationStartedNanos());
             }
 
             // Load entity for subsequent use (failTask/completeTask only need id and startedAt).
@@ -1084,9 +863,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<VerificationRunSummaryDto> getRuns(Long userId) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        RunHistoryRows rows = readTransaction.execute(status -> {
+        RunHistoryRows rows = captureHistoryRows(transactionTemplate, () -> {
             List<VerificationRunSummaryProjection> runs = taskRepository.findCompletedRunSummaries(
                     userId, VerificationTaskPo.TaskStatus.COMPLETED,
                     PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser()));
@@ -1164,9 +941,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public VerificationRunDto getRun(Long userId, Long runId) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        RunDetailRows rows = readTransaction.execute(status -> {
+        RunDetailRows rows = captureHistoryRows(transactionTemplate, () -> {
             VerificationResultView run = taskRepository.findCompletedResultView(
                         runId, userId, VerificationTaskPo.TaskStatus.COMPLETED, VerificationTaskRepository.SMV_NON_BLANK_CHARACTERS)
                 .orElseThrow(() -> new ResourceNotFoundException("VerificationRun", runId));
@@ -1204,9 +979,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<TraceDto> getRunTraces(Long userId, Long runId) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        RunTraceRows rows = readTransaction.execute(status -> {
+        RunTraceRows rows = captureHistoryRows(transactionTemplate, () -> {
             Map<Long, VerificationTraceContextProjection> contexts = traceRunContexts(userId, List.of(runId));
             if (!contexts.containsKey(runId)) {
                 throw new ResourceNotFoundException("VerificationRun", runId);
@@ -1353,27 +1126,6 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
     public TaskCancellationResultDto cancelTask(Long userId, Long taskId) {
         chatExecutionLeaseGuard.requireCurrentExecutionLeaseAndLock();
         return super.cancelTask(userId, taskId);
-    }
-
-    private void persistTaskModelContext(Long taskId,
-                                         AttackScenarioDto attackScenario,
-                                         boolean enablePrivacy,
-                                         int devicePointCount,
-                                         int linkPointCount,
-                                         int falsifiableReadingDeviceCount,
-                                         ModelRunSnapshotDto modelSnapshot,
-                                         String modelSemanticsJson, String requestJson, String templateSnapshotsJson) {
-        AttackScenarioDto requiredScenario = Objects.requireNonNull(
-                attackScenario, "attackScenario is required");
-        taskRepository.updateModelContext(taskId, requiredScenario.isEnabled(),
-                requiredScenario.effectiveBudget(), enablePrivacy,
-                devicePointCount, falsifiableReadingDeviceCount, linkPointCount,
-                JsonUtils.toJson(modelSnapshot), modelSemanticsJson, requestJson, templateSnapshotsJson);
-    }
-
-    @Override
-    public void updateTaskProgress(Long taskId, int progress, TaskProgressStage stage) {
-        super.updateTaskProgress(taskId, progress, stage);
     }
 
     @Override
@@ -2001,36 +1753,7 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 enablePrivacy, purpose, tempModelContext, resolvedDeviceSmvMap);
     }
 
-    private void cleanupTempFile(File file) {
-        // The scheduled artifact cleaner bounds retained model/request/output/result directories.
-    }
-
-    private String syncVerificationExecutorSnapshot() {
-        try {
-            ThreadPoolExecutor nativeExecutor = syncVerificationExecutor.getThreadPoolExecutor();
-            return "poolSize=" + nativeExecutor.getPoolSize()
-                    + ", active=" + nativeExecutor.getActiveCount()
-                    + ", queueSize=" + nativeExecutor.getQueue().size()
-                    + ", remainingCapacity=" + nativeExecutor.getQueue().remainingCapacity();
-        } catch (IllegalStateException ignored) {
-            return "executor=uninitialized";
-        }
-    }
-
-    private void purgeCancelledSyncTasks() {
-        try {
-            syncVerificationExecutor.getThreadPoolExecutor().purge();
-        } catch (IllegalStateException ignored) {
-            // executor may not be initialized yet
-        }
-    }
-
     // ==================== AbstractAsyncTaskService hooks ====================
-
-    @Override
-    protected Optional<VerificationTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
-        return taskRepository.findByIdAndUserId(id, userId);
-    }
 
     @Override
     protected Optional<VerificationTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
@@ -2061,75 +1784,5 @@ public class VerificationServiceImpl extends AbstractAsyncTaskService<Verificati
                 this::databaseNow,
                 (lockedTask, currentTime) -> taskRepository.updateProgressIfActive(
                         taskId, progress, stage, workerId, currentTime)).updated();
-    }
-
-    @Override
-    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
-        LocalVerificationExecution execution = localExecutions.get(taskId);
-        return execution == null ? LocalExecutionStopResult.NONE : execution.requestStop();
-    }
-
-    @Override
-    protected boolean isLocalStopRequested(Long taskId) {
-        LocalVerificationExecution execution = localExecutions.get(taskId);
-        return execution != null && execution.futureTask.isCancelled();
-    }
-
-    private enum LocalExecutionState {
-        QUEUED,
-        RUNNING,
-        CANCELLED_BEFORE_START,
-        FINISHED
-    }
-
-    private final class LocalVerificationExecution implements Runnable {
-        private final Long userId;
-        private final Long taskId;
-        private final VerificationInput input;
-        private final AtomicReference<LocalExecutionState> state =
-                new AtomicReference<>(LocalExecutionState.QUEUED);
-        private final LeaseConfirmation leaseConfirmation = new LeaseConfirmation();
-        private final FutureTask<Void> futureTask = new FutureTask<>(this, null);
-
-        private LocalVerificationExecution(Long userId, Long taskId, VerificationInput input) {
-            this.userId = userId;
-            this.taskId = taskId;
-            this.input = input;
-        }
-
-        @Override
-        public void run() {
-            if (!state.compareAndSet(LocalExecutionState.QUEUED, LocalExecutionState.RUNNING)) {
-                return;
-            }
-            try {
-                runVerificationTask(userId, taskId, input);
-            } finally {
-                state.set(LocalExecutionState.FINISHED);
-                localExecutions.remove(taskId, this);
-            }
-        }
-
-        private LocalExecutionStopResult requestStop() {
-            while (true) {
-                LocalExecutionState current = state.get();
-                if (current == LocalExecutionState.QUEUED) {
-                    if (!state.compareAndSet(
-                            LocalExecutionState.QUEUED,
-                            LocalExecutionState.CANCELLED_BEFORE_START)) {
-                        continue;
-                    }
-                    futureTask.cancel(false);
-                    purgeCancelledVerificationTasks();
-                    localExecutions.remove(taskId, this);
-                    return LocalExecutionStopResult.STOPPED_BEFORE_START;
-                }
-                if (current == LocalExecutionState.RUNNING) {
-                    futureTask.cancel(true);
-                    return LocalExecutionStopResult.STOP_REQUESTED;
-                }
-                return LocalExecutionStopResult.NONE;
-            }
-        }
     }
 }

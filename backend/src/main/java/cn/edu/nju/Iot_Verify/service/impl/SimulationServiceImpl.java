@@ -68,7 +68,6 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyOptionalList;
 import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.copyRequiredList;
@@ -78,7 +77,6 @@ import static cn.edu.nju.Iot_Verify.service.impl.ModelRequestSnapshotSupport.cop
 public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTaskPo> implements SimulationService {
 
     private static final Duration TASK_LEASE_DURATION = Duration.ofMinutes(2);
-    private static final long LEASE_MAINTENANCE_SECONDS = 10L;
     private static final List<SimulationTaskPo.TaskStatus> ACTIVE_STATUSES = List.of(
             SimulationTaskPo.TaskStatus.PENDING,
             SimulationTaskPo.TaskStatus.RUNNING);
@@ -102,14 +100,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     /** Reads the board that defines what a run simulates; the request only chooses parameters. */
     private final BoardDataConverter boardDataConverter;
     private final String workerId = UUID.randomUUID().toString();
-    private final ScheduledExecutorService leaseMaintenanceExecutor =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "simulation-task-lease-maintenance");
-                thread.setDaemon(true);
-                return thread;
-            });
-    private final ConcurrentHashMap<Long, LocalSimulationExecution> localExecutions =
-            new ConcurrentHashMap<>();
+    private final TaskLeaseMaintenance leaseMaintenance = new TaskLeaseMaintenance("simulation-task-lease-maintenance");
 
     @Autowired
     public SimulationServiceImpl(SmvGenerator smvGenerator,
@@ -150,112 +141,36 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         this.boardDataConverter = boardDataConverter;
     }
 
-    SimulationServiceImpl(SmvGenerator smvGenerator,
-                          EnvironmentProvenanceCollector provenanceCollector,
-                          SmvTraceParser smvTraceParser,
-                          NusmvExecutor nusmvExecutor,
-                          NusmvConfig nusmvConfig,
-                          SimulationTraceRepository simulationTraceRepository,
-                          SimulationTaskRepository simulationTaskRepository,
-                          UserRepository userRepository,
-                          SimulationTraceMapper simulationTraceMapper,
-                          SimulationTaskMapper simulationTaskMapper,
-                          ObjectMapper objectMapper,
-                          ThreadPoolTaskExecutor simulationTaskExecutor,
-                          ThreadPoolTaskExecutor syncSimulationExecutor,
-                          TransactionTemplate transactionTemplate,
-                          ChatExecutionLeaseGuard chatExecutionLeaseGuard,
-                          FormalOperationAdmission formalOperationAdmission,
-                          BoardDataConverter boardDataConverter) {
-        this(smvGenerator, provenanceCollector, smvTraceParser, nusmvExecutor, nusmvConfig,
-                simulationTraceRepository, simulationTaskRepository, userRepository,
-                simulationTraceMapper, simulationTaskMapper, objectMapper,
-                simulationTaskExecutor, syncSimulationExecutor, transactionTemplate, chatExecutionLeaseGuard,
-                formalOperationAdmission,
-                new AsyncTaskAdmissionConfig(),
-                boardDataConverter);
-    }
-
     private void requireChatExecutionLease() {
         chatExecutionLeaseGuard.requireCurrentExecutionLease();
     }
 
     @PostConstruct
     void initializeTaskLeaseMaintenance() {
-        maintainTaskLeases();
-        leaseMaintenanceExecutor.scheduleWithFixedDelay(
-                this::maintainTaskLeases,
-                LEASE_MAINTENANCE_SECONDS,
-                LEASE_MAINTENANCE_SECONDS,
-                TimeUnit.SECONDS);
+        leaseMaintenance.start(this::maintainTaskLeases);
     }
 
     @PreDestroy
     void stopTaskLeaseMaintenance() {
-        leaseMaintenanceExecutor.shutdownNow();
+        leaseMaintenance.stop();
     }
 
     void maintainTaskLeases() {
-        List<LocalSimulationExecution> executions = List.copyOf(localExecutions.values());
-        try {
-            databaseNow();
-        } catch (RuntimeException e) {
-            stopSimulationExecutionsWithExpiredConfirmation(executions);
-            log.warn("Could not read database time while maintaining simulation task leases", e);
-            return;
-        }
-        for (LocalSimulationExecution execution : executions) {
-            try {
-                TaskLeaseRenewal.RenewalResult renewal = TaskLeaseRenewal.renewWithConfirmation(
-                        transactionTemplate,
-                        () -> simulationTaskRepository.findByIdForUpdate(execution.taskId),
-                        this::databaseNow,
-                        simulationTaskRepository::saveAndFlush,
-                        workerId,
-                        TASK_LEASE_DURATION);
-                if (!renewal.renewed()) {
-                    execution.requestStop();
-                } else {
-                    execution.leaseConfirmation.confirmAt(renewal.confirmationStartedNanos());
-                }
-            } catch (RuntimeException e) {
-                if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                    execution.requestStop();
-                    log.warn("Stopped local simulation task {} after its lease could not be confirmed for a full TTL",
-                            execution.taskId);
-                } else {
-                    log.warn("Could not renew simulation task lease {}; the next cycle will retry",
-                            execution.taskId, e);
-                }
-            }
-        }
-        try {
-            LocalDateTime recoveryTime = databaseNow();
-            String message = "The simulation worker stopped before the task completed";
-            String checkLogs = serializeCheckLogs(List.of(message));
-            int recovered = TaskLeaseRenewal.failExpiredTasks(
-                    transactionTemplate,
-                    simulationTaskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
-                    simulationTaskRepository::findByIdForUpdate,
-                    taskId -> simulationTaskRepository.failExpiredTask(taskId, SimulationTaskPo.TaskStatus.FAILED,
-                            recoveryTime, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
-            if (recovered > 0) {
-                log.warn("Recovered {} expired simulation task lease(s)", recovered);
-            }
-        } catch (RuntimeException e) {
-            log.warn("Could not recover expired simulation task leases; the next cycle will retry", e);
-        }
-    }
-
-    private void stopSimulationExecutionsWithExpiredConfirmation(
-            List<LocalSimulationExecution> executions) {
-        for (LocalSimulationExecution execution : executions) {
-            if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                execution.requestStop();
-                log.warn("Stopped local simulation task {} after the database could not confirm its lease for a full TTL",
-                        execution.taskId);
-            }
-        }
+        TaskLeaseMaintenance.sweep(localLeases(),
+                TASK_LEASE_DURATION, this::databaseNow,
+                taskId -> TaskLeaseRenewal.renewWithConfirmation(
+                        transactionTemplate, () -> simulationTaskRepository.findByIdForUpdate(taskId),
+                        this::databaseNow, simulationTaskRepository::saveAndFlush, workerId, TASK_LEASE_DURATION),
+                recoveryTime -> {
+                    String message = "The simulation worker stopped before the task completed";
+                    String checkLogs = serializeCheckLogs(List.of(message));
+                    return TaskLeaseRenewal.failExpiredTasks(
+                            transactionTemplate,
+                            simulationTaskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                            simulationTaskRepository::findByIdForUpdate,
+                            taskId -> simulationTaskRepository.failExpiredTask(taskId, SimulationTaskPo.TaskStatus.FAILED,
+                                    recoveryTime, message, checkLogs, ACTIVE_STATUSES, recoveryTime));
+                }, log, "simulation");
     }
 
     @Override
@@ -283,7 +198,8 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                             input.enablePrivacy(), input.request(), input.deviceSmvMap(),
                             input.modelSnapshot(), tempModelContext));
         } catch (RejectedExecutionException e) {
-            log.warn("Simulation request rejected: executor is saturated ({})", syncSimulationExecutorSnapshot());
+            log.warn("Simulation request rejected: executor is saturated ({})",
+                    SynchronousRunExecutorSupport.snapshot(syncSimulationExecutor));
             throw new ServiceUnavailableException("Simulation service is busy, please retry later", e);
         }
 
@@ -294,8 +210,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             }
             return result;
         } catch (TimeoutException e) {
-            future.cancel(true);
-            purgeCancelledSyncTasks();
+            SynchronousRunExecutorSupport.cancelAndPurge(future, syncSimulationExecutor);
             log.warn("Simulation timed out after {}ms", timeoutMs);
             throw SimulationExecutionException.timedOut();
         } catch (ExecutionException e) {
@@ -307,8 +222,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             log.error("Simulation failed", cause);
             throw new InternalServerException("Simulation failed: " + cause.getMessage());
         } catch (InterruptedException e) {
-            future.cancel(true);
-            purgeCancelledSyncTasks();
+            SynchronousRunExecutorSupport.cancelAndPurge(future, syncSimulationExecutor);
             Thread.currentThread().interrupt();
             throw SimulationExecutionException.interrupted();
         }
@@ -388,24 +302,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         }
     }
 
-    // Service-internal: task creation is only reachable through submitSimulation and
-    // the package-private async path below; it is no longer part of the public interface.
-    // Deliberately not @Transactional: self-invocation bypasses the proxy, so the annotation would
-    // never start one. The transaction lives in the private overload's transactionTemplate.
-    Long createTask(Long userId, int requestedSteps,
-                    AttackScenarioDto attackScenario, boolean enablePrivacy,
-                    int devicePointCount, int linkPointCount,
-                    int falsifiableReadingDeviceCount,
-                    ModelRunSnapshotDto modelSnapshot) {
-        AttackScenarioDto requiredScenario = Objects.requireNonNull(
-                attackScenario, "attackScenario is required");
-        return createTask(userId, requestedSteps, requiredScenario, enablePrivacy,
-                devicePointCount, linkPointCount, falsifiableReadingDeviceCount, modelSnapshot,
-                JsonUtils.toJson(ModelSemanticsDto.forRun(
-                        requiredScenario, enablePrivacy, devicePointCount, linkPointCount,
-                        falsifiableReadingDeviceCount)));
-    }
-
     private Long createTask(Long userId, int requestedSteps,
                             AttackScenarioDto attackScenario, boolean enablePrivacy,
                             int devicePointCount, int linkPointCount,
@@ -456,45 +352,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         });
     }
 
-    // Service-internal failure compensation, reachable only from the submit/async paths below.
-    // Deliberately not @Transactional: self-invocation bypasses the proxy. failTask owns the
-    // transaction.
-    void failTaskById(Long taskId, String errorMessage) {
-        simulationTaskRepository.findById(Objects.requireNonNull(taskId, "taskId must not be null"))
-                .ifPresent(task -> failTask(task, errorMessage, List.of(errorMessage)));
-    }
-
-    // Package-private async entry: assumes the caller already created the task and passes a
-    // non-null taskId. Production code goes through submitSimulation; retained at this
-    // visibility so same-package tests can drive the "execute with a fixed taskId" path.
-    void simulateAsync(Long userId, Long taskId, SimulationRequestDto request) {
-        Long requiredTaskId = requireTaskId(taskId);
-        SimulationInput input;
-        try {
-            input = validateAndNormalize(userId, request);
-        } catch (ValidationException e) {
-            failTaskById(requiredTaskId, e.getMessage());
-            throw e;
-        }
-        try {
-            persistTaskModelContext(requiredTaskId, input.attackScenario(), input.enablePrivacy(),
-                    input.modeledDeviceAttackPointCount(), input.modeledAutomationLinkAttackPointCount(),
-                    input.modeledFalsifiableReadingDeviceCount(), input.modelSnapshot(),
-                    JsonUtils.toJson(ModelSemanticsDto.forRun(
-                            input.attackScenario(), input.enablePrivacy(), input.attackSurface())));
-            enqueueSimulationTask(userId, requiredTaskId, input);
-        } catch (RuntimeException e) {
-            String message = e instanceof TaskRejectedException
-                    ? "Server busy, please try again later"
-                    : "Task dispatch failed before execution: " + e.getClass().getSimpleName();
-            failTaskById(requiredTaskId, message);
-            if (e instanceof TaskRejectedException) {
-                throw new ServiceUnavailableException("Server busy, please try again later", e);
-            }
-            throw e;
-        }
-    }
-
     @Override
     public Long submitSimulation(Long userId, SimulationRequestDto request) {
         return submitSimulationInput(userId, validateAndNormalize(userId, request));
@@ -523,84 +380,29 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     }
 
     private boolean cleanupUndispatchedTask(Long userId, Long taskId, RuntimeException failure) {
-        try {
-            int deleted = simulationTaskRepository.deleteUndispatchedTask(
-                    taskId, userId, workerId, SimulationTaskPo.TaskStatus.PENDING);
-            if (deleted == 1) return true;
-            boolean absent = simulationTaskRepository.findByIdAndUserId(taskId, userId).isEmpty();
-            if (!absent) {
-                log.error("Could not remove simulation task {} after failure before dispatch", taskId);
-            }
-            return absent;
-        } catch (RuntimeException cleanupError) {
-            failure.addSuppressed(cleanupError);
-            log.error("Could not remove simulation task {} after failure before dispatch",
-                    taskId, cleanupError);
-            return false;
-        }
+        return removeUndispatchedTask(taskId, "simulation", log, failure,
+                () -> simulationTaskRepository.deleteUndispatchedTask(
+                        taskId, userId, workerId, SimulationTaskPo.TaskStatus.PENDING),
+                () -> simulationTaskRepository.findByIdAndUserId(taskId, userId).isEmpty());
     }
 
     private void enqueueSimulationTask(Long userId, Long taskId, SimulationInput input) {
         Long requiredTaskId = requireTaskId(taskId);
         SimulationInput requiredInput = Objects.requireNonNull(input, "simulation input must not be null");
-        LocalSimulationExecution execution =
-                new LocalSimulationExecution(userId, requiredTaskId, requiredInput);
-        if (localExecutions.putIfAbsent(requiredTaskId, execution) != null) {
-            throw new IllegalStateException("Duplicate local simulation task execution " + requiredTaskId);
-        }
-        try {
-            if (simulationTaskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
-                    .filter(task -> task.getStatus() == SimulationTaskPo.TaskStatus.PENDING).isEmpty()
-                    || execution.futureTask.isCancelled()) {
-                execution.requestStop();
-                return;
-            }
-            simulationTaskExecutor.execute(execution.futureTask);
-            if (execution.futureTask.isCancelled()) {
-                purgeCancelledSimulationTasks();
-            }
-        } catch (RuntimeException e) {
-            execution.requestStop();
-            throw e;
-        }
+        LocalTaskExecution execution = new LocalTaskExecution(requiredTaskId,
+                () -> runSimulationTask(userId, requiredTaskId, requiredInput),
+                () -> LocalTaskExecution.purgeCancelledTasks(simulationTaskExecutor, log, "simulation"),
+                completed -> retireLocalExecution(requiredTaskId, completed));
+        registerLocalExecution(requiredTaskId, execution, "simulation");
+        execution.dispatchIfPending(simulationTaskExecutor,
+                () -> simulationTaskRepository.findProgressByIdAndUserId(requiredTaskId, userId)
+                        .filter(task -> task.getStatus() == SimulationTaskPo.TaskStatus.PENDING).isPresent());
     }
 
     private LocalDateTime databaseNow() {
         return Objects.requireNonNull(
                 simulationTaskRepository.currentDatabaseTime(),
                 "Database current timestamp must not be null");
-    }
-
-    private void purgeCancelledSimulationTasks() {
-        try {
-            ThreadPoolExecutor executor = simulationTaskExecutor.getThreadPoolExecutor();
-            if (executor != null) executor.purge();
-        } catch (RuntimeException e) {
-            log.warn("Could not purge cancelled simulation tasks from the local executor queue", e);
-        }
-    }
-
-    private void persistTaskModelContext(Long taskId,
-                                         AttackScenarioDto attackScenario,
-                                         boolean enablePrivacy,
-                                         int devicePointCount,
-                                         int linkPointCount,
-                                         int falsifiableReadingDeviceCount,
-                                         ModelRunSnapshotDto modelSnapshot,
-                                         String modelSemanticsJson) {
-        AttackScenarioDto requiredScenario = Objects.requireNonNull(
-                attackScenario, "attackScenario is required");
-        simulationTaskRepository.updateModelContext(
-                taskId, requiredScenario.isEnabled(), requiredScenario.effectiveBudget(), enablePrivacy,
-                devicePointCount, falsifiableReadingDeviceCount, linkPointCount,
-                JsonUtils.toJson(modelSnapshot), modelSemanticsJson);
-    }
-
-    private Long requireTaskId(Long taskId) {
-        if (taskId == null) {
-            throw new ValidationException("taskId", "Task id cannot be null");
-        }
-        return taskId;
     }
 
     private void runSimulationTask(Long userId, Long taskId, SimulationInput input) {
@@ -639,9 +441,9 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 log.warn("Simulation task {} lease expired before its start was committed", taskId);
                 return;
             }
-            LocalSimulationExecution localExecution = localExecutions.get(taskId);
+            LocalTaskExecution localExecution = findLocalExecution(taskId);
             if (localExecution != null) {
-                localExecution.leaseConfirmation.confirmAt(start.confirmationStartedNanos());
+                localExecution.confirmLeaseAt(start.confirmationStartedNanos());
             }
 
             // Load entity for subsequent use (failTask/completeTask only need id and startedAt).
@@ -652,6 +454,9 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
             }
 
             updateTaskProgress(taskId, 20, TaskProgressStage.RUNNING_SIMULATION);
+            if (isExecutionStopped(taskId)) {
+                return;
+            }
             SimulationResultDto result = doSimulate(userId, input.devices(), input.rules(), input.steps(),
                     input.enablePrivacy(), input.request(),
                     input.deviceSmvMap(), input.modelSnapshot(), SmvGenerator.TempModelContext.task(taskId));
@@ -853,9 +658,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<SimulationTraceSummaryDto> getUserSimulations(Long userId) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        var rows = readTransaction.execute(status -> simulationTraceRepository.findSummariesByUserId(
+        var rows = captureHistoryRows(transactionTemplate, () -> simulationTraceRepository.findSummariesByUserId(
                 userId, PageRequest.of(0, taskAdmissionLimits.getMaxStoredTasksPerUser())));
         return simulationTraceMapper.toSummaryProjectionDtoList(rows);
     }
@@ -863,9 +666,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public SimulationTraceDto getSimulation(Long userId, Long id) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        SimulationTracePo row = readTransaction.execute(status -> simulationTraceRepository.findByIdAndUserId(id, userId)
+        SimulationTracePo row = captureHistoryRows(transactionTemplate, () -> simulationTraceRepository.findByIdAndUserId(id, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("SimulationTrace", id)));
         return simulationTraceMapper.toDto(row);
     }
@@ -925,7 +726,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 return finalResult;
             }
             logs.add("Model generated: " + smvFile.getName());
-            saveRequestJson(smvFile, requestJson);
+            saveRequestJson(smvFile, requestJson, log, "Simulation");
 
             // Read SMV model content for persistence
             smvModelContent = readSmvModelContent(smvFile);
@@ -1018,12 +819,10 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 finalResult.setDisabledRuleCount(disabledRuleCount);
                 finalResult.setModelComplete(generationCompleted && disabledRuleCount == 0);
                 finalResult.setGenerationIssues(generationIssues);
-                // Set on every returned path: `cleanupTempFile` below deletes the randomly-named temp
-                // directory, so this is the last point at which the model can be read at all.
                 finalResult.setSmvModelContent(smvModelContent);
-                saveResultJson(smvFile, finalResult);
+                saveResultJson(smvFile, finalResult, this::wrapResultForDebugFile, log, "Simulation",
+                        "Failed to save simulation result JSON: {}");
             }
-            cleanupTempFile(smvFile);
         }
     }
 
@@ -1222,31 +1021,6 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
         return logs.get(logs.size() - 1);
     }
 
-    private void saveResultJson(File smvFile, SimulationResultDto simulationResult) {
-        if (smvFile == null || smvFile.getParentFile() == null || simulationResult == null) return;
-        try {
-            File jsonFile = new File(smvFile.getParentFile(), "result.json");
-            Result<SimulationResultDto> wrapped = wrapResultForDebugFile(simulationResult);
-            byte[] payload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(wrapped);
-            java.nio.file.Files.write(jsonFile.toPath(), payload);
-            log.debug("Simulation result JSON saved to: {}", jsonFile.getAbsolutePath());
-        } catch (IOException e) {
-            log.warn("Failed to save simulation result JSON: {}", e.getMessage());
-        }
-    }
-
-    private void saveRequestJson(File smvFile, String requestJson) {
-        if (smvFile == null || smvFile.getParentFile() == null || requestJson == null || requestJson.isBlank()) return;
-        try {
-            File jsonFile = new File(smvFile.getParentFile(), "request.json");
-            objectMapper.writerWithDefaultPrettyPrinter()
-                    .writeValue(jsonFile, objectMapper.readTree(requestJson));
-            log.debug("Simulation request JSON saved to: {}", jsonFile.getAbsolutePath());
-        } catch (IOException e) {
-            log.warn("Failed to save simulation request JSON: {}", e.getMessage());
-        }
-    }
-
     private Result<SimulationResultDto> wrapResultForDebugFile(SimulationResultDto simulationResult) {
         Result<SimulationResultDto> wrapped = new Result<>();
         wrapped.setData(simulationResult);
@@ -1307,36 +1081,7 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 enablePrivacy, purpose, tempModelContext, resolvedDeviceSmvMap);
     }
 
-    private void cleanupTempFile(File file) {
-        // The scheduled artifact cleaner bounds retained model/request/output/result directories.
-    }
-
-    private String syncSimulationExecutorSnapshot() {
-        try {
-            ThreadPoolExecutor nativeExecutor = syncSimulationExecutor.getThreadPoolExecutor();
-            return "poolSize=" + nativeExecutor.getPoolSize()
-                    + ", active=" + nativeExecutor.getActiveCount()
-                    + ", queueSize=" + nativeExecutor.getQueue().size()
-                    + ", remainingCapacity=" + nativeExecutor.getQueue().remainingCapacity();
-        } catch (IllegalStateException ignored) {
-            return "executor=uninitialized";
-        }
-    }
-
-    private void purgeCancelledSyncTasks() {
-        try {
-            syncSimulationExecutor.getThreadPoolExecutor().purge();
-        } catch (IllegalStateException ignored) {
-            // executor may not be initialized yet
-        }
-    }
-
     // ── AbstractAsyncTaskService hooks ─────────────────────────────────
-
-    @Override
-    protected Optional<SimulationTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
-        return simulationTaskRepository.findByIdAndUserId(id, userId);
-    }
 
     @Override
     protected Optional<SimulationTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
@@ -1366,75 +1111,5 @@ public class SimulationServiceImpl extends AbstractAsyncTaskService<SimulationTa
                 this::databaseNow,
                 (lockedTask, currentTime) -> simulationTaskRepository.updateProgressIfActive(
                         taskId, progress, stage, workerId, currentTime)).updated();
-    }
-
-    @Override
-    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
-        LocalSimulationExecution execution = localExecutions.get(taskId);
-        return execution == null ? LocalExecutionStopResult.NONE : execution.requestStop();
-    }
-
-    @Override
-    protected boolean isLocalStopRequested(Long taskId) {
-        LocalSimulationExecution execution = localExecutions.get(taskId);
-        return execution != null && execution.futureTask.isCancelled();
-    }
-
-    private enum LocalExecutionState {
-        QUEUED,
-        RUNNING,
-        CANCELLED_BEFORE_START,
-        FINISHED
-    }
-
-    private final class LocalSimulationExecution implements Runnable {
-        private final Long userId;
-        private final Long taskId;
-        private final SimulationInput input;
-        private final AtomicReference<LocalExecutionState> state =
-                new AtomicReference<>(LocalExecutionState.QUEUED);
-        private final LeaseConfirmation leaseConfirmation = new LeaseConfirmation();
-        private final FutureTask<Void> futureTask = new FutureTask<>(this, null);
-
-        private LocalSimulationExecution(Long userId, Long taskId, SimulationInput input) {
-            this.userId = userId;
-            this.taskId = taskId;
-            this.input = input;
-        }
-
-        @Override
-        public void run() {
-            if (!state.compareAndSet(LocalExecutionState.QUEUED, LocalExecutionState.RUNNING)) {
-                return;
-            }
-            try {
-                runSimulationTask(userId, taskId, input);
-            } finally {
-                state.set(LocalExecutionState.FINISHED);
-                localExecutions.remove(taskId, this);
-            }
-        }
-
-        private LocalExecutionStopResult requestStop() {
-            while (true) {
-                LocalExecutionState current = state.get();
-                if (current == LocalExecutionState.QUEUED) {
-                    if (!state.compareAndSet(
-                            LocalExecutionState.QUEUED,
-                            LocalExecutionState.CANCELLED_BEFORE_START)) {
-                        continue;
-                    }
-                    futureTask.cancel(false);
-                    purgeCancelledSimulationTasks();
-                    localExecutions.remove(taskId, this);
-                    return LocalExecutionStopResult.STOPPED_BEFORE_START;
-                }
-                if (current == LocalExecutionState.RUNNING) {
-                    futureTask.cancel(true);
-                    return LocalExecutionStopResult.STOP_REQUESTED;
-                }
-                return LocalExecutionStopResult.NONE;
-            }
-        }
     }
 }

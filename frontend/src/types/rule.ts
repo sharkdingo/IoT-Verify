@@ -29,6 +29,7 @@ export type DuplicateRuleReasonCode =
 
 export type RuleSimilarityReasonCode =
     | 'NO_EXISTING_RULES'
+    | 'EXACT_MATCH'
     | 'AI_DUPLICATE'
     | 'AI_SIMILAR'
     | 'AI_HIGH_SCORE_REVIEW'

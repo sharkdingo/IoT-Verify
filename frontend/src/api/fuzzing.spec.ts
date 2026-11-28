@@ -11,6 +11,7 @@ vi.mock('./http', () => ({
 import http from './http'
 import fuzzingApi from './fuzzing'
 import { FUZZ_PAPER_SEMANTICS_CODES } from '@/types/fuzzing'
+import { FUZZ_RESPONSE_INCOMPLETE_CODE } from '@/utils/fuzzingResponse'
 
 const envelope = (data: unknown) => ({ data: { data } })
 
@@ -127,8 +128,8 @@ describe('fuzzing API', () => {
   })
 
   it('uses the accepted task id for polling and cancellation', async () => {
-    vi.mocked(http.get)
-      .mockResolvedValueOnce(envelope({ ...task, status: 'RUNNING', progress: 35 }))
+    const running = { ...task, status: 'RUNNING', progress: 35, progressStage: 'EXPLORING_CANDIDATES' }
+    vi.mocked(http.get).mockResolvedValueOnce(envelope(running))
     vi.mocked(http.post).mockResolvedValue(envelope({
       taskId: 9,
       cancellationAccepted: true,
@@ -137,10 +138,22 @@ describe('fuzzing API', () => {
       executionMayStillBeStopping: true
     }))
 
-    await expect(fuzzingApi.getTask(9)).resolves.toMatchObject({ status: 'RUNNING' })
+    await expect(fuzzingApi.getTask(9)).resolves.toEqual(running)
     await expect(fuzzingApi.cancelTask(9)).resolves.toMatchObject({ cancellationAccepted: true })
     expect(http.get).toHaveBeenCalledWith('/fuzz/tasks/9')
     expect(http.post).toHaveBeenCalledWith('/fuzz/tasks/9/cancel')
+  })
+
+  it.each([
+    ['status', 'WAITING'],
+    ['progressStage', 'REQUESTING_MODEL'],
+    ['progressStage', null]
+  ])('rejects invalid fuzz polling %s (%s)', async (field, value) => {
+    vi.mocked(http.get).mockResolvedValueOnce(envelope({ ...task, [field]: value }))
+    await expect(fuzzingApi.getTask(9)).rejects.toMatchObject({
+      code: FUZZ_RESPONSE_INCOMPLETE_CODE,
+      message: expect.stringContaining(`${field} is invalid`)
+    })
   })
 
   it('excludes the task already watched by the current board poller', async () => {

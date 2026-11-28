@@ -151,7 +151,7 @@ public final class DeviceManifestModes {
         // would default it wrongly and make the writer gates refuse a pair the transition legitimately
         // produces. No bundled template does this — Clock's only assignment targets a shared variable — so
         // this guards custom templates.
-        if (isDrivenByTransition(manifest, variableName)) {
+        if (hasTransitionAssignment(manifest, variableName)) {
             return null;
         }
         List<String> wanted = authoredTuple(stateName);
@@ -200,7 +200,7 @@ public final class DeviceManifestModes {
     }
 
     /** Whether a Transition assignment targets this variable, making it more than the state's consequence. */
-    private static boolean isDrivenByTransition(DeviceManifest manifest, String variableName) {
+    static boolean hasTransitionAssignment(DeviceManifest manifest, String variableName) {
         if (manifest.getTransitions() == null) {
             return false;
         }

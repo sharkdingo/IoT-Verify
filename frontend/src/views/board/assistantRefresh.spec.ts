@@ -2,20 +2,19 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { isStreamRefreshTarget, STREAM_REFRESH_TARGETS } from '@/types/chat'
 
 import {
-  ASSISTANT_REFRESH_TARGETS,
   assistantRefreshEffects,
-  assistantStreamInvalidationScope,
-  isAssistantRefreshTarget
+  assistantStreamInvalidationScope
 } from './assistantRefresh'
 
 describe('assistant refresh targets', () => {
   it('rejects an unknown target rather than guessing', () => {
-    expect(isAssistantRefreshTarget('rule_list')).toBe(true)
-    expect(isAssistantRefreshTarget('rules')).toBe(false)
-    expect(isAssistantRefreshTarget('')).toBe(false)
-    expect(isAssistantRefreshTarget(undefined)).toBe(false)
+    expect(isStreamRefreshTarget('rule_list')).toBe(true)
+    expect(isStreamRefreshTarget('rules')).toBe(false)
+    expect(isStreamRefreshTarget('')).toBe(false)
+    expect(isStreamRefreshTarget(undefined)).toBe(false)
   })
 
   it('refreshes only the inbox for a confirmed background task start', () => {
@@ -28,15 +27,17 @@ describe('assistant refresh targets', () => {
   })
 
   it('invalidates other tabs for every target that reloads board model state', () => {
-    for (const target of ASSISTANT_REFRESH_TARGETS) {
+    for (const target of STREAM_REFRESH_TARGETS) {
       if (target === 'run_history') continue
       expect(assistantStreamInvalidationScope(target), target).toBe('board')
     }
   })
 
-  it('describes every declared target, so a new one cannot be silently unhandled', () => {
-    for (const target of ASSISTANT_REFRESH_TARGETS) {
-      expect(assistantRefreshEffects(target), target).toBeDefined()
+  it('reconciles model edits from one snapshot without conflating Board data and run history', () => {
+    for (const target of STREAM_REFRESH_TARGETS) {
+      const method = target === 'run_history' ? 'refreshRunHistory'
+        : target === 'board_state' ? 'refreshAllBoardState' : 'refreshBoardSnapshot'
+      expect(assistantRefreshEffects(target).method, target).toBe(method)
     }
   })
 
@@ -49,7 +50,7 @@ describe('assistant refresh targets', () => {
       boardSource.indexOf('defineExpose({'),
       boardSource.indexOf('})', boardSource.indexOf('defineExpose({')))
 
-    for (const target of ASSISTANT_REFRESH_TARGETS) {
+    for (const target of STREAM_REFRESH_TARGETS) {
       expect(exposed, target).toContain(`${assistantRefreshEffects(target).method}:`)
     }
   })
@@ -76,6 +77,6 @@ describe('parity with the backend', () => {
     expect(mappingStart).toBeGreaterThanOrEqual(0)
     expect(mappingEnd).toBeGreaterThan(mappingStart)
     expect(emitted.length).toBeGreaterThan(0)
-    expect([...ASSISTANT_REFRESH_TARGETS].sort()).toEqual(emitted)
+    expect([...STREAM_REFRESH_TARGETS].sort()).toEqual(emitted)
   })
 })

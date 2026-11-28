@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.dto.verification;
 
+import cn.edu.nju.Iot_Verify.dto.model.TaskToolState;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
@@ -25,7 +26,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class VerificationTaskDto {
+public class VerificationTaskDto implements TaskToolState {
     /**
      * 任务ID
      */

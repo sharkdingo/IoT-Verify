@@ -150,16 +150,10 @@ public class FuzzTaskPo implements TaskView {
     @JsonIgnore
     private LocalDateTime leaseExpiresAt;
 
-    @Override
     public boolean isTerminalStatus() {
         return status == TaskStatus.COMPLETED
                 || status == TaskStatus.FAILED
                 || status == TaskStatus.CANCELLED;
-    }
-
-    @Override
-    public boolean isCancelledStatus() {
-        return status == TaskStatus.CANCELLED;
     }
 
     @Override

@@ -87,6 +87,32 @@ describe('revising existing automation without changing identity', () => {
     else expect((wrapper.vm as any).specForm.aConditions).toEqual(spec().aConditions)
   })
 
+  it.each(['rule', 'spec'] as const)('keeps an unconfirmed %s edit locked across a tab change', async kind => {
+    const original = kind === 'rule' ? rule() : spec()
+    const wrapper = keep(kind === 'rule'
+      ? mount(RuleBuilder, { props: { nodes, deviceTemplates: templates, editRule: original as RuleForm }, global: { plugins: [i18n] } })
+      : mount(ControlCenter, { props: { nodes, deviceTemplates: templates, activeSection: 'specs', editSpecification: original as Specification }, global: { plugins: [i18n] } }))
+    await flushPromises()
+    const name = () => wrapper.get<HTMLInputElement>(kind === 'rule' ? '#rule-builder-name' : '[data-testid="spec-name"]')
+    await name().setValue('Submitted draft')
+    const save = () => wrapper.get(`[data-testid="${kind === 'rule' ? 'rule-save' : 'spec-create'}"]`)
+    const event = kind === 'rule' ? 'save-rule' : 'add-spec'
+    await save().trigger('click')
+    const request = wrapper.emitted(event)?.[0]?.[0] as any
+    await wrapper.setProps(kind === 'rule' ? { active: false } : { activeSection: 'devices' })
+    request.complete(false, { reasonCode: 'BOARD_ITEM_EDIT_OUTCOME_UNKNOWN', cause: 'Save unconfirmed', details: [], fields: {} })
+    await wrapper.setProps(kind === 'rule' ? { active: true } : { activeSection: 'specs' })
+    await flushPromises()
+    expect(wrapper.get(`[data-testid="${kind}-save-outcome-unknown"]`).text()).toBe('Save unconfirmed')
+    expect(name().element.value).toBe('Submitted draft')
+    expect(save().attributes('disabled')).toBeDefined()
+    await save().trigger('click')
+    expect(wrapper.emitted(event)).toHaveLength(1)
+    await name().setValue('Another draft')
+    await save().trigger('click')
+    expect((wrapper.emitted(event)?.[1]?.[0] as any).expected).toEqual(original)
+  })
+
   it('loads a specification, retains its original condition snapshot, and preserves a newer editing session', async () => {
     const original = spec()
     const wrapper = keep(mount(ControlCenter, { props: { nodes, deviceTemplates: templates, activeSection: 'specs', editSpecification: original }, global: { plugins: [i18n] } }))

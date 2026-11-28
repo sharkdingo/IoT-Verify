@@ -12,10 +12,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NusmvOutputCollectorTest {
 
     @Test
-    void outputIsTruncatedOnUtf8BoundaryWithinConfiguredByteLimit() {
+    void outputIsTruncatedOnUtf8BoundaryWithinConfiguredByteLimit() throws Exception {
         NusmvExecutor.BoundedOutputCollector collector = new NusmvExecutor.BoundedOutputCollector(64);
+        byte[] input = ("temperature=" + "\u6e29".repeat(40) + "\n").getBytes(StandardCharsets.UTF_8);
 
-        collector.appendLine("temperature=" + "\u6e29".repeat(40));
+        NusmvExecutor.drainOutput(new ByteArrayInputStream(input), collector);
         String output = collector.text();
 
         assertTrue(output.endsWith("... (NuSMV output truncated)\n"));
@@ -25,10 +26,11 @@ class NusmvOutputCollectorTest {
     }
 
     @Test
-    void completeOutputIsPreservedWhenWithinLimit() {
+    void completeOutputIsPreservedWhenWithinLimit() throws Exception {
         NusmvExecutor.BoundedOutputCollector collector = new NusmvExecutor.BoundedOutputCollector(1024);
+        byte[] input = "-- specification AG safe is true\n".getBytes(StandardCharsets.UTF_8);
 
-        collector.appendLine("-- specification AG safe is true");
+        NusmvExecutor.drainOutput(new ByteArrayInputStream(input), collector);
 
         assertEquals("-- specification AG safe is true\n", collector.text());
         assertFalse(collector.isTruncated());

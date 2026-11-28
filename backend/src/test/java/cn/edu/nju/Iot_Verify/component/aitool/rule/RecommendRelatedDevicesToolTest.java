@@ -327,6 +327,8 @@ class RecommendRelatedDevicesToolTest {
                           "recommendations": [
                             {"templateName":"Sensor","suggestedLabel":"Bad State Sensor","initialState":"missing","description":"Bad state"},
                             {"templateName":"Sensor","suggestedLabel":"Bad Variable Sensor","initialVariables":[{"name":"missing","value":"high"}],"description":"Bad variable"},
+                            {"templateName":"Sensor","suggestedLabel":"Duplicate Privacy Sensor",
+                             "initialPrivacies":[{"name":"Battery"},{"name":"battery","privacy":"private"}]},
                             {
                               "templateName":"Sensor",
                               "suggestedLabel":"Good Sensor",
@@ -349,11 +351,13 @@ class RecommendRelatedDevicesToolTest {
         assertEquals("private", json.path("recommendations").get(0).path("currentStatePrivacy").asText());
         assertEquals(1, json.path("recommendations").get(0).path("initialVariables").size());
         assertEquals(1, json.path("recommendations").get(0).path("initialPrivacies").size());
-        assertEquals(2, json.path("filteredCount").asInt());
+        assertEquals(3, json.path("filteredCount").asInt());
         assertEquals("invalidInitialRuntime", json.path("filteredItems").get(0).path("reasonCode").asText());
         assertEquals("Bad State Sensor", json.path("filteredItems").get(0).path("label").asText());
         assertEquals("invalidInitialRuntime", json.path("filteredItems").get(1).path("reasonCode").asText());
         assertEquals("Bad Variable Sensor", json.path("filteredItems").get(1).path("label").asText());
+        assertEquals("invalidInitialRuntime", json.path("filteredItems").get(2).path("reasonCode").asText());
+        assertEquals("Duplicate Privacy Sensor", json.path("filteredItems").get(2).path("label").asText());
     }
 
     @Test

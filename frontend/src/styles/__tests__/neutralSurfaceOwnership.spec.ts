@@ -191,7 +191,7 @@ describe.each(modes)('$palette $theme nested surfaces', ({ palette, theme }) => 
     const at = source.indexOf('data-testid="verification-trace-replay"')
     expect(at).toBeGreaterThan(-1)
     const button = source.slice(source.lastIndexOf('<button', at), source.indexOf('</button>', at))
-    expect(button).toContain(':disabled="simulationAnimationState.visible"')
+    expect(button).toContain(':disabled="isSimulationPlaybackActive"')
     expect(button).toContain('iot-dialog-btn iot-dialog-btn--primary')
     const dialog = postcss.parse(readFileSync(join(src, 'styles/dialog.css'), 'utf8'))
     const disabled = declarations(dialog, '.iot-dialog-btn--primary:disabled')

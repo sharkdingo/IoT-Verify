@@ -73,22 +73,11 @@ public class SimulateModelTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "steps", "attackMode", "attackPoints", "enablePrivacy"));
-            int steps = intArgInRange(args, "steps", 10, 1, 100);
-            AttackScenarioDto attackScenario = attackScenarioArg(args, false);
-            boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
-
-            SimulationRequestDto request = new SimulationRequestDto();
-            request.setSteps(steps);
-            request.setAttackScenario(attackScenario);
-            request.setEnablePrivacy(enablePrivacy);
+            SimulationRequestDto request = simulationRequest(args);
+            AttackScenarioDto attackScenario = request.getAttackScenario();
 
             SimulationResultDto result = simulationService.simulate(userId, request);
             if (result == null || result.getStates() == null || result.getStates().isEmpty()) {
@@ -126,7 +115,7 @@ public class SimulateModelTool extends AbstractAiTool {
             message += " It includes only the initial/final state preview; use simulate_model_async "
                     + "and get_simulation_trace for saved pageable state detail.";
             summary.put("message", message);
-            return readOnlySuccessJson(summary, message);
+            return readOnlySuccessJson(summary);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (SimulationExecutionException e) {

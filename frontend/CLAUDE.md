@@ -56,11 +56,8 @@ single owner of the "session gone → login" location.
 - **Keep types aligned with backend DTOs.** Fields are camelCase on both sides
   (`userId`, not `user_id`). When a backend DTO changes, update the matching
   `src/types/*.ts` **and** the owning `docs/api/*.md` in the same change.
-- **Two response-unwrapping conventions — do not mix them up:**
-  - `board.ts` / `simulation.ts` / `fuzzing.ts` / `rules.ts` return **already-unwrapped** `T` (a local
-    `unpack` returns `response.data.data`).
-  - `authApi` returns the **full** `Result<T>` (`response.data`) — read `res.data.token`,
-    not `res.token`, and check `res.code`.
+- Follow the [API wrapper return conventions](../docs/guides/frontend-integration.md#response-unwrapping--two-conventions)
+  when selecting fields from a response.
 - **`verifyAsync(req)` / `simulateAsync(req)` return the authoritative accepted task
   DTO**, including the server-generated `id`, current status/progress, and frozen
   `modelSnapshot`; the client does not pass an id in or fabricate a local task row.
@@ -136,9 +133,8 @@ single owner of the "session gone → login" location.
   after the server confirms the boundary.
   Clearing an unusable journal is separately confirmed and
   carries the exact `/board/edits/clear-preview` token; stale confirmation must preserve history.
-  A non-`409` undo/redo failure is an unconfirmed mutation outcome, not proof that the board stayed
-  unchanged: reconcile the complete snapshot through the mutation queue before reporting it. A
-  `409` wrote nothing but still triggers reconciliation because the local board may be stale.
+  Conflicts and unconfirmed undo/redo receipts both reconcile a complete snapshot in the existing
+  queue slot. Other definitive rejections report the error directly.
 - **Shrink `Board.vue` by extracting rules, not by adding layers.** Worthwhile moves take their
   inputs as arguments (including `t`/`locale`) and land in `views/board/` or `utils/` with tests:
   boundary parsing, wording, decision tables, freshness predicates. Do **not** extract code needing
@@ -146,16 +142,11 @@ single owner of the "session gone → login" location.
   CLAUDE.md forbids. Two things that look extractable but are not: the three recommendation sections
   diverge in most of their markup (a shared component would need more slots than it saves), and the
   fuzzing refs are interleaved with simulation and task-inbox state rather than contiguous.
-- **Every ordinary targeted device/Environment Pool/rule/spec mutation commits through
-  `board/semanticCommit.ts`.** It applies the
-  authoritative collections and then everything derived from them — canvas edges, dangling
-  inspector focus, undo availability, verdict staleness — in a fixed order. Never hand-assemble
-  those follow-ups at a call site: that is what let reorder skip undo availability and undo skip
-  the canvas edges, each hidden by a later refresh that happened to repair the state. An undo is
-  itself a semantic mutation, so it uses this path and must match `isBoardMutationRequest`. Pass
-  `semanticChanged: false` only for a confirmed unchanged model (including a requirement rename); it still reconciles state and
-  availability without making a current verdict stale. Authoritative partial/full refreshes are not
-  mutations, but they must reuse `reconcileBoardFocus` so removed items cannot remain selected.
+- **Adopt ordinary mutation receipts and complete Board snapshots through
+  `board/semanticCommit.ts`.** It installs the collections before rebuilding derived edges,
+  reconciling inspector focus, and adopting the reported undo revision. Direct receipts may
+  withdraw stale verdict actions immediately. For snapshots and undo/redo, the mutation queue
+  compares semantic state before and after adoption, including recovery.
 - **The originating tab reconciles its own edit history.** `publishBoardInvalidation` sends
   updates to other browser contexts. The originating tab adopts its mutation receipt or complete
   Board snapshot, including the edit history. `useBoardUndo` uses standalone availability reads

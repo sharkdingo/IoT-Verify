@@ -381,7 +381,7 @@ class OpenAiLlmProviderPlanningStreamTest {
                         new FunctionParameterSchema("object", Map.of(), List.of())))).build();
     }
 
-    private static String chunk(String delta, String finishReason) {
+    static String chunk(String delta, String finishReason) {
         return "data: {\"id\":\"plan\",\"created\":0,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":"
                 + delta.replace("\n", "") + ",\"finish_reason\":"
                 + (finishReason == null ? "null" : "\"" + finishReason + "\"") + "}]}\n\n";

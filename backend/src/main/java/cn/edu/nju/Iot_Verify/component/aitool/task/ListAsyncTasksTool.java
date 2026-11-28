@@ -134,10 +134,7 @@ public class ListAsyncTasksTool extends AbstractAiTool {
                             ? "No matching background tasks found."
                             : "Found " + visible.size() + " matching background task(s), newest first.",
                     "count", visible.size(),
-                    "tasks", visible),
-                    "Background tasks loaded.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+                    "tasks", visible));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

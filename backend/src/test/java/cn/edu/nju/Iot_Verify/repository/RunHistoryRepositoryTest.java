@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.repository;
 
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
+import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.dto.model.RunInitiator;
 import cn.edu.nju.Iot_Verify.po.SimulationTaskPo;
@@ -9,12 +10,12 @@ import cn.edu.nju.Iot_Verify.po.SimulationTracePo;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.repository.projection.SimulationTraceSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.SimulationTaskSummaryProjection;
-import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
+import cn.edu.nju.Iot_Verify.util.mapper.SimulationTaskMapper;
 import cn.edu.nju.Iot_Verify.util.mapper.VerificationTaskMapper;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
-import org.hibernate.resource.jdbc.spi.StatementInspector;
+import cn.edu.nju.Iot_Verify.testutil.SqlStatementCapture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -28,29 +29,20 @@ import org.springframework.core.annotation.AnnotatedElementUtils;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @DataJpaTest(properties = {
         "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
         "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
-        "spring.jpa.properties.hibernate.session_factory.statement_inspector=cn.edu.nju.Iot_Verify.repository.RunHistoryRepositoryTest$SqlCapture",
+        "spring.jpa.properties.hibernate.session_factory.statement_inspector=cn.edu.nju.Iot_Verify.testutil.SqlStatementCapture",
         "spring.jpa.hibernate.ddl-auto=create-drop"
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)
 class RunHistoryRepositoryTest {
-
-    public static class SqlCapture implements StatementInspector {
-        private static final ThreadLocal<java.util.ArrayList<String>> STATEMENTS =
-                ThreadLocal.withInitial(java.util.ArrayList::new);
-
-        @Override
-        public String inspect(String sql) {
-            STATEMENTS.get().add(sql);
-            return sql;
-        }
-    }
 
     private static final String NO_ATTACK_SEMANTICS_JSON = JsonUtils.toJson(
             ModelSemanticsDto.forRun(AttackScenarioDto.none(), false, 1, 0, 0));
@@ -139,12 +131,6 @@ class RunHistoryRepositoryTest {
         }
 
         assertThrows(NoSuchMethodException.class,
-                () -> VerificationTaskSummaryProjection.class.getMethod("getNusmvOutput"));
-        assertThrows(NoSuchMethodException.class,
-                () -> VerificationTaskSummaryProjection.class.getMethod("getSpecResultsJson"));
-        assertThrows(NoSuchMethodException.class,
-                () -> VerificationTaskSummaryProjection.class.getMethod("getCheckLogsJson"));
-        assertThrows(NoSuchMethodException.class,
                 () -> SimulationTaskSummaryProjection.class.getMethod("getWorkerId"));
         assertThrows(NoSuchMethodException.class,
                 () -> SimulationTaskSummaryProjection.class.getMethod("getLeaseExpiresAt"));
@@ -154,9 +140,76 @@ class RunHistoryRepositoryTest {
     }
 
     @Test
+    void mapsSimulationTaskInboxWithoutWorkerLeaseButRetainsDiagnosticCounts() {
+        SimulationTaskPo task = simulationTaskRepository.saveAndFlush(SimulationTaskPo.builder()
+                .userId(7L).initiator(RunInitiator.AI_ASSISTANT).status(SimulationTaskPo.TaskStatus.PENDING)
+                .createdAt(LocalDateTime.now()).progress(0).requestedSteps(10).modeledDeviceAttackPointCount(1)
+                .modelSnapshotJson(SIMULATION_SNAPSHOT_JSON).modelSemanticsJson(NO_ATTACK_SEMANTICS_JSON)
+                .checkLogsJson("[\"[rule-disabled] previous generator diagnostic\"]").generationIssuesJson("[]")
+                .workerId("worker-7").leaseExpiresAt(LocalDateTime.now().plusMinutes(2)).build());
+        SqlStatementCapture.take();
+
+        var rows = simulationTaskRepository.findSummaryByUserIdAndStatusNotOrderByCreatedAtDesc(
+                7L, SimulationTaskPo.TaskStatus.COMPLETED);
+        var summaries = new SimulationTaskMapper().toSummaryProjectionDtoList(rows);
+
+        assertEquals(List.of(task.getId()), summaries.stream().map(summary -> summary.getId()).toList());
+        var summary = summaries.get(0);
+        var queries = SqlStatementCapture.take().stream().filter(sql -> sql.startsWith("select ")).toList();
+        assertEquals(1, queries.size());
+        var query = queries.get(0);
+        assertAll(
+                () -> assertEquals(RunInitiator.AI_ASSISTANT, summary.getInitiator()),
+                () -> assertEquals("PENDING", summary.getStatus()),
+                () -> assertEquals(10, summary.getRequestedSteps()),
+                () -> assertEquals(1, summary.getModelSemantics().getModeledAttackPointCount()),
+                () -> assertEquals(1, summary.getDisabledRuleCount()),
+                () -> assertTrue(query.contains("check_logs_json")),
+                () -> assertFalse(query.contains("worker_id")),
+                () -> assertFalse(query.contains("lease_expires_at")));
+    }
+
+    @Test
+    void mapsVerificationTaskInboxWithoutHydratingDetailPayloads() {
+        VerificationTaskPo task = completedResult();
+        task.setStatus(VerificationTaskPo.TaskStatus.FAILED);
+        task.setOutcome(VerificationOutcome.INCONCLUSIVE);
+        task.setProgress(46);
+        task.setErrorMessage("solver unavailable");
+        task.setModeledDeviceAttackPointCount(3);
+        task.setModeledAutomationLinkAttackPointCount(2);
+        task.setModeledFalsifiableReadingDeviceCount(1);
+        task.setModelSemanticsJson(JsonUtils.toJson(ModelSemanticsDto.forRun(AttackScenarioDto.none(), false, 3, 2, 1)));
+        ModelRunSnapshotDto snapshot = JsonUtils.fromJson(task.getModelSnapshotJson(), ModelRunSnapshotDto.class);
+        task.setModelSnapshotJson(JsonUtils.toJson(snapshot.toBuilder().deviceCount(3).ruleCount(2).build()));
+        verificationTaskRepository.saveAndFlush(task);
+        SqlStatementCapture.take();
+
+        var rows = verificationTaskRepository.findSummaryByUserIdAndStatusNotOrderByCreatedAtDesc(
+                9L, VerificationTaskPo.TaskStatus.COMPLETED);
+        var summaries = new VerificationTaskMapper().toSummaryProjectionDtoList(rows);
+
+        assertEquals(List.of(task.getId()), summaries.stream().map(summary -> summary.getId()).toList());
+        var summary = summaries.get(0);
+        List<String> selects = SqlStatementCapture.take().stream()
+                .filter(sql -> sql.startsWith("select ")).toList();
+        assertEquals(1, selects.size());
+        List<String> detailColumns = List.of("spec_results_json", "check_logs_json", "nusmv_output",
+                "request_json", "template_snapshots_json", "smv_model_content");
+        assertAll(
+                () -> assertEquals(RunInitiator.AI_ASSISTANT, summary.getInitiator()),
+                () -> assertEquals("FAILED", summary.getStatus()),
+                () -> assertEquals(46, summary.getProgress()),
+                () -> assertEquals("solver unavailable", summary.getErrorMessage()),
+                () -> assertEquals(VerificationOutcome.INCONCLUSIVE, summary.getOutcome()),
+                () -> assertEquals(5, summary.getModelSemantics().getModeledAttackPointCount()),
+                () -> assertEquals(List.of(), detailColumns.stream().filter(selects.get(0)::contains).toList()));
+    }
+
+    @Test
     void resultReadsProjectPresentationWithoutHydratingFrozenInputOrModelText() {
         VerificationTaskPo run = completedResult();
-        SqlCapture.STATEMENTS.get().clear();
+        SqlStatementCapture.take();
 
         var taskView = verificationTaskRepository.findResultViewByIdAndUserId(
                 run.getId(), 9L, VerificationTaskRepository.SMV_NON_BLANK_CHARACTERS).orElseThrow();
@@ -175,7 +228,7 @@ class RunHistoryRepositoryTest {
         assertEquals(task.getCheckLogs(), detail.getCheckLogs());
         assertEquals(task.getModelSnapshot(), detail.getModelSnapshot());
         assertEquals(true, detail.isHasSmvModel());
-        List<String> selects = SqlCapture.STATEMENTS.get().stream()
+        List<String> selects = SqlStatementCapture.take().stream()
                 .filter(sql -> sql.startsWith("select ")).toList();
         assertEquals(2, selects.size());
         for (String sql : selects) {

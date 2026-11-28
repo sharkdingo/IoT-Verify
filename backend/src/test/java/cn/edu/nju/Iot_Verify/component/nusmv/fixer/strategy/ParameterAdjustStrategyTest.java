@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -77,16 +78,14 @@ class ParameterAdjustStrategyTest {
         AtomicReference<ParameterizationConfig> active =
                 new AtomicReference<>();
         List<Set<String>> searched = new ArrayList<>();
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenAnswer(invocation -> {
-                    ParameterizationConfig config = invocation.getArgument(6);
+                    ParameterizationConfig config = invocation.getArgument(7);
                     active.set(config);
                     searched.add(Set.copyOf(config.getParameterizedThresholds().keySet()));
                     return createGenResult();
                 });
-        lenient().when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        lenient().when(verificationModelCall())
                 .thenAnswer(invocation -> {
                     active.set(null);
                     return createGenResult();
@@ -160,31 +159,26 @@ class ParameterAdjustStrategyTest {
     }
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() {
         FixConfig fixConfig = new FixConfig();
         fixConfig.setMaxRefineAttempts(10);
         strategy = new ParameterAdjustStrategy(smvGenerator, nusmvExecutor, fixConfig);
+    }
 
-        // Keep the strategy tests focused on solver behavior while routing their existing
-        // generator fixtures through the production snapshot-aware entry points.
-        lenient().when(smvGenerator.generateParameterizedWithResolvedDeviceModel(
-                        anyLong(), anyList(), anyList(), anyList(), anyList(),
-                        any(), anyBoolean(), any(ParameterizationConfig.class),
-                        any(SmvGenerator.TempModelContext.class), anyMap()))
-                .thenAnswer(invocation -> smvGenerator.generateParameterized(
-                        invocation.getArgument(0), invocation.getArgument(1),
-                        invocation.getArgument(3), invocation.getArgument(4),
-                        invocation.getArgument(5), invocation.getArgument(6),
-                        invocation.getArgument(7), invocation.getArgument(8)));
-        lenient().when(smvGenerator.generateWithResolvedDeviceModel(
-                        anyLong(), anyList(), anyList(), anyList(), anyList(),
-                        any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class),
-                        any(SmvGenerator.TempModelContext.class), anyMap(), anyList()))
-                .thenAnswer(invocation -> smvGenerator.generate(
-                        invocation.getArgument(0), invocation.getArgument(1),
-                        invocation.getArgument(3), invocation.getArgument(4),
-                        invocation.getArgument(5), invocation.getArgument(6),
-                        invocation.getArgument(7), invocation.getArgument(8)));
+    private SmvGenerator.GenerateResult parameterizedModelCall() throws IOException {
+        return parameterizedModelCall(() -> any(ParameterizationConfig.class));
+    }
+
+    private SmvGenerator.GenerateResult parameterizedModelCall(Supplier<ParameterizationConfig> config) throws IOException {
+        return smvGenerator.generateParameterizedWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(), config.get(),
+                any(SmvGenerator.TempModelContext.class), anyMap());
+    }
+
+    private SmvGenerator.GenerateResult verificationModelCall() throws IOException {
+        return smvGenerator.generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList());
     }
 
     private SmvGenerator.GenerateResult createGenResult() throws IOException {
@@ -237,6 +231,12 @@ class ParameterAdjustStrategyTest {
 
     private FixContext ctx(List<FaultRuleDto> faultRules, List<RuleDto> allRules,
                             List<SpecificationDto> specs, Map<String, DeviceSmvData> deviceSmvMap) {
+        return contextBuilder(faultRules, allRules, specs, deviceSmvMap).build();
+    }
+
+    private FixContext.FixContextBuilder contextBuilder(
+            List<FaultRuleDto> faultRules, List<RuleDto> allRules,
+            List<SpecificationDto> specs, Map<String, DeviceSmvData> deviceSmvMap) {
         return FixContext.builder()
                 .faultRules(faultRules)
                 .repairRuleIndices(faultRules == null ? List.of()
@@ -249,8 +249,28 @@ class ParameterAdjustStrategyTest {
                 .userId(1L)
                 .attackScenario(AttackScenarioDto.none())
                 .enablePrivacy(false)
-                .maxAttempts(20)
+                .maxAttempts(20);
+    }
+
+    private static RuleDto singleTemperatureThresholdRule() {
+        return RuleDto.builder()
+                .conditions(List.of(RuleDto.Condition.builder()
+                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
+                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
                 .build();
+    }
+
+    private FixContext.FixContextBuilder temperatureThresholdContext(RuleDto rule) {
+        SpecificationDto spec = new SpecificationDto();
+        spec.setId("s1");
+        spec.setName("Safety requirement");
+        spec.setTemplateId("1");
+        return contextBuilder(List.of(FaultRuleDto.builder().ruleIndex(0).build()),
+                List.of(rule), List.of(spec), buildDeviceMap());
+    }
+
+    private FixContext singleTemperatureThresholdContext() {
+        return temperatureThresholdContext(singleTemperatureThresholdRule()).build();
     }
 
     private static NusmvResult solverResult(boolean specPassed, String output) {
@@ -274,7 +294,8 @@ class ParameterAdjustStrategyTest {
         return invocation -> results.get(Math.min(next[0]++, results.size() - 1));
     }
 
-    private static RuleDto twoThresholdRule() {        return RuleDto.builder()
+    private static RuleDto twoThresholdRule() {
+        return RuleDto.builder()
                 .conditions(List.of(
                         RuleDto.Condition.builder().deviceName("sensor_1").attribute("temperature")
                                 .targetType("variable").relation(">").value("30").build(),
@@ -285,32 +306,17 @@ class ParameterAdjustStrategyTest {
     }
 
     private FixContext twoThresholdContext(int maxAttempts) {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-        return FixContext.builder()
-                .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
-                .repairRuleIndices(List.of(0))
-                .allRules(List.of(twoThresholdRule())).devices(List.of()).specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap()).violatedSpecIndex(0).userId(1L)
-                .attackScenario(AttackScenarioDto.none()).maxAttempts(maxAttempts).build();
+        return temperatureThresholdContext(twoThresholdRule()).maxAttempts(maxAttempts).build();
     }
 
     @Test
     void tryFix_refine_singleThresholdNeverReverifiesTheCounterexampleBoard() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
+        RuleDto rule = singleTemperatureThresholdRule();
         SpecificationDto spec = new SpecificationDto();
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> createGenResult());
         // discovery 25 → verify passes → refinement UNSAT, keeps 25
         List<NusmvResult> executions = List.of(
@@ -330,8 +336,9 @@ class ParameterAdjustStrategyTest {
         assertTrue(refinementExclusions.contains("!(param_r0_c0=30)"),
                 "with no other threshold moved, the original value is the counterexample's own board");
         assertTrue(refinementExclusions.contains("!(param_r0_c0=25)"));
-        verify(smvGenerator, times(1)).generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class));
+        verify(smvGenerator, times(1)).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList());
     }
 
     /**
@@ -342,11 +349,9 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_refine_inconclusiveOriginalCheckLeavesTheOriginalToRefinement() throws Exception {
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> createGenResult());
         NusmvResult crash = mock(NusmvResult.class);
         when(crash.isSuccess()).thenReturn(false);
@@ -381,12 +386,10 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_refine_rejectedOriginalIsExcludedFromRefinement() throws Exception {
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
         // Verdicts must be attributable to "s1" for Step A's failure to count as a rejection.
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> new SmvGenerator.GenerateResult(createGenResult().smvFile(), Map.of(),
                         List.of(), 0, 0,
                         List.of(new SmvGenerationContext.EmittedSpec(null, "s1", "CTLSPEC AG(safe)"))));
@@ -427,11 +430,9 @@ class ParameterAdjustStrategyTest {
         spec.setId("s1");
         spec.setName("Safety requirement");
         spec.setTemplateId("1");
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> new SmvGenerator.GenerateResult(createGenResult().smvFile(), Map.of(),
                         List.of(), 0, 0,
                         List.of(new SmvGenerationContext.EmittedSpec(null, "s1", "CTLSPEC AG(safe)"))));
@@ -492,8 +493,7 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_singleThresholdPhaseTriesEachThresholdAloneBeforeTheJointSolve() throws Exception {
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
         List<NusmvResult> executions = List.of(
                 solverResult(true, ""));
@@ -509,9 +509,9 @@ class ParameterAdjustStrategyTest {
                 configs.getAllValues().stream()
                         .map(config -> config.getParameterizedThresholds().keySet())
                         .toList());
-        verify(smvGenerator, never()).generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class),
-                any(SmvGenerator.TempModelContext.class));
+        verify(smvGenerator, never()).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList());
         assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", context.strategyNoResult("parameter").status());
     }
 
@@ -521,11 +521,9 @@ class ParameterAdjustStrategyTest {
         noRefineConfig.setMaxRefineAttempts(0);
         ParameterAdjustStrategy noRefineStrategy =
                 new ParameterAdjustStrategy(smvGenerator, nusmvExecutor, noRefineConfig);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> createGenResult());
         List<NusmvResult> executions = List.of(
                 solverResult(false, "  -> State: 1.1 <-\n    param_r0_c0 = 45\n"),
@@ -554,11 +552,9 @@ class ParameterAdjustStrategyTest {
         ParameterAdjustStrategy noRefineStrategy =
                 new ParameterAdjustStrategy(smvGenerator, nusmvExecutor, noRefineConfig);
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> createGenResult());
         NusmvResult crash = mock(NusmvResult.class);
         when(crash.isSuccess()).thenReturn(false);
@@ -603,11 +599,9 @@ class ParameterAdjustStrategyTest {
      */
     @Test
     void tryFix_refine_aThresholdWhoseOriginalValueWorksLeavesTheRepair() throws Exception {
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenAnswer(invocation -> createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenAnswer(invocation -> createGenResult());
         // 1. joint solve       → c0=25, c1=45
         // 2. forward-verify    → passes
@@ -626,8 +620,9 @@ class ParameterAdjustStrategyTest {
         List<ParameterAdjustment> adjustments = outcome.suggestions().get(0).getParameterAdjustments();
         assertEquals(List.of(1), adjustments.stream().map(ParameterAdjustment::getConditionIndex).toList());
         assertEquals(List.of("45"), adjustments.stream().map(ParameterAdjustment::getNewValue).toList());
-        verify(smvGenerator, times(2)).generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class));
+        verify(smvGenerator, times(2)).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList());
     }
 
     @Test
@@ -700,15 +695,7 @@ class ParameterAdjustStrategyTest {
                                 .targetType("variable").relation("<").value("40").build()))
                 .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
                 .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
         SpecCheckResult passing = mock(SpecCheckResult.class);
         when(passing.isPassed()).thenReturn(true);
@@ -717,18 +704,7 @@ class ParameterAdjustStrategyTest {
         when(result.getSpecResults()).thenReturn(List.of(passing));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(result);
 
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(1)
-                .build();
+        FixContext context = temperatureThresholdContext(rule).maxAttempts(1).build();
 
         assertTrue(strategy.tryFix(context).suggestions().isEmpty());
         verify(smvGenerator, times(1)).generateParameterizedWithResolvedDeviceModel(
@@ -743,20 +719,7 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_numericCondition_negatedSpecTrue_provesNoParameterRepairExists() throws Exception {
-        // Setup: numeric condition with bounds available
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
 
         // Negated spec passes (universally true) → no fix possible
@@ -767,7 +730,7 @@ class ParameterAdjustStrategyTest {
         when(result.getSpecResults()).thenReturn(List.of(passing));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(result);
 
-        FixContext context = ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap());
+        FixContext context = singleTemperatureThresholdContext();
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
         assertTrue(outcome.suggestions().isEmpty());
         assertTrue(outcome.alternativesComplete());
@@ -779,25 +742,12 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_numericCondition_findsFixValue() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        // generateParameterized: called for initial discovery AND refinement NuSMV solves
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        // Initial discovery and refinement both solve parameterized models.
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
 
-        // generate: called for forward-verify (initial, try-original, candidate verify)
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        // Forward verification checks the initial, original and candidate models.
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         // NuSMV counterexample outputs
@@ -834,8 +784,7 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(negatedResult29)
                 .thenReturn(verifyPass);
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         FixSuggestionDto suggestion = suggestions.get(0);
@@ -867,11 +816,9 @@ class ParameterAdjustStrategyTest {
         spec.setName("Safety requirement");
         spec.setTemplateId("1");
 
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -901,22 +848,9 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_refine_unsat_keepsInitialValue() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -948,8 +882,7 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(verifyPass)
                 .thenReturn(unsatResult);
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         FixSuggestionDto suggestion = suggestions.get(0);
@@ -958,22 +891,9 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_refine_solverErrorEndsRefinementAndKeepsTheAcceptedValue() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -1003,8 +923,7 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(verifyPass)
                 .thenReturn(errorResult);
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         FixSuggestionDto suggestion = suggestions.get(0);
@@ -1014,22 +933,9 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_refine_busySolvesAreRetriedWithinTheRefinementBudget() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         // Refinement from 25 toward the original 30: three refused permits, then a closer value.
@@ -1044,8 +950,7 @@ class ParameterAdjustStrategyTest {
                 solverResult(true, ""));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(sequence(executions));
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         assertEquals("29", suggestions.get(0).getParameterAdjustments().get(0).getNewValue());
@@ -1053,22 +958,9 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_refine_outOfBoundsCandidate_treatedAsError() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -1108,8 +1000,7 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(outOfBoundsResult)
                 .thenReturn(unsatResult);
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         FixSuggestionDto suggestion = suggestions.get(0);
@@ -1119,22 +1010,9 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_refine_duplicateCandidate_skipsForwardVerify() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -1183,33 +1061,21 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(negatedResult28)
                 .thenReturn(unsatResult);
 
-        List<FixSuggestionDto> suggestions = strategy.tryFix(
-                ctx(List.of(fault), List.of(rule), List.of(spec), buildDeviceMap())).suggestions();
+        List<FixSuggestionDto> suggestions = strategy.tryFix(singleTemperatureThresholdContext()).suggestions();
 
         assertEquals(1, suggestions.size());
         FixSuggestionDto suggestion = suggestions.get(0);
         assertEquals("25", suggestion.getParameterAdjustments().get(0).getNewValue());
         // generate() = forward-verify calls: initial + candidate 28 (once) = 2
         // If dedup failed, would be 3 (candidate 28 verified twice)
-        verify(smvGenerator, times(2)).generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class));
+        verify(smvGenerator, times(2)).generateWithResolvedDeviceModel(
+                anyLong(), anyList(), anyList(), anyList(), anyList(), any(), anyBoolean(),
+                any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class), anyMap(), anyList());
     }
 
     @Test
     void tryFix_nusmvFailure_endsTheSearchWithoutRepeatingTheIdenticalSolve() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall())
                 .thenReturn(createGenResult());
 
         NusmvResult failedResult = mock(NusmvResult.class);
@@ -1218,18 +1084,8 @@ class ParameterAdjustStrategyTest {
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(failedResult);
 
         // Budget left for two more solves: a failure must not spend it re-running the same model.
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(3)
-                .build();
+        FixContext context = temperatureThresholdContext(singleTemperatureThresholdRule())
+                .maxAttempts(3).build();
 
         FixStrategy.StrategyOutcome outcome = strategy.tryFix(context);
         assertTrue(outcome.suggestions().isEmpty());
@@ -1241,9 +1097,7 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_singleThresholdSolverFailureThenJointUnsat_clearsFailureOutcome() throws Exception {
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class))).thenAnswer(invocation -> createGenResult());
+        when(parameterizedModelCall()).thenAnswer(invocation -> createGenResult());
         NusmvResult failed = mock(NusmvResult.class);
         when(failed.isSuccess()).thenReturn(false);
         when(failed.getErrorMessage()).thenReturn("single-threshold solve failed");
@@ -1262,9 +1116,7 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_jointSolverFailure_endsTheSearchWithoutRepeatingTheIdenticalSolve() throws Exception {
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class))).thenAnswer(invocation -> createGenResult());
+        when(parameterizedModelCall()).thenAnswer(invocation -> createGenResult());
         NusmvResult failed = mock(NusmvResult.class);
         when(failed.isSuccess()).thenReturn(false);
         when(failed.getErrorMessage()).thenReturn("NuSMV execution timed out after 120000ms");
@@ -1285,9 +1137,7 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_busyJointSolve_isRetriedRatherThanEndingTheSearch() throws Exception {
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(ParameterizationConfig.class),
-                any(SmvGenerator.TempModelContext.class))).thenAnswer(invocation -> createGenResult());
+        when(parameterizedModelCall()).thenAnswer(invocation -> createGenResult());
         // Both single-threshold solves are UNSAT; the concurrency cap then refuses the joint solve once.
         List<NusmvResult> executions = List.of(solverResult(true, ""), solverResult(true, ""),
                 NusmvResult.busy("NuSMV execution is busy, please retry later"), solverResult(true, ""));
@@ -1305,8 +1155,7 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_busySingleThresholdSolve_isRetriedRatherThanSkippingTheThreshold() throws Exception {
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
         List<NusmvResult> executions = List.of(NusmvResult.busy("NuSMV execution is busy, please retry later"),
                 solverResult(true, ""), solverResult(true, ""), solverResult(true, ""));
@@ -1331,21 +1180,12 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_preferredRangeExcludingAnOriginal_searchesOnlyJointly() throws Exception {
         ArgumentCaptor<ParameterizationConfig> configs = ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configs.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configs::capture))
                 .thenAnswer(invocation -> createGenResult());
         List<NusmvResult> executions = List.of(solverResult(true, ""));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenAnswer(sequence(executions));
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(FaultRuleDto.builder().ruleIndex(0).build()))
-                .repairRuleIndices(List.of(0))
-                .allRules(List.of(twoThresholdRule())).devices(List.of()).specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap()).violatedSpecIndex(0).userId(1L)
-                .attackScenario(AttackScenarioDto.none()).maxAttempts(10)
+        FixContext context = temperatureThresholdContext(twoThresholdRule())
+                .maxAttempts(10)
                 // r0_c0's original value 30 lies outside the chosen range.
                 .preferredRanges(Map.of(PreferredRangeSelection.targetIdFor(0, 0), new PreferredRange(35, 45)))
                 .build();
@@ -1368,22 +1208,10 @@ class ParameterAdjustStrategyTest {
                 new ParameterAdjustStrategy(smvGenerator, nusmvExecutor, noRefineConfig);
 
         // Template bounds [0,50], preferred [20,30] → intersection [20,30]
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
         // Capture the ParameterizationConfig to verify bounds
         ArgumentCaptor<ParameterizationConfig> configCaptor =
                 ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configCaptor.capture(), any(SmvGenerator.TempModelContext.class)))
+        when(parameterizedModelCall(configCaptor::capture))
                 .thenReturn(createGenResult());
 
         SpecCheckResult failing = mock(SpecCheckResult.class);
@@ -1395,8 +1223,7 @@ class ParameterAdjustStrategyTest {
                 "  -> State: 1.1 <-\n    param_r0_c0 = 25\n");
 
         SmvGenerator.GenerateResult verifyGenResult = createGenResult();
-        when(smvGenerator.generate(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), any(SmvGenerator.GeneratePurpose.class), any(SmvGenerator.TempModelContext.class)))
+        when(verificationModelCall())
                 .thenReturn(verifyGenResult);
 
         SpecCheckResult allPass = mock(SpecCheckResult.class);
@@ -1409,17 +1236,7 @@ class ParameterAdjustStrategyTest {
                 .thenReturn(negatedResult)
                 .thenReturn(verifyResult);
 
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(20)
+        FixContext context = temperatureThresholdContext(singleTemperatureThresholdRule())
                 .preferredRanges(Map.of(PreferredRangeSelection.targetIdFor(0, 0), new PreferredRange(20, 30)))
                 .build();
 
@@ -1444,28 +1261,7 @@ class ParameterAdjustStrategyTest {
     @Test
     void tryFix_preferredRange_noIntersection_skipsParam() {
         // Template bounds [0,50], preferred [60,70] → no intersection, skip
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(RuleDto.Condition.builder()
-                        .deviceName("sensor_1").attribute("temperature").relation(">").value("30").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
-
-        FixContext context = FixContext.builder()
-                .faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex()))
-                .allRules(List.of(rule))
-                .devices(List.of())
-                .specs(List.of(spec))
-                .deviceSmvMap(buildDeviceMap())
-                .violatedSpecIndex(0)
-                .userId(1L)
-                .attackScenario(AttackScenarioDto.none())
-                .enablePrivacy(false)
-                .maxAttempts(20)
+        FixContext context = temperatureThresholdContext(singleTemperatureThresholdRule())
                 .preferredRanges(Map.of(PreferredRangeSelection.targetIdFor(0, 0), new PreferredRange(60, 70)))
                 .build();
 
@@ -1475,30 +1271,13 @@ class ParameterAdjustStrategyTest {
 
     @Test
     void tryFix_mixedPreferredRanges_skipsOnlyTheDisjointTarget() throws Exception {
-        RuleDto rule = RuleDto.builder()
-                .conditions(List.of(
-                        RuleDto.Condition.builder().deviceName("sensor_1")
-                                .attribute("temperature").targetType("variable")
-                                .relation(">").value("30").build(),
-                        RuleDto.Condition.builder().deviceName("sensor_1")
-                                .attribute("temperature").targetType("variable")
-                                .relation("<").value("40").build()))
-                .command(RuleDto.Command.builder().deviceName("ac_1").action("turnOn").build())
-                .build();
-        FaultRuleDto fault = FaultRuleDto.builder().ruleIndex(0).build();
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("s1");
-        spec.setName("Safety requirement");
-        spec.setTemplateId("1");
         long traceId = 77L;
         String disjointTarget = PreferredRangeSelection.targetIdFor(traceId, 0, 0);
         String usableTarget = PreferredRangeSelection.targetIdFor(traceId, 0, 1);
 
         ArgumentCaptor<ParameterizationConfig> configCaptor =
                 ArgumentCaptor.forClass(ParameterizationConfig.class);
-        when(smvGenerator.generateParameterized(anyLong(), anyList(), anyList(), anyList(),
-                any(), anyBoolean(), configCaptor.capture(),
-                any(SmvGenerator.TempModelContext.class))).thenReturn(createGenResult());
+        when(parameterizedModelCall(configCaptor::capture)).thenReturn(createGenResult());
         SpecCheckResult unsat = mock(SpecCheckResult.class);
         when(unsat.isPassed()).thenReturn(true);
         NusmvResult result = mock(NusmvResult.class);
@@ -1506,10 +1285,8 @@ class ParameterAdjustStrategyTest {
         when(result.getSpecResults()).thenReturn(List.of(unsat));
         when(nusmvExecutor.executeRepairSearch(any(File.class), anyLong())).thenReturn(result);
 
-        FixContext context = FixContext.builder()
-                .traceId(traceId).faultRules(List.of(fault)).repairRuleIndices(List.of(fault.getRuleIndex())).allRules(List.of(rule))
-                .devices(List.of()).specs(List.of(spec)).deviceSmvMap(buildDeviceMap())
-                .violatedSpecIndex(0).userId(1L).attackScenario(AttackScenarioDto.none()).maxAttempts(1)
+        FixContext context = temperatureThresholdContext(twoThresholdRule())
+                .traceId(traceId).maxAttempts(1)
                 .preferredRanges(Map.of(
                         disjointTarget, new PreferredRange(60, 70),
                         usableTarget, new PreferredRange(35, 45)))

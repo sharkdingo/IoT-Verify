@@ -89,12 +89,7 @@ public class ApplyFixTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
 
             long traceId = positiveLongArg(args, "traceId");
             // Omission degrades to a preview, matching every other confirmation-gated tool. Rejecting
@@ -246,7 +241,7 @@ public class ApplyFixTool extends AbstractAiTool {
             appliedSuggestion.remove("suggestionToken");
             response.put("appliedSuggestion", appliedSuggestion);
             response.put("message", result.getMessage());
-            return successJson(response, "Formal-fix mutation completed, but its result details are unavailable.");
+            return successJson(response);
         } catch (FixApplyPreflightUnavailableException e) {
             // This subtype is explicitly guaranteed to occur before any board write.
             throw e;
@@ -304,7 +299,7 @@ public class ApplyFixTool extends AbstractAiTool {
         body.put("mutationMayHaveCommitted", true);
         body.put("errorCode", "MUTATION_RESULT_INVALID");
         body.put("message", "The formal-fix result could not be confirmed. Refresh the current rule list before retrying.");
-        return successJson(body, "Formal-fix result unavailable.");
+        return successJson(body);
     }
 
     private String previewResultUnavailable() {
@@ -314,7 +309,7 @@ public class ApplyFixTool extends AbstractAiTool {
         body.put("mutationMayHaveCommitted", false);
         body.put("errorCode", "PREVIEW_RESULT_INVALID");
         body.put("message", "The formal-fix preview could not be delivered. No rules were changed and no confirmation remains active.");
-        return readOnlySuccessJson(body, "Formal-fix preview unavailable; no rules were changed.");
+        return readOnlySuccessJson(body);
     }
 
     private String oversizedPreview(int resultBytes) {
@@ -326,7 +321,7 @@ public class ApplyFixTool extends AbstractAiTool {
         body.put("message", "The formal-fix preview is too large to review safely in chat. No rules were changed; use the formal-fix interface to review this suggestion.");
         body.put("resultBytes", resultBytes);
         body.put("maxResultBytes", chatExecutionConfig.getMaxToolResultBytes());
-        return readOnlySuccessJson(body, "Formal-fix preview exceeded the safe result size limit.");
+        return readOnlySuccessJson(body);
     }
 
     private ParsedPreferredRanges parsePreferredRanges(JsonNode node) throws ArgValidationException {

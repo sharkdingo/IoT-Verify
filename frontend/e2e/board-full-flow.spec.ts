@@ -1,10 +1,14 @@
 import { expandCreation } from './support/controlCenter'
 import { type APIRequestContext, type Page } from '@playwright/test'
+import { unwrap, waitForApi } from './support/apiResponse'
+import { saveEmptyBoard } from './support/boardWorkspace'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
   apiBaseURL,
+  authHeaders,
   createAuthenticatedUser,
+  seedBrowserSession,
   expect,
   test,
   type AuthUser
@@ -12,10 +16,6 @@ import {
 import { clickUnderTooltip, dismissHintTooltips } from './support/tooltips'
 import { selectHistoryResultType } from './support/historyFilter'
 import { expectFooterUsable } from './support/footerLayout'
-
-const authHeaders = (auth: AuthUser) => ({
-  Authorization: `Bearer ${auth.token}`
-})
 
 const fixRequestUrl = (traceId: number) =>
   `${apiBaseURL}/api/verify/traces/${traceId}/fix?requestId=${crypto.randomUUID()}`
@@ -29,74 +29,12 @@ const listedRepair = (fix: any, strategy: string, isExpected: (suggestion: any) 
   return repair
 }
 
-const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data as T
-}
-
 const openWorkspace = async (page: Page, auth: AuthUser, locale = 'en', theme = 'light') => {
-  await page.addInitScript(({ token, user, locale, theme }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', theme)
-    window.localStorage.setItem('locale', locale)
-  }, {
-    token: auth.token,
-    locale,
-    theme,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
+  await seedBrowserSession(page, auth, { locale, theme })
 
   await page.goto('/#/board')
   await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
-}
-
-const waitForApi = async <T>(
-  request: APIRequestContext,
-  auth: AuthUser,
-  path: string,
-  predicate: (value: T) => boolean,
-  timeoutMs = 30_000
-): Promise<T> => {
-  const deadline = Date.now() + timeoutMs
-  let latest: T | undefined
-
-  while (Date.now() < deadline) {
-    const response = await request.get(`${apiBaseURL}${path}`, { headers: authHeaders(auth) })
-    latest = await unwrap<T>(response)
-    if (predicate(latest)) {
-      return latest
-    }
-    await new Promise(resolve => setTimeout(resolve, 500))
-  }
-
-  throw new Error(`Timed out waiting for ${path}; latest=${JSON.stringify(latest)}`)
-}
-
-const saveEmptyBoard = async (request: APIRequestContext, auth: AuthUser) => {
-  const previewResponse = await request.get(`${apiBaseURL}/api/board/replacement-preview`, {
-    headers: authHeaders(auth)
-  })
-  const preview = await unwrap<{ impactToken: string }>(previewResponse)
-  const response = await request.post(`${apiBaseURL}/api/board/batch`, {
-    headers: authHeaders(auth),
-    data: {
-      impactToken: preview.impactToken,
-      nodes: [],
-      environmentVariables: [],
-      rules: [],
-      specs: [],
-      templateSnapshots: []
-    }
-  })
-  expect(response.ok(), await response.text()).toBeTruthy()
 }
 
 const waitForTemplateOption = async (page: Page, templateName: string) => {
@@ -567,6 +505,10 @@ test.describe('board full-stack NuSMV user flow', () => {
     await page.getByTestId('fix-try-current').click()
     const applyFix = page.getByTestId('fix-apply-current')
     await expect(applyFix).toBeVisible({ timeout: 180_000 })
+    let snapshotReads = 0
+    page.on('request', request => {
+      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/board/snapshot') snapshotReads++
+    })
     await applyFix.click()
     // Removing rules requires an explicit confirmation before the mutation is sent.
     await page.locator('.el-message-box')
@@ -583,6 +525,8 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(1)
     await expect(page.getByTestId('verification-result-stale-banner')).toContainText(/differs from the current Board model/i)
     await expect(page.getByTestId('verification-trace-fix-unavailable')).toHaveCount(0)
+    await expect(page.getByTestId('verification-fix-applied')).toBeVisible()
+    expect(snapshotReads).toBe(0)
 
     // The stale result leads back to current-board settings, without resubmitting or reopening its URL.
     let rerunRequests = 0
@@ -601,6 +545,86 @@ test.describe('board full-stack NuSMV user flow', () => {
     await expect(page.getByTestId('verification-result-stale-banner')).toHaveCount(0)
     await expect(page.getByTestId('verification-result-reverify')).toHaveCount(0)
     expect(rerunRequests).toBe(1)
+  })
+
+  test('recovers a committed fix after losing its response and undoes only one edit', async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    const headers = authHeaders(auth)
+    const scene = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), '..', 'docs', 'examples',
+      'household-entry-scene.json'), 'utf8'))
+    const preview = await unwrap<{ impactToken: string }>(await request.get(
+      `${apiBaseURL}/api/board/replacement-preview`, { headers }))
+    await unwrap(await request.post(`${apiBaseURL}/api/board/scene`, {
+      headers, data: { impactToken: preview.impactToken, scene }
+    }))
+    const snapshot = async () => unwrap<{ rules: unknown[]; editHistory: { editHistoryRevision: string } }>(
+      await request.get(`${apiBaseURL}/api/board/snapshot`, { headers }))
+    const history = async () => unwrap<{ entryCount: number }>(
+      await request.get(`${apiBaseURL}/api/board/edits/clear-preview`, { headers }))
+    const before = await snapshot()
+    expect((await history()).entryCount).toBe(0)
+    await openWorkspace(page, auth)
+    await page.getByTestId('open-verification-panel').click()
+    await page.getByTestId('verification-mode-sync').click()
+    await page.getByTestId('run-verification').click()
+    await page.getByTestId('verification-trace-fix').first().click({ timeout: 60_000 })
+    const dialog = page.getByTestId('fix-result-dialog')
+    await dialog.getByTestId('fix-strategy-remove').click()
+    await dialog.getByTestId('fix-try-current').click()
+    const apply = dialog.getByTestId('fix-apply-current')
+    await expect(apply).toBeEnabled({ timeout: 60_000 })
+
+    let applyRequests = 0
+    let recoverySnapshots = 0
+    let committed = false
+    let releaseSnapshot!: () => void
+    const heldSnapshot = new Promise<void>(resolve => { releaseSnapshot = resolve })
+    await page.route('**/api/verify/traces/*/fix/apply', async route => {
+      applyRequests += 1
+      const response = await route.fetch()
+      expect(response.ok(), await response.text()).toBe(true)
+      committed = true
+      await route.abort('failed')
+    })
+    await page.route('**/api/board/snapshot', async route => {
+      if (!committed) return route.continue()
+      recoverySnapshots += 1
+      await heldSnapshot
+      await route.continue()
+    })
+
+    try {
+      await apply.click()
+      await page.locator('.el-message-box').getByRole('button', { name: 'Remove Rules and Apply' }).click()
+      await expect.poll(() => recoverySnapshots).toBe(1)
+      await expect(dialog).toBeVisible()
+      await expect(apply).toBeDisabled()
+      expect(applyRequests).toBe(1)
+      const warning = expect(page.getByText(/fix-apply response could not be confirmed/i)).toBeVisible()
+      releaseSnapshot()
+      await warning
+      await expect(dialog).toBeHidden()
+      await expect(page.getByTestId('verification-fix-applied')).toHaveCount(0)
+      await expect(page.getByTestId('verification-trace-fix')).toHaveCount(0)
+      expect(recoverySnapshots).toBe(1)
+      expect(applyRequests).toBe(1)
+      const after = await snapshot()
+      expect(after.rules.length).toBeLessThan(before.rules.length)
+      expect((await history()).entryCount).toBe(1)
+
+      await page.getByTestId('close-verification-result').click()
+      const undo = page.waitForResponse(response => response.request().method() === 'POST'
+        && new URL(response.url()).pathname === '/api/board/edits/undo')
+      await clickUnderTooltip(page, page.getByTestId('board-undo'))
+      expect((await undo).request().postDataJSON()).toEqual({
+        expectedEditHistoryRevision: after.editHistory.editHistoryRevision
+      })
+      await expect.poll(async () => (await snapshot()).rules).toEqual(before.rules)
+      await expect(page.getByTestId('board-redo')).toBeEnabled()
+      expect(applyRequests).toBe(1)
+    } finally {
+      releaseSnapshot()
+    }
   })
 
   test('builds a board through left-panel dialogs, then simulates, verifies, replays history, and tracks async tasks', async ({ page, request }, testInfo) => {

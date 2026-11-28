@@ -33,6 +33,33 @@ const paste = async (wrapper: ReturnType<typeof panel>, text: string) => {
 afterEach(() => vi.useRealTimers())
 
 describe('independent JSON and CSV device imports', () => {
+  it('keeps an unconfirmed import locked after preview renaming and format switches', async () => {
+    vi.useFakeTimers()
+    const wrapper = panel()
+    try {
+      await wrapper.get('[data-testid="device-create-mode-import"]').trigger('click')
+      await paste(wrapper, json)
+      await wrapper.get('[data-testid="device-import-create"]').trigger('click')
+      const submission = wrapper.emitted('create-devices')![0]![0] as any
+      await wrapper.get('[data-testid="device-create-mode-batch"]').trigger('click')
+      submission.complete(false, { reasonCode: 'DEVICE_CREATE_OUTCOME_UNKNOWN', cause: 'Save unconfirmed', details: [], fields: {} })
+      await flushPromises()
+      await wrapper.setProps({ nodes: [{ id: 'saved-phone', label: 'phone' }] })
+      await wrapper.get('[data-testid="device-create-mode-import"]').trigger('click')
+      await selectFormat(wrapper, 'csv')
+      expect(wrapper.find('[data-testid="device-group-save-unconfirmed"]').exists()).toBe(false)
+      await selectFormat(wrapper, 'json')
+      expect(wrapper.get('[data-testid="device-group-save-unconfirmed"]').text()).toBe('Save unconfirmed')
+      const create = wrapper.get('[data-testid="device-import-create"]')
+      expect(create.attributes('disabled')).toBeDefined()
+      await create.trigger('click')
+      expect(wrapper.emitted('create-devices')).toHaveLength(1)
+      await paste(wrapper, json.replace('"phone"', '"different_phone"'))
+      expect(wrapper.find('[data-testid="device-group-save-unconfirmed"]').exists()).toBe(false)
+      expect(create.attributes('disabled')).toBeUndefined()
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps file and pasted input mutually exclusive and restores only the selected source', async () => {
     vi.useFakeTimers()
     const wrapper = panel()

@@ -3,18 +3,9 @@ package cn.edu.nju.Iot_Verify.service.board;
 import cn.edu.nju.Iot_Verify.dto.board.BoardUndoResultDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
-import cn.edu.nju.Iot_Verify.po.DeviceNodePo;
-import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
-import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
-import cn.edu.nju.Iot_Verify.po.UserPo;
+import cn.edu.nju.Iot_Verify.po.BoardEditJournalPo;
 import cn.edu.nju.Iot_Verify.repository.*;
 import cn.edu.nju.Iot_Verify.service.impl.BoardStorageServiceImpl;
-import cn.edu.nju.Iot_Verify.util.mapper.DeviceNodeMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,27 +14,21 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.List;
 import java.time.LocalDateTime;
 
+import static cn.edu.nju.Iot_Verify.service.board.BoardEditUndoFixtures.newRule;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mockStatic;
 
 /**
- * The undo cases that only a real MySQL can answer.
+ * Board undo and redo against real MySQL, including native JSON inserts and timestamp precision.
  *
- * <p>Restoring a deleted rule goes through {@code RuleRepository.insertWithId}, a native insert into
- * a {@code JSON} column. MySQL parses the bound string into JSON and returns it unchanged; H2 stores
- * it as a JSON *string literal* and cannot emulate the MySQL behaviour at all, so these assertions
- * are meaningless there — which is why they lived as {@code @Disabled} siblings in
- * {@link BoardEditUndoIntegrationTest}.
- *
- * <p>Enabled only when a MySQL server is actually reachable, so the H2-only backend CI job skips this
- * class instead of failing. The full-stack E2E job exercises the same path through the real
- * application. Set {@code IOT_VERIFY_UNDO_IT_URL} to point at another server.
+ * <p>{@link BoardEditUndoIntegrationTest} exercises undo locally through H2 with text-backed JSON
+ * columns. CI requires MySQL for this suite. Local runs without MySQL skip it unless
+ * {@code -Diot.verify.mysql.required=true} is set. {@code IOT_VERIFY_UNDO_IT_URL} selects the test server.
  */
 @DataJpaTest(properties = {
         "spring.jpa.database-platform=org.hibernate.dialect.MySQLDialect",
@@ -77,72 +62,11 @@ class BoardEditUndoMySqlIntegrationTest {
         environments.deleteAll();
         templates.deleteAll();
         users.deleteAll();
-        journal = new BoardEditJournal(journalRepo,
-                new ObjectMapper().registerModule(new JavaTimeModule()));
-        service = new BoardStorageServiceImpl(
-                nodes, environments, specs, rules, null, templates, null,
-                new TransactionTemplate(transactionManager), null,
-                new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(), null,
-                new DeviceTemplateMapper(), null, users, journal);
-        userId = createUser("13800138201", "undo-mysql-owner");
-        seedDevice(userId);
-    }
-
-    private Long createUser(String phone, String username) {
-        UserPo user = new UserPo();
-        user.setPhone(phone);
-        user.setUsername(username);
-        user.setPassword("hashed");
-        user.setCreatedAt(java.time.LocalDateTime.now());
-        return users.saveAndFlush(user).getId();
-    }
-
-    private void seedDevice(Long owner) {
-        String manifest;
-        try (var stream = getClass().getResourceAsStream("/deviceTemplate/Light.json")) {
-            manifest = new String(java.util.Objects.requireNonNull(stream).readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            throw new IllegalStateException("Light device template fixture is unavailable", e);
-        }
-        templates.saveAndFlush(DeviceTemplatePo.builder()
-                .userId(owner)
-                .name("Light")
-                .defaultTemplate(true)
-                .manifestJson(manifest)
-                .build());
-        nodes.saveAndFlush(DeviceNodePo.builder()
-                .id("light-1")
-                .userId(owner)
-                .templateName("Light")
-                .label("Light 1")
-                .posX(0.0).posY(0.0).state("on").width(176).height(128)
-                .build());
-        environments.saveAndFlush(BoardEnvironmentVariablePo.builder()
-                .userId(owner).name("illuminance").value("10")
-                .trust("untrusted").privacy("public").build());
-    }
-
-    private RuleDto newRule(String description) {
-        return newRule(description, "on", "off");
-    }
-
-    /** The board rejects two semantically identical rules, so a second fixture must differ. */
-    private RuleDto newRule(String description, String triggerState, String action) {
-        RuleDto rule = new RuleDto();
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("light-1");
-        condition.setTargetType("state");
-        condition.setAttribute("state");
-        condition.setRelation("=");
-        condition.setValue(triggerState);
-        rule.setConditions(List.of(condition));
-        RuleDto.Command command = new RuleDto.Command();
-        command.setDeviceName("light-1");
-        command.setAction(action);
-        rule.setCommand(command);
-        rule.setRuleString(description);
-        return rule;
+        journal = BoardEditUndoFixtures.newJournal(journalRepo);
+        service = BoardEditUndoFixtures.boardService(
+                nodes, environments, specs, rules, templates, users, transactionManager, journal);
+        userId = BoardEditUndoFixtures.createUser(users, "13800138201", "undo-mysql-owner");
+        BoardEditUndoFixtures.seedLightBoard(templates, nodes, environments, userId);
     }
 
     @Test
@@ -197,10 +121,7 @@ class BoardEditUndoMySqlIntegrationTest {
     }
 
     private RuleDto persistedRuleWithHistoricTime(Long ruleId) {
-        var stored = rules.findById(ruleId).orElseThrow();
-        stored.setCreatedAt(LocalDateTime.of(2001, 2, 3, 4, 5, 6));
-        rules.saveAndFlush(stored);
-        entityManager.clear();
+        BoardEditUndoFixtures.persistHistoricRuleTimestamp(rules, entityManager, ruleId);
         return service.getRules(userId).stream().filter(rule -> rule.getId().equals(ruleId)).findFirst().orElseThrow();
     }
 
@@ -218,7 +139,8 @@ class BoardEditUndoMySqlIntegrationTest {
         if (afterUndo) {
             service.addRule(userId, newRule("abandoned create"));
             assertTrue(service.undoLastEdit(userId).isApplied());
-            assertEquals(1, journalRepo.countByUserIdAndUndoneTrue(userId));
+            assertEquals(1, journalRepo.findByUserIdOrderBySequenceAsc(userId).stream()
+                    .filter(BoardEditJournalPo::isUndone).count());
         }
         LocalDateTime serverTime = LocalDateTime.of(2001, 2, 3, 4, 5, 6, 123456789);
         cn.edu.nju.Iot_Verify.dto.board.CollectionMutationResultDto<RuleDto> created;
@@ -287,7 +209,8 @@ class BoardEditUndoMySqlIntegrationTest {
         BoardUndoResultDto redo = service.redoLastUndoneEdit(userId);
         assertFalse(redo.isApplied());
         assertEquals("NOTHING_TO_APPLY", redo.getReasonCode());
-        assertEquals(0, journalRepo.countByUserIdAndUndoneTrue(userId));
+        assertTrue(journalRepo.findByUserIdOrderBySequenceAsc(userId).stream()
+                .noneMatch(BoardEditJournalPo::isUndone));
     }
 
     @Test

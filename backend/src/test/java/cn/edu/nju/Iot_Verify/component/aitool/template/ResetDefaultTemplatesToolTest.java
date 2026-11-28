@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.template;
 
-import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.board.EnvironmentVariableChangeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DefaultTemplateAffectedDeviceDto;
@@ -20,6 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -41,7 +41,7 @@ class ResetDefaultTemplatesToolTest {
     void setUp() {
         tool = new ResetDefaultTemplatesTool(
                 boardStorageService,
-                new AiDestructiveActionGuard(objectMapper),
+                inMemoryActionGuard(objectMapper),
                 objectMapper);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("session-1");

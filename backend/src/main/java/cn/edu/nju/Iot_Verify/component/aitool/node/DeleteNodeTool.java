@@ -69,12 +69,7 @@ public class DeleteNodeTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("id", "confirmed", "impactToken"));
             String id = requiredDeviceIdField(args, "id", "arguments");
 
@@ -94,7 +89,7 @@ public class DeleteNodeTool extends AbstractAiTool {
                         userId, getName(), id,
                         preview.getDeletedDevice().getLabel(), bindingSnapshot, currentImpactToken);
                 Map<String, Object> response = previewResponse(previewSummary, confirmationToken);
-                return readOnlySuccessJson(response, "Device deletion preview unavailable.");
+                return readOnlySuccessJson(response);
             }
 
             String suppliedImpactToken = nullableTextField(args, "impactToken", "arguments");
@@ -127,7 +122,7 @@ public class DeleteNodeTool extends AbstractAiTool {
             response.put("removedSpecifications", result.getRemovedSpecifications());
             response.put("environmentChanges", result.getEnvironmentChanges());
             response.put("remainingDeviceCount", result.getCurrentNodes().size());
-            return successJson(response, "Device deleted successfully.");
+            return successJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ResourceNotFoundException e) {

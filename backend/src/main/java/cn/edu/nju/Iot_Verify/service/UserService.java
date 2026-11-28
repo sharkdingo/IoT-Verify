@@ -8,7 +8,4 @@ public interface UserService {
     UserPo register(String phone, String username, String password);
     Optional<UserPo> findByPhone(String phone);
     Optional<UserPo> findByUsername(String username);
-    Optional<UserPo> findById(Long id);
-    boolean existsByPhone(String phone);
-    boolean existsByUsername(String username);
 }

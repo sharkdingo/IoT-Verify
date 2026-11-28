@@ -95,11 +95,33 @@ const deletionConflict = (reasonCode: string, currentPreview: unknown) => ({
   }
 })
 
-const mountTemplates = () => mount(ControlCenter, {
+const snapshotWithTemplates = (deviceTemplates: typeof template[]) => ({
+  deviceTemplates, nodes: [], environmentVariables: [], rules: [], specifications: [],
+  editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
+})
+
+const mountTemplates = (runBoardMutation?: <T>(work: () => Promise<T>) => Promise<T>) => mount(ControlCenter, {
   attachTo: document.body,
-  props: { activeSection: 'templates', deviceTemplates: [template] },
+  props: { activeSection: 'templates', deviceTemplates: [template], runBoardMutation },
   global: { plugins: [i18n] }
 })
+
+const templateMutationControls = {
+  reset: { opener: '[data-testid="reset-default-templates"]',
+    confirm: '[data-testid="default-template-reset-confirm"]', write: boardApiMocks.resetDefaultTemplates },
+  delete: { opener: '.template-card__action--danger',
+    confirm: '[data-testid="template-delete-confirm"]', write: boardApiMocks.deleteDeviceTemplate }
+}
+
+const submitTemplateMutation = async (
+  wrapper: ReturnType<typeof mountTemplates>, action: keyof typeof templateMutationControls
+) => {
+  const { opener, confirm } = templateMutationControls[action]
+  await wrapper.get(opener).trigger('click')
+  await flushPromises()
+  await wrapper.get(confirm).trigger('click')
+  await flushPromises()
+}
 
 beforeEach(() => {
   vi.resetAllMocks()
@@ -111,6 +133,68 @@ afterEach(() => {
 })
 
 describe('ControlCenter template authority recovery', () => {
+  it.each(['reset', 'delete'] as const)('keeps the recovered journal and blocks another %s of the same unconfirmed preview', async action => {
+    boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
+    boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
+    boardApiMocks.getDeviceTemplates.mockResolvedValue([template])
+    const recovered = {
+      deviceTemplates: [template], nodes: [], environmentVariables: [], rules: [], specifications: [],
+      editHistory: { canUndo: true, canRedo: false, editHistoryRevision: '4:4:0' }
+    }
+    boardApiMocks.getSnapshot.mockResolvedValue(recovered)
+    const { opener, confirm, write: mutation } = templateMutationControls[action]
+    mutation.mockRejectedValue(new Error('request was lost'))
+    const wrapper = mountTemplates()
+    try {
+      await wrapper.get(opener).trigger('click')
+      await flushPromises()
+      await wrapper.get(confirm).trigger('click')
+      await flushPromises()
+
+      if (!wrapper.find(confirm).exists()) {
+        await wrapper.get(opener).trigger('click')
+        await flushPromises()
+      }
+      if (wrapper.find(confirm).exists()) await wrapper.get(confirm).trigger('click')
+      await flushPromises()
+
+      expect(mutation).toHaveBeenCalledOnce()
+      expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
+      expect(boardApiMocks.getDeviceTemplates).not.toHaveBeenCalled()
+      expect(wrapper.emitted('replace-board-snapshot')).toEqual([[recovered]])
+      expect(wrapper.emitted('edit-history-cleared')).toBeUndefined()
+      expect(messageMocks.success).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each(['reset', 'delete'] as const)('does not dispatch a queued %s after a read-only interval', async action => {
+    boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
+    boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
+    const { opener, confirm, write } = templateMutationControls[action]
+    write.mockRejectedValueOnce({ response: { status: 422 } })
+    let release!: () => void
+    const queued = new Promise<void>(resolve => { release = resolve })
+    const wrapper = mountTemplates(async work => { await queued; return work() })
+    try {
+      await wrapper.get(opener).trigger('click')
+      await flushPromises()
+      await wrapper.get(confirm).trigger('click')
+      expect(wrapper.get(confirm).attributes('disabled')).toBeDefined()
+      await wrapper.setProps({ readOnly: true })
+      await wrapper.setProps({ readOnly: false })
+      release()
+      await flushPromises()
+      expect(write).not.toHaveBeenCalled()
+      expect(wrapper.emitted('edit-history-cleared')).toBeUndefined()
+      expect(wrapper.get(confirm).attributes('disabled')).toBeUndefined()
+    } finally {
+      release()
+      wrapper.unmount()
+    }
+  })
+
   it('focuses template details, switches its focus return target, and closes with Escape', async () => {
     const wrapper = mountTemplates()
     try {
@@ -220,14 +304,9 @@ describe('ControlCenter template authority recovery', () => {
   ] as const)('releases the %s confirmation before reporting %s', async (action, outcome) => {
     boardApiMocks.previewDefaultTemplateReset.mockResolvedValue(resetPreview)
     boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
-    const recoveredSnapshot = {
-      deviceTemplates: [template], nodes: [], environmentVariables: [], rules: [], specifications: [],
-      editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }
-    }
+    const recoveredSnapshot = snapshotWithTemplates(action === 'delete' && outcome === 'reconciled' ? [] : [template])
     boardApiMocks.getSnapshot.mockResolvedValue(recoveredSnapshot)
-    const mutation = action === 'reset'
-      ? boardApiMocks.resetDefaultTemplates
-      : boardApiMocks.deleteDeviceTemplate
+    const { opener, confirm, write: mutation } = templateMutationControls[action]
     if (outcome === 'confirmed') {
       mutation.mockResolvedValue(action === 'reset'
         ? { ...resetPreview, operation: 'reset', currentNodes: [defaultedDevice] }
@@ -237,11 +316,7 @@ describe('ControlCenter template authority recovery', () => {
         ? deletionConflict('TEMPLATE_DELETION_PREVIEW_STALE', null)
         : new Error('response lost'))
       if (outcome === 'malformed conflict with failed refresh') {
-        boardApiMocks.getDeviceTemplates.mockRejectedValue(new Error('refresh failed'))
-      } else {
-        boardApiMocks.getDeviceTemplates.mockResolvedValue(
-          action === 'reset' || outcome === 'malformed conflict with existing template' ? [template] : []
-        )
+        boardApiMocks.getSnapshot.mockRejectedValue(new Error('refresh failed'))
       }
     }
     const feedback = outcome === 'confirmed' ? messageMocks.success
@@ -252,13 +327,10 @@ describe('ControlCenter template authority recovery', () => {
     const wrapper = mountTemplates()
 
     try {
-      await wrapper.get(action === 'reset'
-        ? '[data-testid="reset-default-templates"]' : '.template-card__action--danger').trigger('click')
+      await wrapper.get(opener).trigger('click')
       await flushPromises()
       expect(openModalDepth.value).toBe(1)
-      await wrapper.get(action === 'reset'
-        ? '[data-testid="default-template-reset-confirm"]'
-        : '[data-testid="template-delete-confirm"]').trigger('click')
+      await wrapper.get(confirm).trigger('click')
       await flushPromises()
 
       expect(reportedDepths).toEqual([0])
@@ -271,19 +343,17 @@ describe('ControlCenter template authority recovery', () => {
         expect(messageMocks.success).not.toHaveBeenCalled()
         expect(wrapper.emitted('edit-history-cleared')).toBeUndefined()
       }
-      if (action === 'reset') {
-        if (outcome === 'reconciled') {
-          expect(wrapper.emitted('replace-board-snapshot')).toEqual([[recoveredSnapshot]])
-          expect(wrapper.emitted('replace-template-state')).toBeUndefined()
-          expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
-        } else {
-          expect(wrapper.emitted('replace-template-state')).toEqual([[{
-            templates: [template], nodes: [defaultedDevice], environmentVariables: []
-          }]])
-          expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
-          expect(boardApiMocks.getSnapshot).not.toHaveBeenCalled()
-        }
-        expect(boardApiMocks.getDeviceTemplates).not.toHaveBeenCalled()
+      expect(boardApiMocks.getDeviceTemplates).not.toHaveBeenCalled()
+      if (outcome === 'reconciled') {
+        expect(wrapper.emitted('replace-board-snapshot')).toEqual([[recoveredSnapshot]])
+        expect(wrapper.emitted('replace-template-state')).toBeUndefined()
+        expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
+      } else if (action === 'reset' && outcome === 'confirmed') {
+        expect(wrapper.emitted('replace-template-state')).toEqual([[{
+          templates: [template], nodes: [defaultedDevice], environmentVariables: []
+        }]])
+        expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
+        expect(boardApiMocks.getSnapshot).not.toHaveBeenCalled()
       }
       if (outcome === 'reconciled') {
         expect(messageMocks.warning).toHaveBeenCalledWith(action === 'reset'
@@ -291,7 +361,7 @@ describe('ControlCenter template authority recovery', () => {
           : i18n.global.t('app.templateDeleteOutcomeRefreshed', { name: template.name }))
       } else if (outcome === 'malformed conflict with failed refresh') {
         expect(messageMocks.warning).toHaveBeenCalledWith(
-          i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+          i18n.global.t('app.templateDeleteRejectedRefreshFailed'))
         expect(wrapper.emitted('authoritative-state-unavailable')).toEqual([[['templates']]])
       }
     } finally {
@@ -337,7 +407,7 @@ describe('ControlCenter template authority recovery', () => {
 
   it('marks the template catalog unavailable when import outcome and refresh are both unknown', async () => {
     boardApiMocks.addDeviceTemplate.mockRejectedValue(new Error('response lost'))
-    boardApiMocks.getDeviceTemplates.mockRejectedValue(new Error('refresh failed'))
+    boardApiMocks.getSnapshot.mockRejectedValue(new Error('refresh failed'))
     const wrapper = mountTemplates()
     const input = wrapper.get<HTMLInputElement>('input[type="file"]')
     Object.defineProperty(input.element, 'files', {
@@ -348,6 +418,7 @@ describe('ControlCenter template authority recovery', () => {
     await input.trigger('change')
     await flushPromises()
 
+    expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
     expect(wrapper.emitted('authoritative-state-unavailable')).toEqual([[['templates']]])
     wrapper.unmount()
   })
@@ -358,18 +429,16 @@ describe('ControlCenter template authority recovery', () => {
     boardApiMocks.getSnapshot.mockRejectedValue(new Error('snapshot refresh failed'))
     const wrapper = mountTemplates()
 
-    await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="default-template-reset-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'reset')
 
     expect(wrapper.emitted('authoritative-state-unavailable'))
       .toEqual([[['nodes', 'templates', 'environment']]])
     expect(wrapper.emitted('replace-template-state')).toBeUndefined()
     expect(wrapper.find('.template-reset-dialog').exists()).toBe(true)
     expect(messageMocks.success).not.toHaveBeenCalled()
-    expect(messageMocks.warning).toHaveBeenCalledWith(
-      i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+    expect(wrapper.get('#default-template-reset-unconfirmed').text())
+      .toBe(i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+    expect(wrapper.get('[data-testid="default-template-reset-confirm"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
@@ -382,10 +451,7 @@ describe('ControlCenter template authority recovery', () => {
     const tokenKey = 'iot_verify_token'
     const previousToken = localStorage.getItem(tokenKey)
     try {
-      await wrapper.get('[data-testid="reset-default-templates"]').trigger('click')
-      await flushPromises()
-      await wrapper.get('[data-testid="default-template-reset-confirm"]').trigger('click')
-      await flushPromises()
+      await submitTemplateMutation(wrapper, 'reset')
       expect(boardApiMocks.getSnapshot).toHaveBeenCalledOnce()
       localStorage.setItem(tokenKey, 'a different session')
       release({
@@ -406,19 +472,17 @@ describe('ControlCenter template authority recovery', () => {
   it('marks the template catalog unavailable when deletion outcome and refresh are both unknown', async () => {
     boardApiMocks.previewDeviceTemplateDeletion.mockResolvedValue(deletionPreview)
     boardApiMocks.deleteDeviceTemplate.mockRejectedValue(new Error('response lost'))
-    boardApiMocks.getDeviceTemplates.mockRejectedValue(new Error('refresh failed'))
+    boardApiMocks.getSnapshot.mockRejectedValue(new Error('refresh failed'))
     const wrapper = mountTemplates()
 
-    await wrapper.get('.template-card__action--danger').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="template-delete-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'delete')
 
     expect(wrapper.emitted('authoritative-state-unavailable')).toEqual([[['templates']]])
     expect(wrapper.find('[data-testid="template-delete-dialog"]').exists()).toBe(true)
     expect(messageMocks.success).not.toHaveBeenCalled()
-    expect(messageMocks.warning).toHaveBeenCalledWith(
-      i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+    expect(wrapper.get('#template-delete-unconfirmed').text())
+      .toBe(i18n.global.t('app.templateMutationOutcomeUnknownRefreshFailed'))
+    expect(wrapper.get('[data-testid="template-delete-confirm"]').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
@@ -441,14 +505,11 @@ describe('ControlCenter template authority recovery', () => {
     ))
     const wrapper = mountTemplates()
 
-    await wrapper.get('.template-card__action--danger').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="template-delete-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'delete')
 
     expect(wrapper.get('[data-testid="template-delete-dialog"]').text()).toContain('Hall switch')
     expect(wrapper.get('[data-testid="template-delete-confirm"]').attributes('disabled')).toBeDefined()
-    expect(boardApiMocks.getDeviceTemplates).not.toHaveBeenCalled()
+    expect(boardApiMocks.getSnapshot).not.toHaveBeenCalled()
     expect(messageMocks.warning)
       .toHaveBeenCalledWith(i18n.global.t('app.templateDeletePreviewChanged'))
     wrapper.unmount()
@@ -460,16 +521,14 @@ describe('ControlCenter template authority recovery', () => {
       'TEMPLATE_DELETION_PREVIEW_STALE',
       { ...deletionPreview, operation: 'deleted', currentTemplates: [] }
     ))
-    boardApiMocks.getDeviceTemplates.mockResolvedValue([template])
+    const snapshot = snapshotWithTemplates([template])
+    boardApiMocks.getSnapshot.mockResolvedValue(snapshot)
     const wrapper = mountTemplates()
 
-    await wrapper.get('.template-card__action--danger').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="template-delete-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'delete')
 
-    expect(boardApiMocks.getDeviceTemplates).toHaveBeenCalledTimes(1)
-    expect(wrapper.emitted('replace-template-catalog')).toEqual([[[template]]])
+    expect(boardApiMocks.getSnapshot).toHaveBeenCalledTimes(1)
+    expect(wrapper.emitted('replace-board-snapshot')).toEqual([[snapshot]])
     expect(wrapper.find('[data-testid="template-delete-dialog"]').exists()).toBe(false)
     expect(messageMocks.warning)
       .not.toHaveBeenCalledWith(i18n.global.t('app.templateDeletePreviewChanged'))
@@ -487,15 +546,12 @@ describe('ControlCenter template authority recovery', () => {
       'UNRELATED_CONFLICT',
       deletionPreview
     ))
-    boardApiMocks.getDeviceTemplates.mockResolvedValue([template])
+    boardApiMocks.getSnapshot.mockResolvedValue(snapshotWithTemplates([template]))
     const wrapper = mountTemplates()
 
-    await wrapper.get('.template-card__action--danger').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="template-delete-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'delete')
 
-    expect(boardApiMocks.getDeviceTemplates).toHaveBeenCalledTimes(1)
+    expect(boardApiMocks.getSnapshot).toHaveBeenCalledTimes(1)
     expect(wrapper.find('[data-testid="template-delete-dialog"]').exists()).toBe(false)
     expect(messageMocks.warning)
       .not.toHaveBeenCalledWith(i18n.global.t('app.templateDeletePreviewChanged'))
@@ -507,15 +563,12 @@ describe('ControlCenter template authority recovery', () => {
     boardApiMocks.deleteDeviceTemplate.mockRejectedValue({
       response: { status: 409, data: { data: null } }
     })
-    boardApiMocks.getDeviceTemplates.mockResolvedValue([template])
+    boardApiMocks.getSnapshot.mockResolvedValue(snapshotWithTemplates([template]))
     const wrapper = mountTemplates()
 
-    await wrapper.get('.template-card__action--danger').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="template-delete-confirm"]').trigger('click')
-    await flushPromises()
+    await submitTemplateMutation(wrapper, 'delete')
 
-    expect(boardApiMocks.getDeviceTemplates).toHaveBeenCalledTimes(1)
+    expect(boardApiMocks.getSnapshot).toHaveBeenCalledTimes(1)
     expect(wrapper.find('[data-testid="template-delete-dialog"]').exists()).toBe(false)
     // Assert *which* error, so a wrong or generic message cannot pass.
     expect(messageMocks.error).toHaveBeenCalledWith(

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import FieldSelect from '@/components/common/FieldSelect.vue'
+import InventorySearch from '@/components/InventorySearch.vue'
 import HintTooltip from '@/components/common/HintTooltip.vue'
 import { ref, reactive, computed, watch, onUnmounted } from 'vue'
 import { COLLAPSED_PANEL_RAIL_CSS } from '@/constants/boardLayout'
@@ -34,6 +35,7 @@ import { formatBuiltInModelToken } from '@/utils/modelTokenDisplay'
 import { hasModeledStateMachine, resolveEffectiveNodeState } from '@/utils/canvas/nodeState'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import { useRovingTablist } from '@/composables/useRovingTablist'
+import { BOARD_ITEM_EDIT_OUTCOME_UNKNOWN } from '@/composables/useUnconfirmedBoardItemEdit'
 import { notifyBlocked } from '@/utils/feedback'
 
 const { t, te } = useI18n()
@@ -56,6 +58,8 @@ interface Props {
   readOnlyMessage?: string
   environmentSaving?: boolean
   rulesReordering?: boolean
+  ruleOrderBlockedReason?: string
+  deletionWarning?: (kind: 'rule' | 'spec', id: string) => string | undefined
   /**
    * The authoritative board snapshot failed to load.
    *
@@ -96,6 +100,8 @@ const ensureWritable = (): boolean => {
 
 const mutationTitle = (fallback: string): string =>
   props.readOnly ? (props.readOnlyMessage || t('app.playbackReadOnlyCloseFirst')) : fallback
+
+const deletionWarningId = (kind: 'rule' | 'spec', id: string) => `${kind}-delete-unconfirmed-${encodeURIComponent(id)}`
 
 // Panel state
 const localCollapsed = ref(typeof window !== 'undefined' && window.innerWidth < 768)
@@ -538,23 +544,31 @@ const getEnvironmentSourceTitle = (source: EnvironmentSource) =>
   `${source.role === 'impact' ? t('app.affectsEnvironment') : t('app.readsEnvironment')}: ${source.label}`
 
 type EnvironmentVariableEdit = Partial<Record<'value' | 'trust' | 'privacy', string>>
-const environmentEdits = reactive<Record<string, { value?: string, failure?: ApiErrorDetails }>>({})
+type EnvironmentEditBaseline = EnvironmentVariableUpdateRequest['expected']
+type DisplayedEnvironmentVariable = (typeof environmentVariables.value)[number]
+const environmentEdits = reactive<Record<string, { value?: string, expected?: EnvironmentEditBaseline, failure?: ApiErrorDetails }>>({})
+const environmentSaveWarning = ref('')
 let environmentEditorActive = true
 onUnmounted(() => { environmentEditorActive = false })
 watch(() => getToken(), () => {
   for (const name of Object.keys(environmentEdits)) delete environmentEdits[name]
+  environmentSaveWarning.value = ''
 })
 watch(environmentVariables, variables => {
+  const names = new Set(variables.map(variable => variable.name))
   for (const name of Object.keys(environmentEdits)) {
-    const variable = variables.find(item => item.name === name)
-    if (!variable || (environmentEdits[name].value !== undefined && variable.value === environmentEdits[name].value)) {
-      delete environmentEdits[name]
-    }
+    // A matching snapshot does not acknowledge a draft. Only a confirmed receipt clears it.
+    if (!names.has(name)) delete environmentEdits[name]
   }
 })
 
-const editEnvironmentValue = (name: string, value: string) => {
-  environmentEdits[name] = { value }
+const environmentEditBaseline = ({ value, trust, privacy }: DisplayedEnvironmentVariable): EnvironmentEditBaseline =>
+  ({ value: value.trim(), trust, privacy })
+
+const editEnvironmentValue = (variable: DisplayedEnvironmentVariable, value: string) => {
+  const draft = environmentEdits[variable.name]
+  const expected = draft?.failure?.reasonCode === 'ENVIRONMENT_VARIABLE_STALE' ? undefined : draft?.expected
+  environmentEdits[variable.name] = { value, expected: expected ?? environmentEditBaseline(variable) }
 }
 const environmentValueFailures = computed(() => Object.fromEntries(environmentVariables.value.map(variable => {
   const edit = environmentEdits[variable.name]
@@ -575,27 +589,19 @@ const updateEnvironmentVariable = (
   name: string,
   patch: EnvironmentVariableEdit
 ) => {
-  if (!ensureWritable()) return
+  if (props.environmentSaving || !ensureWritable()) return
   const displayed = environmentVariables.value.find(variable => variable.name === name)
   if (!displayed?.editable) return
   if (patch.value !== undefined) {
-    editEnvironmentValue(name, patch.value)
+    if (environmentEdits[name]?.value !== patch.value) editEnvironmentValue(displayed, patch.value)
     const reason = !patch.value.trim() ? t('app.variableValueRequired')
       : validateTemplateVariableValue(displayed.definition, patch.value, t)
     if (reason) {
       return
     }
   }
-  const saved = environmentPoolByName.value.get(normalizeLookupName(name))
-  const authoritativeValue = typeof saved?.value === 'string' ? saved.value.trim() : ''
-  if (!authoritativeValue) return
-  // The displayed effective labels combine the authoritative row with the same template fallbacks
-  // the backend materializes. Reuse them so the CAS baseline cannot contradict the visible value.
-  const expected: EnvironmentVariableUpdateRequest['expected'] = {
-    value: authoritativeValue,
-    trust: displayed.trust,
-    privacy: displayed.privacy
-  }
+  const draft = environmentEdits[name]
+  const expected = (patch.value === undefined ? undefined : draft?.expected) ?? environmentEditBaseline(displayed)
   const desired: EnvironmentVariableUpdateRequest['desired'] = {}
   for (const field of ['value', 'trust', 'privacy'] as const) {
     const next = patch[field]
@@ -603,13 +609,30 @@ const updateEnvironmentVariable = (
       desired[field] = next
     }
   }
-  environmentEdits[name] = { value: environmentEdits[name]?.value }
+  environmentEdits[name] = { ...draft, failure: patch.value === undefined ? draft?.failure : undefined }
   const edit = environmentEdits[name]
   const requestToken = getToken()
   emit('save-environment', [{ name, expected, desired }], (saved, failure) => {
-    if (!environmentEditorActive || getToken() !== requestToken || environmentEdits[name] !== edit) return
-    if (saved && (patch.value !== undefined || edit.value === undefined)) delete environmentEdits[name]
-    else if (failure) edit.failure = failure
+    if (!environmentEditorActive || getToken() !== requestToken) return
+    if (failure?.reasonCode === BOARD_ITEM_EDIT_OUTCOME_UNKNOWN) {
+      environmentSaveWarning.value = failure.cause ?? t('app.environmentSaveOutcomeUnknownRefreshFailed')
+      return
+    }
+    if (environmentEdits[name] !== edit) return
+    environmentSaveWarning.value = ''
+    if (saved && (patch.value !== undefined || edit.value === undefined)) {
+      delete environmentEdits[name]
+    } else if (saved && edit.expected?.value === expected.value
+      && edit.expected.trust === expected.trust && edit.expected.privacy === expected.privacy) {
+      // A confirmed label-only save advances a value draft that shared its baseline.
+      edit.expected = { ...expected, ...desired }
+    } else if (failure) {
+      if (patch.value === undefined && failure.reasonCode === 'ENVIRONMENT_VARIABLE_STALE') {
+        environmentSaveWarning.value = failure.cause ?? t('app.environmentVariableStaleRefreshFailed')
+      } else {
+        edit.failure = failure
+      }
+    }
   })
 }
 
@@ -651,6 +674,7 @@ const displayRules = computed(() => {
 
     return {
       originalId: rule.id, // 保留原始id用于删除操作
+      deletionWarning: rule.id && props.deletionWarning?.('rule', rule.id),
       executionOrder: index + 1,
       isFirst: index === 0,
       isLast: index === props.rules.length - 1,
@@ -685,6 +709,7 @@ const displaySpecs = computed(() => {
 
     return {
       id: spec.id,
+      deletionWarning: props.deletionWarning?.('spec', spec.id),
       type: spec.name,
       formula: preview.expression,
       formulaKind: preview.kind,
@@ -754,10 +779,6 @@ const filteredSectionCount = computed(() => {
   }
 })
 
-const clearSectionSearch = (section: InspectorSection) => {
-  sectionSearch[section] = ''
-}
-
 const inspectorTabs = computed(() => [
   {
     id: 'devices' as const,
@@ -799,9 +820,12 @@ const handleDeleteRule = (ruleId: string) => {
 }
 
 const handleMoveRule = (ruleId: string, direction: 'up' | 'down') => {
-  if (!ensureWritable() || props.rulesReordering || sectionSearch.rules) return
+  if (!ensureWritable() || props.rulesReordering || props.ruleOrderBlockedReason || sectionSearch.rules) return
   emit('move-rule', ruleId, direction)
 }
+
+const ruleOrderHelpId = computed(() => props.ruleOrderBlockedReason
+  ? 'inspector-rule-order-unconfirmed' : sectionSearch.rules ? 'inspector-rule-order-blocked' : undefined)
 
 const handleAddRule = () => {
   if (!ensureWritable()) return
@@ -940,17 +964,10 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
             </span>
           </div>
           <p v-if="environmentVariables.length" class="board-caption board-text-muted mb-2">{{ t('app.environmentInspectorHint') }}</p>
-        <label class="board-inventory-search relative block">
-          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
-          <input v-model="sectionSearch.environment" data-testid="inspector-search-environment"
-            type="search" class="board-field board-field--clearable pl-8 pr-12"
-            :placeholder="t('app.searchEnvironmentVariables')" :aria-label="t('app.searchEnvironmentVariables')" />
-          <HintTooltip v-if="sectionSearch.environment" :content="t('app.clearSearch')">
-            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('environment')">
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </label>
+          <p v-if="environmentSaveWarning" data-testid="environment-save-unconfirmed" role="status"
+            class="board-caption board-text-warning mb-2">{{ environmentSaveWarning }}</p>
+        <InventorySearch v-model="sectionSearch.environment" test-id="inspector-search-environment"
+          :label="t('app.searchEnvironmentVariables')" />
           <div class="board-inventory-list">
             <article v-for="variable in filteredEnvironmentVariables" :key="variable.name"
               :data-environment-name="variable.name" class="board-inventory-card">
@@ -1006,7 +1023,7 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
                     :disabled="props.readOnly || props.environmentSaving || !variable.editable"
                     :aria-busy="props.environmentSaving ? 'true' : undefined"
                     class="board-field mt-1"
-                    @input="editEnvironmentValue(variable.name, eventValue($event))"
+                    @input="editEnvironmentValue(variable, eventValue($event))"
                     @change="updateEnvironmentVariable(variable.name, { value: eventValue($event) })"
                   />
                   <div
@@ -1118,17 +1135,8 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
             </button>
           </HintTooltip>
         </div>
-        <label class="board-inventory-search relative block">
-          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
-          <input v-model="sectionSearch.devices" data-testid="inspector-search-devices"
-            type="search" class="board-field board-field--clearable pl-8 pr-12"
-            :placeholder="t('app.searchDevice')" :aria-label="t('app.searchDevice')" />
-          <HintTooltip v-if="sectionSearch.devices" :content="t('app.clearSearch')">
-            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('devices')">
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </label>
+        <InventorySearch v-model="sectionSearch.devices" test-id="inspector-search-devices"
+          :label="t('app.searchDevice')" />
         <div class="board-inventory-list">
           <article v-for="device in filteredDevices" :key="device.id" :data-device-id="device.id"
             class="board-inventory-card board-device-row" :class="{ 'is-focused': device.id === props.focusedDeviceId }">
@@ -1173,19 +1181,12 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
             </button>
           </HintTooltip>
         </div>
-        <label class="board-inventory-search relative block">
-          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
-          <input v-model="sectionSearch.rules" data-testid="inspector-search-rules"
-            type="search" class="board-field board-field--clearable pl-8 pr-12"
-            :placeholder="t('app.searchRules')" :aria-label="t('app.searchRules')" />
-          <HintTooltip v-if="sectionSearch.rules" :content="t('app.clearSearch')">
-            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('rules')">
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </label>
+        <InventorySearch v-model="sectionSearch.rules" test-id="inspector-search-rules"
+          :label="t('app.searchRules')" />
         <p v-if="displayRules.length > 1" data-testid="rule-execution-order-hint" class="board-caption board-text-muted mb-2">{{ t('app.ruleExecutionOrderHint') }}</p>
-        <p v-if="sectionSearch.rules && displayRules.length > 1" id="inspector-rule-order-blocked" class="board-caption board-text-muted mb-2">{{ t('app.ruleOrderSearchDisabled') }}</p>
+        <p v-if="props.ruleOrderBlockedReason" id="inspector-rule-order-unconfirmed" data-testid="rule-order-unconfirmed"
+          role="status" class="board-caption board-text-warning mb-2">{{ props.ruleOrderBlockedReason }}</p>
+        <p v-else-if="sectionSearch.rules && displayRules.length > 1" id="inspector-rule-order-blocked" class="board-caption board-text-muted mb-2">{{ t('app.ruleOrderSearchDisabled') }}</p>
         <div class="board-inventory-list">
           <article v-for="rule in filteredRules" :key="rule.originalId" :data-rule-id="rule.originalId" tabindex="-1"
             class="board-inventory-card" :class="{ 'is-focused': rule.originalId === props.focusedRuleId }">
@@ -1214,6 +1215,10 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
                 <dd data-testid="inspector-rule-content-source">{{ rule.contentSource }}</dd>
               </div>
             </dl>
+            <p v-if="rule.deletionWarning && rule.originalId" :id="deletionWarningId('rule', rule.originalId)"
+              data-testid="rule-delete-unconfirmed" role="status" class="board-caption board-text-warning">
+              {{ rule.deletionWarning }}
+            </p>
             <div class="board-inventory-footer board-rule-actions">
               <HintTooltip :content="mutationTitle(t('app.editRule'))">
                 <button type="button" class="board-panel-icon-action" :data-testid="`edit-rule-${rule.originalId}`"
@@ -1225,23 +1230,25 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
               <div class="board-rule-order-actions" role="group" :aria-label="t('app.ruleExecutionOrder')">
                 <HintTooltip :content="mutationTitle(sectionSearch.rules ? t('app.ruleOrderSearchDisabled') : t('app.moveRuleEarlier'))">
                   <button type="button" class="board-panel-icon-action" :aria-label="t('app.moveRuleEarlier')"
-                    :disabled="props.readOnly || props.rulesReordering || !!sectionSearch.rules || rule.isFirst"
-                    :aria-describedby="sectionSearch.rules ? 'inspector-rule-order-blocked' : undefined"
+                    :disabled="props.readOnly || props.rulesReordering || !!ruleOrderHelpId || rule.isFirst"
+                    :aria-describedby="ruleOrderHelpId"
                     @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'up')">
                     <span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span>
                   </button>
                 </HintTooltip>
                 <HintTooltip :content="mutationTitle(sectionSearch.rules ? t('app.ruleOrderSearchDisabled') : t('app.moveRuleLater'))">
                   <button type="button" class="board-panel-icon-action" :aria-label="t('app.moveRuleLater')"
-                    :disabled="props.readOnly || props.rulesReordering || !!sectionSearch.rules || rule.isLast"
-                    :aria-describedby="sectionSearch.rules ? 'inspector-rule-order-blocked' : undefined"
+                    :disabled="props.readOnly || props.rulesReordering || !!ruleOrderHelpId || rule.isLast"
+                    :aria-describedby="ruleOrderHelpId"
                     @click.stop="rule.originalId && handleMoveRule(rule.originalId, 'down')">
                     <span class="material-symbols-outlined" aria-hidden="true">arrow_downward</span>
                   </button>
                 </HintTooltip>
               </div>
               <HintTooltip :content="mutationTitle(t('app.deleteRule'))">
-                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
+                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger"
+                  :disabled="props.readOnly || !!rule.deletionWarning"
+                  :aria-describedby="rule.deletionWarning && rule.originalId ? deletionWarningId('rule', rule.originalId) : undefined"
                   :aria-label="t('app.deleteRule')" @click.stop="rule.originalId && handleDeleteRule(rule.originalId)">
                   <span class="material-symbols-outlined" aria-hidden="true">delete</span>
                 </button>
@@ -1273,17 +1280,8 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
           </HintTooltip>
         </div>
         <p class="board-caption board-text-muted mb-2">{{ t('household.requirementsMeaning') }}</p>
-        <label class="board-inventory-search relative block">
-          <span class="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm board-text-muted" aria-hidden="true">search</span>
-          <input v-model="sectionSearch.specs" data-testid="inspector-search-specs"
-            type="search" class="board-field board-field--clearable pl-8 pr-12"
-            :placeholder="t('app.searchSpecifications')" :aria-label="t('app.searchSpecifications')" />
-          <HintTooltip v-if="sectionSearch.specs" :content="t('app.clearSearch')">
-            <button type="button" class="board-field-clear" :aria-label="t('app.clearSearch')" @click="clearSectionSearch('specs')">
-              <span class="material-symbols-outlined text-sm" aria-hidden="true">close</span>
-            </button>
-          </HintTooltip>
-        </label>
+        <InventorySearch v-model="sectionSearch.specs" test-id="inspector-search-specs"
+          :label="t('app.searchSpecifications')" />
         <div class="board-inventory-list">
           <article v-for="spec in filteredSpecs" :key="spec.id" :data-spec-id="spec.id" tabindex="-1"
             class="board-inventory-card" :class="{ 'is-focused': spec.id === props.focusedSpecId }">
@@ -1299,6 +1297,10 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
               <span v-for="entry in spec.variableSourceLabels" :key="entry.key" class="board-inventory-chip board-caption"
                 :class="{ 'board-chip-danger': entry.unresolved }" data-testid="inspector-spec-variable-source">{{ entry.label }}</span>
             </div>
+            <p v-if="spec.deletionWarning" :id="deletionWarningId('spec', spec.id)"
+              data-testid="spec-delete-unconfirmed" role="status" class="board-caption board-text-warning">
+              {{ spec.deletionWarning }}
+            </p>
             <div class="board-inventory-footer">
               <details class="spec-formula-disclosure" data-testid="inspector-spec-formula-details">
                 <summary class="board-caption board-text-muted">
@@ -1309,7 +1311,9 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
                 <p class="board-caption board-formula-preview font-mono board-text-muted" :data-full-text="spec.formula" data-testid="inspector-spec-formula">{{ spec.formula }}</p>
               </details>
               <HintTooltip :content="mutationTitle(t('app.deleteSpecification'))">
-                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger" :disabled="props.readOnly"
+                <button type="button" class="board-panel-icon-action board-panel-icon-action--danger"
+                  :disabled="props.readOnly || !!spec.deletionWarning"
+                  :aria-describedby="spec.deletionWarning ? deletionWarningId('spec', spec.id) : undefined"
                   :aria-label="t('app.deleteSpecification')" @click="handleDeleteSpec(spec.id)">
                   <span class="material-symbols-outlined" aria-hidden="true">delete</span>
                 </button>
@@ -1356,7 +1360,8 @@ const syncFullTextTitle = (event: PointerEvent | FocusEvent) => {
 }
 
 /* Material Symbols font */
-.material-symbols-outlined {
+.material-symbols-outlined,
+:deep(:where(.board-inventory-search) .material-symbols-outlined) {
   font-family: 'Material Symbols Outlined';
 }
 </style>

@@ -17,21 +17,14 @@ import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.FixStrategyApplier;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ParameterAdjustStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.RemoveRulesFixStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvDeviceModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvMainModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWriter;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
 import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
-import cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport;
 import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.configure.FixConfig;
 import cn.edu.nju.Iot_Verify.configure.JwtConfig;
-import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
-import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixResultDto;
@@ -44,14 +37,11 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.exception.BaseException;
 import cn.edu.nju.Iot_Verify.exception.SmvGenerationException;
-import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
-import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
 import cn.edu.nju.Iot_Verify.service.FixSuggestionTokenService;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -65,10 +55,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 
+import static cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport.importRules;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.USER_ID;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.allStrategyFixer;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.assumeAvailableNusmvPath;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.buildExecutor;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.buildGenerator;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readDevices;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readEnvironment;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readSpecs;
 import static cn.edu.nju.Iot_Verify.dto.RequestLimits.MAX_RULE_CONDITIONS;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -77,14 +75,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class AcceptanceDemoScenarioNusmvTest {
 
-    private static final long USER_ID = 1L;
     private static final Path SCENE_PATH =
             Path.of("..", "docs", "examples", "acceptance-demo-scene.json");
     private static final Path CLIMATE_SCENE_PATH =
@@ -94,9 +87,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void standaloneAutonomousWriterSetsThePoolValueInNuSmv() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to verify a standalone autonomous write");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to verify a standalone autonomous write");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {
@@ -141,9 +132,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void competingSharedAssignmentsUseCanonicalDeviceIdAndTemplateTransitionOrder() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check shared write precedence");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check shared write precedence");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {
@@ -193,9 +182,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void localAssignmentDoesNotOverrideTheSharedClockRollover() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this environment transition regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this environment transition regression");
 
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode clock = (ObjectNode) mapper.readTree(Files.readString(
@@ -252,9 +239,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     private void assertNumericRateStep(boolean local, int lower, int upper, int initial,
                                        String drift, List<String> dynamics, int expected) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check numeric saturation");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check numeric saturation");
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = mapper.createObjectNode();
         var templates = scene.putArray("templates");
@@ -304,9 +289,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void signedAsciiTransitionLiteralsExecuteInNuSmv() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check admitted signed literals");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check admitted signed literals");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"counter_1","templateName":"Counter",
@@ -332,9 +315,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void frozenModeModelRejectsAnExactEnumCollisionAndKeepsCaseDistinctValues() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check case-distinct symbol use");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check case-distinct symbol use");
         ObjectMapper mapper = new ObjectMapper();
         assertModeAndEnumStayDistinctInNuSmv(mapper, nusmvPath, modeEnumSnapshot(mapper, "_next", false), "light_1");
 
@@ -346,9 +327,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void frozenBoardRejectsAnEnumCollisionBetweenDevicesInBothEngines() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to verify the separate-device enum control");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to verify the separate-device enum control");
         ObjectMapper mapper = new ObjectMapper();
         assertModeAndEnumStayDistinctInNuSmv(mapper, nusmvPath, modeEnumSnapshot(mapper, "_next", true), "sensor_1");
         var snapshot = modeEnumSnapshot(mapper, "_Next", true);
@@ -427,9 +406,7 @@ class AcceptanceDemoScenarioNusmvTest {
     })
     void optionalNamespaceCollisionOnlyAppliesToARunThatEmitsTheSymbol(
             String mode, String literal, String collisionName, boolean privacy) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check names with the model options disabled");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check names with the model options disabled");
         ObjectMapper mapper = new ObjectMapper();
         var base = modeEnumSnapshot(mapper, literal, true);
         DeviceManifest lamp = base.templateManifests().get("Light Control");
@@ -464,9 +441,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void authoredModeRuleSelectsTheSameFirstStepInBothEngines() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"light_1","templateName":"Light Control","state":"off"}],
@@ -490,9 +465,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void authoredModeTriggerSelectsTheSameFirstStepInBothEngines() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case"}],
@@ -513,9 +486,7 @@ class AcceptanceDemoScenarioNusmvTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void singleModeWhitespaceUsesTheSameAuthoredStatesInBothEngines(boolean useTemplateInitialState) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         String initialState = useTemplateInitialState ? "ready" : "off";
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
@@ -540,9 +511,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void stateDerivedInitialValuesUseTheSameAuthorityInBothEnginesAndRepair() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         var mapper = new ObjectMapper();
         var scene = mapper.createObjectNode();
         scene.putArray("devices").addObject().put("id", "car_1").put("templateName", "Car").put("state", "away");
@@ -580,9 +549,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void multiModeConditionsResolveAuthoredStatesBeforeEscapingForNuSmv() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case;fan idle"}],
@@ -606,9 +573,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void wildcardMembershipAndItsComplementDriveTheSameTransitionsInBothEngines() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to compare the two engines");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to compare the two engines");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"light_1","templateName":"Light Control","state":"Case;fan idle"}],
@@ -662,9 +627,7 @@ class AcceptanceDemoScenarioNusmvTest {
     @ParameterizedTest
     @ValueSource(strings = {"on;low", "on; low"})
     void derivedLocalValueUsesTheInitialModesRegardlessOfTupleSpacing(String startingState) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the initial tuple regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the initial tuple regression");
         var mapper = new ObjectMapper();
         var scene = (ObjectNode) mapper.readTree("""
                 {"devices":[{"id":"panel","templateName":"Panel"}],
@@ -807,9 +770,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void onlyTheSelectedObservableActionProducesItsPulse() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check observable action identity");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check observable action identity");
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
@@ -858,9 +819,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void apiBooleanSpecificationsAcceptCaseInsensitiveScalarsAndMembership() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check API Boolean literals");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check API Boolean literals");
 
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = mapper.createObjectNode();
@@ -889,9 +848,7 @@ class AcceptanceDemoScenarioNusmvTest {
     @CsvSource({"=, TRUE", "IN, true", "NOT_IN, false"})
     void conditionRepairOffersTheSameApiEventGuardForEquivalentComparisons(String relation, String value)
             throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to verify the event guard");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to verify the event guard");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"lamp_1","templateName":"Ordinary Lamp","state":"dark"},
@@ -930,7 +887,7 @@ class AcceptanceDemoScenarioNusmvTest {
         var fixes = allStrategyFixer(generator, executor, 30_000).fix(
                 818L, safety.getId(), states, rules, devices, List.of(), specs,
                 baseline.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("condition"), 8, Map.of());
+                List.of("condition"), 8, Map.of(), () -> { });
 
         var proposal = listedRepair(fixes, "condition", "the button event guarding the lamp",
                 candidate -> candidate.getConditionAdjustments().size() == 1
@@ -945,9 +902,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void variableWritesPreserveBooleanLikeEnumLiteralCase() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to distinguish case-sensitive enum literals");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to distinguish case-sensitive enum literals");
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
@@ -959,9 +914,9 @@ class AcceptanceDemoScenarioNusmvTest {
                     "ImpactedVariables":["roomFlag"],
                     "InternalVariables":[
                       {"Name":"localFlag","IsInside":true,"FalsifiableWhenCompromised":false,
-                        "Trust":"trusted","Privacy":"public","Values":["True","true"]},
+                        "Trust":"trusted","Privacy":"public","Values":["tr ue","Tr ue"]},
                       {"Name":"roomFlag","IsInside":false,"Reads":true,"FalsifiableWhenCompromised":false,
-                        "Trust":"trusted","Privacy":"public","Values":["True","true"]}],
+                        "Trust":"trusted","Privacy":"public","Values":["tr ue","Tr ue"]}],
                     "WorkingStates":[
                       {"Name":"idle","Trust":"trusted","Privacy":"public",
                         "Dynamics":[{"VariableName":"roomFlag","Value":"True"}]},
@@ -989,6 +944,9 @@ class AcceptanceDemoScenarioNusmvTest {
         var checks = verdictsBySpecId(FormalCheckTestSupport.checkProperties(buildExecutor(nusmvPath), model), model);
         assertTrue(checks.get("local").isPassed());
         assertTrue(checks.get("shared").isPassed());
+        String smv = Files.readString(model.smvFile().toPath());
+        assertTrue(smv.contains("localFlag: {true, True};"), () -> smv);
+        assertTrue(smv.contains("a_roomFlag: {true, True};"), () -> smv);
     }
 
     @Test
@@ -1030,9 +988,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void acceptanceScene_explainsWhyRemovalWouldDisableTheCameraResponse() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this acceptance smoke test");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this acceptance smoke test");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
@@ -1046,7 +1002,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "acceptance");
 
         SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
@@ -1121,7 +1077,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 AttackScenarioDto.none(), true,
                 List.of("remove"),
                 10,
-                Map.of());
+                Map.of(), () -> { });
         assertTriggerPreservationRejected(fixResult);
         assertEquals(1, fixResult.getFaultRules().size(),
                 "The camera violation should localize only the photo automation");
@@ -1133,9 +1089,7 @@ class AcceptanceDemoScenarioNusmvTest {
     }
     @Test
     void coupledClimateThresholds_parameterStrategyFindsClosestSingleChange() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the climate parameter-fix regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the climate parameter-fix regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(CLIMATE_SCENE_PATH));
@@ -1187,7 +1141,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 301L, specs.get(0).getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("parameter"), 20, Map.of());
+                List.of("parameter"), 20, Map.of(), () -> { });
 
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
         assertEquals(1, fixResult.getFaultRules().size());
@@ -1205,7 +1159,7 @@ class AcceptanceDemoScenarioNusmvTest {
                         + suggestion.getParameterAdjustments());
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                "parameter", suggestion, rules, baselineModel.deviceSmvMap());
+                "parameter", suggestion, rules, Map.of(), Map.of());
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1213,16 +1167,14 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
         assertEquals(specs.size(), repaired.getSpecResults().size());
-        assertFalse(repaired.hasAnyViolation(),
+        assertEquals(0, violationCount(repaired),
                 "The parameter suggestion must satisfy both sides of the climate boundary");
     }
 
     @ParameterizedTest
     @ValueSource(ints = {MAX_RULE_CONDITIONS - 1, MAX_RULE_CONDITIONS})
     void occupancySafety_conditionStrategySolvesCandidateValueWithinRuleLimit(int conditionCount) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the free condition-value regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the free condition-value regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "17");
@@ -1274,7 +1226,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 304L, occupancySafety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("condition"), 20, Map.of());
+                List.of("condition"), 20, Map.of(), () -> { });
 
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
         assertEquals(1, fixResult.getFaultRules().size());
@@ -1283,7 +1235,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 "occupancy_1", "occupancy_1", "ac_1", "ac_1", "temperature_1", "temperature_1");
         for (FixSuggestionDto candidate : listed(fixResult, "condition")) {
             List<RuleDto> candidateRules = FixStrategyApplier.apply(
-                    "condition", candidate, rules, baselineModel.deviceSmvMap(), persistenceRefs);
+                    "condition", candidate, rules, persistenceRefs, Map.of());
             int repairedConditionCount = candidateRules.get(0).getConditions().size();
             assertTrue(repairedConditionCount <= MAX_RULE_CONDITIONS,
                     () -> "Listed an inapplicable repair with " + repairedConditionCount + " conditions");
@@ -1296,7 +1248,7 @@ class AcceptanceDemoScenarioNusmvTest {
                                 .anyMatch(adjustment -> "remove".equals(adjustment.getAction())));
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                "condition", suggestion, rules, baselineModel.deviceSmvMap(), persistenceRefs);
+                "condition", suggestion, rules, persistenceRefs, Map.of());
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1304,7 +1256,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
         assertEquals(specs.size(), repaired.getSpecResults().size());
-        assertFalse(repaired.hasAnyViolation(),
+        assertEquals(0, violationCount(repaired),
                 "The solved occupied=present guard must repair the complete model");
 
         // Salus §5.2's guard must keep useful heating available when the room is occupied.
@@ -1320,14 +1272,12 @@ class AcceptanceDemoScenarioNusmvTest {
         assertCompleteModel(occupiedModel);
         NusmvExecutor.NusmvResult occupied = FormalCheckTestSupport.checkProperties(executor, occupiedModel);
         assertTrue(occupied.isSuccess(), occupied::getErrorMessage);
-        assertFalse(occupied.hasAnyViolation(), "The repaired rule must still heat the occupied cold room");
+        assertEquals(0, violationCount(occupied), "The repaired rule must still heat the occupied cold room");
     }
 
     @Test
     void combinedClimateSafety_allThreeStrategiesIndependentlyRepairTheSameCounterexample() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the combined three-strategy regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the combined three-strategy regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "30");
@@ -1401,7 +1351,7 @@ class AcceptanceDemoScenarioNusmvTest {
                         .build()))
                 .build();
         List<RuleDto> expectedParameterRules = FixStrategyApplier.apply(
-                "parameter", expectedParameterRepair, rules, baselineModel.deviceSmvMap());
+                "parameter", expectedParameterRepair, rules, Map.of(), Map.of());
         SmvGenerator.GenerateResult expectedParameterModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, expectedParameterRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -1409,7 +1359,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor.NusmvResult expectedParameterVerification =
                 FormalCheckTestSupport.checkProperties(executor, expectedParameterModel);
         assertTrue(expectedParameterVerification.isSuccess(), expectedParameterVerification::getErrorMessage);
-        assertFalse(expectedParameterVerification.hasAnyViolation(),
+        assertEquals(0, violationCount(expectedParameterVerification),
                 "The intended 28-to-37 threshold edit must be a valid, non-duplicate repair before search begins");
 
         FixConfig fixConfig = new FixConfig();
@@ -1428,7 +1378,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 305L, neverUnsafeLowHeat.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
 
         assertTrue(fixResult.isFixable(), fixResult::getSummary);
         assertEquals(3, fixResult.getStrategyAttempts().size());
@@ -1457,7 +1407,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto unknownSpecResult = fixer.fix(
                 306L, "UNKNOWN_SPEC", states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "parameter"));
         assertEquals("SKIPPED_NO_SPEC", attemptStatus(unknownSpecResult, "condition"));
         // Response preservation cannot establish a repair when its target is not attributable.
@@ -1467,9 +1417,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void inverseClimateBoundary_allThreeStrategiesSkipDuplicateAndRepair() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the inverse-boundary fix regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the inverse-boundary fix regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "20");
@@ -1516,7 +1464,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 307L, safety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
 
         strategies.forEach(strategy -> assertVerifiedAttempt(fixResult, strategy));
         listedRepair(fixResult, "parameter",
@@ -1535,9 +1483,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void redundantUnsafeRules_requireJointEditsOrPairRemoval() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the joint-repair regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the joint-repair regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "30");
@@ -1610,7 +1556,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 308L, safety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
 
         assertEquals(Set.of(0), fixResult.getFaultRules().stream()
                 .map(FaultRuleDto::getRuleIndex)
@@ -1639,9 +1585,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void conditionSearch_learnsFromARejectedPathWithoutLosingARepair() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the counterexample-learning regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the counterexample-learning regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "30");
@@ -1733,9 +1677,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void conditionRepairSignsAndAppliesTheAuthoredWildcardSet() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the wildcard repair regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the wildcard repair regression");
 
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(mapper, "30");
@@ -1780,7 +1722,7 @@ class AcceptanceDemoScenarioNusmvTest {
         var fixes = allStrategyFixer(generator, executor, 30_000).fix(
                 traceId, safety.getId(), states, rules, devices, environment, specs,
                 baseline.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("condition"), 8, Map.of());
+                List.of("condition"), 8, Map.of(), () -> { });
         var proposal = listedRepair(fixes, "condition", "the original wildcard set as a trigger",
                 candidate -> candidate.getConditionAdjustments().stream()
                         .anyMatch(change -> "add".equals(change.getAction()) && "state".equals(change.getTargetType())
@@ -1804,9 +1746,7 @@ class AcceptanceDemoScenarioNusmvTest {
     })
     void repairKeepsAGuardWhenDisjointModeWritesCanTriggerConflictingFeedback(
             boolean autonomousFan, String feedbackRelation, String feedbackValue) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for feedback pruning");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for feedback pruning");
 
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = (ObjectNode) mapper.readTree("""
@@ -1900,9 +1840,7 @@ class AcceptanceDemoScenarioNusmvTest {
     @ValueSource(strings = {"quiet-first", "loud-first", "incompatible-quiet", "autonomous-quiet", "raw-blocker",
             "expired-gate", "separate-steps", "complete-guard"})
     void repairUsesSameModeRulePriorityBeforeFollowingACommandOutcome(String scenario) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for competing repair effects");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for competing repair effects");
 
         boolean loudFirst = "loud-first".equals(scenario);
         boolean incompatibleQuiet = "incompatible-quiet".equals(scenario);
@@ -2095,7 +2033,7 @@ class AcceptanceDemoScenarioNusmvTest {
             Map<String, String> persistenceDeviceRefs = baseline.deviceSmvMap().keySet().stream()
                     .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
             var repaired = FixStrategyApplier.apply("condition", independentStartupGuard.orElseThrow(),
-                    rules, baseline.deviceSmvMap(), persistenceDeviceRefs);
+                    rules, persistenceDeviceRefs, Map.of());
             var config = new FuzzEngineConfig(List.of(), 1, 4, 1, 1L);
             for (List<RuleDto> candidate : List.of(rules, repaired)) {
                 var snapshot = new ModelInputSnapshot(List.of(), devices, List.of(), candidate, List.of(safety), manifests);
@@ -2108,9 +2046,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void environmentOnlyViolation_isNotMisreportedAsRuleRepair() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the no-fault-rule regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the no-fault-rule regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(CLIMATE_SCENE_PATH));
@@ -2141,7 +2077,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = allStrategyFixer(generator, executor, 30_000).fix(
                 309L, safety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
 
         assertFalse(fixResult.isFixable());
         assertTrue(fixResult.getFaultRules().isEmpty());
@@ -2152,9 +2088,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void cumulativeClimateRepairs_preserveEarlierRepairsAcrossSharedEnvironmentChanges() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the cumulative shared-environment regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the cumulative shared-environment regression");
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "30");
         ObjectNode occupancyManifest = (ObjectNode) scene.withArray("templates").get(2).path("manifest");
@@ -2222,7 +2156,7 @@ class AcceptanceDemoScenarioNusmvTest {
                     before.get(targetId).getCounterexample(), model.deviceSmvMap(), rules);
             FixResultDto fixes = fixer.fix(320L + round, targetId, states, rules, devices, environment,
                     specs, model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                    List.of(strategies.get(round)), 20, Map.of());
+                    List.of(strategies.get(round)), 20, Map.of(), () -> { });
             assertVerifiedAttempt(fixes, strategies.get(round));
             assertEveryListedAlternativeHolds(fixes.getSuggestions(), targetId, rules, devices,
                     environment, specs, model.deviceSmvMap(), generator, executor);
@@ -2234,7 +2168,7 @@ class AcceptanceDemoScenarioNusmvTest {
             }
             Map<String, String> refs = model.deviceSmvMap().keySet().stream()
                     .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
-            rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, model.deviceSmvMap(), refs);
+            rules = FixStrategyApplier.apply(chosen.getStrategy(), chosen, rules, refs, Map.of());
             SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                     USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
                     SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -2250,9 +2184,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void relayCycle_conditionRepairKeepsBothRelaysReachable() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for feedback-loop repair");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for feedback-loop repair");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree(Files.readString(
                 Path.of("..", "docs", "examples", "relay-cycle-repair-scene.json")));
@@ -2260,7 +2192,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "relay_cycle");
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
@@ -2277,7 +2209,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(hasDeviceState(states, "cooling_relay", "on"));
         FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
                 576L, specs.get(0).getId(), states, rules, devices, environment, specs,
-                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("condition"), 20, Map.of());
+                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("condition"), 20, Map.of(), () -> { });
         assertVerifiedAttempt(fixes, "condition");
         assertTrue(fixes.getSuggestions().stream().allMatch(suggestion ->
                 suggestion.getRemovedRuleDescriptions().isEmpty() && suggestion.getPreexistingViolations().isEmpty()));
@@ -2288,9 +2220,7 @@ class AcceptanceDemoScenarioNusmvTest {
     @ParameterizedTest
     @CsvSource({"false", "true"})
     void cameraChains_listAffordableRepairsWithoutBreakingExistingResponses(boolean forked) throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for complete repair enumeration");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for complete repair enumeration");
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode scene = (ObjectNode) mapper.readTree(Files.readString(
                 Path.of("..", "docs", "examples", forked
@@ -2310,7 +2240,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "entry_camera");
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
@@ -2326,7 +2256,7 @@ class AcceptanceDemoScenarioNusmvTest {
         assertTrue(hasDeviceState(states, "camera_power", "on"), "The chain must actually reach the camera");
         FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
                 575L, specs.get(0).getId(), states, rules, devices, environment, specs,
-                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("remove"), 2, Map.of());
+                model.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false, List.of("remove"), 2, Map.of(), () -> { });
         assertVerifiedAttempt(fixes, "remove");
         Set<Set<Integer>> expected = new HashSet<>();
         for (int a = 1; a <= (forked ? 3 : 6); a++) {
@@ -2349,9 +2279,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void conflictingEmergencyRequirements_cannotBeRepairedByBreakingThePassingRequirement() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for contradictory policy checks");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for contradictory policy checks");
         ObjectMapper mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree(Files.readString(
                 Path.of("..", "docs", "examples", "emergency-policy-conflict-scene.json")));
@@ -2359,7 +2287,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "emergency_conflict");
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
@@ -2376,7 +2304,7 @@ class AcceptanceDemoScenarioNusmvTest {
                         && hasDeviceState(List.of(state), "kitchen_alarm", "on"));
         FixResultDto fixes = allStrategyFixer(generator, executor, 60_000).fix(
                 550L, target, states, rules, devices, environment, specs, model.deviceSmvMap(),
-                USER_ID, AttackScenarioDto.none(), false, List.of("parameter", "condition", "remove"), 20, Map.of());
+                USER_ID, AttackScenarioDto.none(), false, List.of("parameter", "condition", "remove"), 20, Map.of(), () -> { });
         System.out.println("EMERGENCY_CONFLICT attempts=" + fixes.getStrategyAttempts());
         assertFalse(fixes.isFixable());
         assertTrue(fixes.getSuggestions().isEmpty());
@@ -2435,9 +2363,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void salusVentilationThreshold_repairsAnIdleRuleBeforeTheEnvironmentCrossesTheLimit() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the Salus section 5.1 regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the Salus section 5.1 regression");
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(
                 Path.of("..", "docs", "examples", "salus-ventilation-repair-scene.json")));
@@ -2445,7 +2371,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "salus_ventilation");
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
                 USER_ID, devices, environment, rules, specs, AttackScenarioDto.none(), false,
@@ -2465,7 +2391,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
         FixResultDto result = allStrategyFixer(generator, executor, 30_000).fix(
                 315L, specs.get(0).getId(), states, rules, devices, environment, specs, model.deviceSmvMap(),
-                USER_ID, AttackScenarioDto.none(), false, List.of("parameter"), 20, Map.of());
+                USER_ID, AttackScenarioDto.none(), false, List.of("parameter"), 20, Map.of(), () -> { });
 
         assertVerifiedAttempt(result, "parameter");
         listedRepair(result, "parameter", "the ventilation threshold moved earlier, without deleting the fan rule",
@@ -2481,9 +2407,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void upperDomainBoundary_parameterNoFixDoesNotBlockConditionOrRemoval() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the upper-domain fix regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the upper-domain fix regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "100");
@@ -2521,7 +2445,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = allStrategyFixer(generator, executor, 10_000).fix(
                 310L, safety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                strategies, 20, Map.of());
+                strategies, 20, Map.of(), () -> { });
 
         assertEquals("NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE", attemptStatus(fixResult, "parameter"));
         assertVerifiedAttempt(fixResult, "condition");
@@ -2537,9 +2461,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void strictUpperBoundary_parameterRepairMakesRuleUnreachableAndStillVerifies() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the strict-boundary fix regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the strict-boundary fix regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         ObjectNode scene = withOccupancySensor(objectMapper, "100");
@@ -2576,7 +2498,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = allStrategyFixer(generator, executor, 20_000).fix(
                 311L, safety.getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("parameter"), 20, Map.of());
+                List.of("parameter"), 20, Map.of(), () -> { });
 
         assertVerifiedAttempt(fixResult, "parameter");
         FixSuggestionDto parameter = listedRepair(fixResult, "parameter", "rule 0's > 99 moved to > 100",
@@ -2598,9 +2520,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void fireEvacuationOverconstrainedDoorRule_conditionStrategyRepairsResponseChain() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the fire condition-fix regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the fire condition-fix regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(FIRE_SCENE_PATH));
@@ -2657,7 +2577,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 302L, specs.get(0).getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), false,
-                List.of("condition"), 20, Map.of());
+                List.of("condition"), 20, Map.of(), () -> { });
 
         FixSuggestionDto suggestion = listedRepair(fixResult, "condition",
                 "the over-constrained door rule losing one condition",
@@ -2666,21 +2586,19 @@ class AcceptanceDemoScenarioNusmvTest {
                                 && "remove".equals(adjustment.getAction())));
 
         List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                "condition", suggestion, rules, baselineModel.deviceSmvMap());
+                "condition", suggestion, rules, Map.of(), Map.of());
         SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                 USER_ID, devices, environment, repairedRules, specs,
                 AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION);
         NusmvExecutor.NusmvResult repaired = FormalCheckTestSupport.checkProperties(executor, repairedModel);
         assertTrue(repaired.isSuccess(), repaired::getErrorMessage);
-        assertFalse(repaired.hasAnyViolation(),
+        assertEquals(0, violationCount(repaired),
                 "The condition suggestion must repair the complete evacuation response chain");
     }
 
     @Test
     void budgetOneAttack_rejectsRemovalThatDisablesTheCameraResponse() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for the attacked repair regression");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for the attacked repair regression");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
@@ -2688,7 +2606,7 @@ class AcceptanceDemoScenarioNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "attacked-repair");
 
         SmvGenerator.GenerateResult attackedModel = generator.generateWithEnvironment(
@@ -2718,7 +2636,7 @@ class AcceptanceDemoScenarioNusmvTest {
         FixResultDto fixResult = fixer.fix(
                 303L, specs.get(0).getId(), states, rules, devices, environment, specs,
                 attackedModel.deviceSmvMap(), USER_ID, AttackScenarioDto.anyUpToBudget(1), true,
-                List.of("remove"), 10, Map.of());
+                List.of("remove"), 10, Map.of(), () -> { });
 
         assertTriggerPreservationRejected(fixResult);
         // The same-budget candidate passes its formulas by disabling the only photo source.
@@ -2814,21 +2732,6 @@ class AcceptanceDemoScenarioNusmvTest {
                         && "present".equalsIgnoreCase(adjustment.getValue()));
     }
 
-    private RuleFixer allStrategyFixer(
-            SmvGenerator generator, NusmvExecutor executor, int timeoutMs) {
-        FixConfig fixConfig = new FixConfig();
-        fixConfig.setFixTimeoutMs(timeoutMs);
-        fixConfig.setMaxRefineAttempts(20);
-        fixConfig.setMaxCandidatesPerRule(5);
-        return new RuleFixer(
-                new FaultLocalizer(),
-                List.of(
-                        new ParameterAdjustStrategy(generator, executor, fixConfig),
-                        new ConditionAdjustStrategy(generator, executor, fixConfig),
-                        new RemoveRulesFixStrategy(generator, executor)),
-                fixConfig);
-    }
-
     /**
      * Every listed alternative, applied on its own, must satisfy the target and leave violated exactly the
      * specifications it reports as pre-existing — the user may choose any of them, not only the one a
@@ -2862,7 +2765,7 @@ class AcceptanceDemoScenarioNusmvTest {
                 .collect(java.util.stream.Collectors.toMap(ref -> ref, ref -> ref));
         for (FixSuggestionDto suggestion : suggestions) {
             List<RuleDto> repairedRules = FixStrategyApplier.apply(
-                    suggestion.getStrategy(), suggestion, originalRules, deviceSmvMap, persistenceDeviceRefs);
+                    suggestion.getStrategy(), suggestion, originalRules, persistenceDeviceRefs, Map.of());
             SmvGenerator.GenerateResult repairedModel = generator.generateWithEnvironment(
                     USER_ID, devices, environment, repairedRules, specs,
                     AttackScenarioDto.none(), enablePrivacy, SmvGenerator.GeneratePurpose.VERIFICATION);
@@ -3021,9 +2924,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void composedModeLabelsThatChangeFormalVerdictsInvalidateRepairEvidence() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check two-mode labels");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check two-mode labels");
         var mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"fan_1","templateName":"Room Fan","state":"off;high"}],
@@ -3057,9 +2958,7 @@ class AcceptanceDemoScenarioNusmvTest {
 
     @Test
     void quotedAuthoredStateDiffersFromNumericLookingStateInRepairEvidence() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required to check distinct authored states");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required to check distinct authored states");
         var mapper = new ObjectMapper();
         JsonNode scene = mapper.readTree("""
                 {"devices":[{"id":"dial_1","templateName":"Room Dial","state":"30"}],
@@ -3120,145 +3019,10 @@ class AcceptanceDemoScenarioNusmvTest {
         return condition;
     }
 
-    private SmvGenerator buildGenerator(ObjectMapper objectMapper, JsonNode scene) throws Exception {
-        Map<String, String> manifests = new java.util.LinkedHashMap<>();
-        for (JsonNode template : scene.path("templates")) {
-            manifests.put(template.path("name").asText(),
-                    objectMapper.writeValueAsString(template.path("manifest")));
-        }
-
-        SmvModelValidator modelValidator = new SmvModelValidator();
-        DeviceTemplateService templateService = mock(DeviceTemplateService.class);
-        when(templateService.findTemplateByName(anyLong(), anyString())).thenAnswer(invocation -> {
-            String templateName = invocation.getArgument(1, String.class);
-            String manifest = manifests.get(templateName);
-            if (manifest == null) {
-                return Optional.empty();
-            }
-            return Optional.of(DeviceTemplatePo.builder()
-                    .id(100L)
-                    .userId(USER_ID)
-                    .name(templateName)
-                    .manifestJson(manifest)
-                    .defaultTemplate(true)
-                    .build());
-        });
-
-        DeviceSmvDataFactory factory = new DeviceSmvDataFactory(
-                objectMapper,
-                templateService,
-                modelValidator,
-                new DeviceTemplateSchemaValidator(objectMapper));
-        return new SmvGenerator(
-                factory,
-                new SmvDeviceModuleBuilder(),
-                new SmvRuleCommentWriter(),
-                new SmvMainModuleBuilder(),
-                new SmvSpecificationBuilder(),
-                modelValidator);
-    }
-
-    private NusmvExecutor buildExecutor(String nusmvPath) {
-        NusmvConfig config = new NusmvConfig();
-        config.setPath(nusmvPath);
-        config.setCommandPrefix("");
-        config.setTimeoutMs(120_000);
-        config.setMaxConcurrent(2);
-        config.setAcquirePermitTimeoutMs(10_000);
-        return new NusmvExecutor(config);
-    }
-
-    private List<DeviceVerificationDto> readDevices(JsonNode scene) {
-        List<DeviceVerificationDto> devices = new ArrayList<>();
-        for (JsonNode row : scene.path("devices")) {
-            DeviceVerificationDto device = new DeviceVerificationDto();
-            device.setVarName(row.path("id").asText());
-            device.setDeviceLabel(row.path("label").asText());
-            device.setTemplateName(row.path("templateName").asText());
-            device.setState(textOrNull(row, "state"));
-            device.setCurrentStateTrust(textOrNull(row, "currentStateTrust"));
-            device.setCurrentStatePrivacy(textOrNull(row, "currentStatePrivacy"));
-            device.setVariables(readVariables(row.path("variables")));
-            device.setPrivacies(readPrivacies(row.path("privacies")));
-            devices.add(device);
-        }
-        return devices;
-    }
-
-    private List<BoardEnvironmentVariableDto> readEnvironment(JsonNode scene) {
-        List<BoardEnvironmentVariableDto> environment = new ArrayList<>();
-        for (JsonNode row : scene.path("environmentVariables")) {
-            environment.add(new BoardEnvironmentVariableDto(
-                    row.path("name").asText(),
-                    row.path("value").asText(),
-                    row.path("trust").asText(),
-                    row.path("privacy").asText()));
-        }
-        return environment;
-    }
-
-    private List<RuleDto> readRules(JsonNode scene) {
-        return PortableSceneTestImport.importRules(scene);
-    }
-
-    private List<SpecificationDto> readSpecs(
-            JsonNode scene,
-            List<DeviceVerificationDto> devices,
-            String idPrefix) {
-        return PortableSceneTestImport.importSpecs(scene, idPrefix, labelsByDeviceId(devices));
-    }
-
-    private Map<String, String> labelsByDeviceId(List<DeviceVerificationDto> devices) {
-        return devices.stream().collect(java.util.stream.Collectors.toMap(
-                DeviceVerificationDto::getVarName,
-                DeviceVerificationDto::getDeviceLabel));
-    }
-
-    private List<VariableStateDto> readVariables(JsonNode rows) {
-        List<VariableStateDto> variables = new ArrayList<>();
-        if (!rows.isArray()) {
-            return variables;
-        }
-        for (JsonNode row : rows) {
-            variables.add(new VariableStateDto(
-                    row.path("name").asText(),
-                    row.path("value").asText(),
-                    textOrNull(row, "trust")));
-        }
-        return variables;
-    }
-
-    private List<PrivacyStateDto> readPrivacies(JsonNode rows) {
-        List<PrivacyStateDto> privacies = new ArrayList<>();
-        if (!rows.isArray()) {
-            return privacies;
-        }
-        for (JsonNode row : rows) {
-            privacies.add(new PrivacyStateDto(
-                    row.path("name").asText(),
-                    row.path("privacy").asText()));
-        }
-        return privacies;
-    }
-
-    private String textOrNull(JsonNode row, String field) {
-        JsonNode value = row.get(field);
-        return value == null || value.isNull() || value.asText().isBlank() ? null : value.asText();
-    }
-
     private boolean hasDeviceState(List<TraceStateDto> states, String deviceId, String expectedState) {
         return states.stream()
                 .flatMap(state -> state.getDevices().stream())
                 .anyMatch(device -> deviceId.equals(device.getDeviceId())
                         && expectedState.equals(device.getState()));
-    }
-
-    private static String resolveNusmvPath() {
-        String env = System.getenv("NUSMV_PATH");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
-        return Files.exists(bundled) ? bundled.toString() : "NuSMV";
     }
 }

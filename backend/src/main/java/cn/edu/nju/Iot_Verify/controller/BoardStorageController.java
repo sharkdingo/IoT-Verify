@@ -47,6 +47,7 @@ import cn.edu.nju.Iot_Verify.dto.rule.DuplicateRuleCheckResultDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleUpdateRequestDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleOrderRequestDto;
+import cn.edu.nju.Iot_Verify.dto.rule.RuleSimilarityBatchRequestDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleSimilarityResultDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationUpdateRequestDto;
@@ -81,6 +82,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 @Slf4j
 @Validated
@@ -428,19 +430,9 @@ public class BoardStorageController {
     public Result<RecommendationResponseDto<RuleRecommendationDto>> recommendRules(
             @CurrentUser Long userId,
             @NotNull @Valid @RequestBody StandaloneRecommendationRequestDto requestBody) {
-        String requestId = requestBody.getRequestId();
-        return interactiveAiExecutionService.execute(userId, requestId, () -> {
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.PREPARING_CONTEXT);
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.REQUESTING_MODEL);
-            RecommendationResponseDto<RuleRecommendationDto> response = ruleRecommendationService.recommend(
-                    userId, requestBody.getMaxRecommendations(), requestBody.getLanguage(),
-                    requestBody.getUserRequirement());
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.VALIDATING_RESULT);
-            return Result.success(response);
-        });
+        return executeRecommendation(userId, requestBody.getRequestId(),
+                () -> ruleRecommendationService.recommend(userId, requestBody.getMaxRecommendations(),
+                        requestBody.getLanguage(), requestBody.getUserRequirement()));
     }
 
     /**
@@ -458,19 +450,9 @@ public class BoardStorageController {
             @Pattern(regexp = RequestLimits.REQUEST_ID_PATTERN,
                     message = "Request ID contains unsupported characters") String requestId,
             @NotNull @Valid @RequestBody DeviceRecommendationRequestDto requestBody) {
-
-        return interactiveAiExecutionService.execute(userId, requestId, () -> {
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.PREPARING_CONTEXT);
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.REQUESTING_MODEL);
-            RecommendationResponseDto<DeviceRecommendationDto> response = deviceRecommendationService.recommend(
-                    userId, requestBody.getMaxRecommendations(), requestBody.getLanguage(),
-                    requestBody.getUserRequirement());
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.VALIDATING_RESULT);
-            return Result.success(response);
-        });
+        return executeRecommendation(userId, requestId,
+                () -> deviceRecommendationService.recommend(userId, requestBody.getMaxRecommendations(),
+                        requestBody.getLanguage(), requestBody.getUserRequirement()));
     }
 
     /**
@@ -498,20 +480,9 @@ public class BoardStorageController {
     public Result<RecommendationResponseDto<SpecificationRecommendationDto>> recommendSpecs(
             @CurrentUser Long userId,
             @NotNull @Valid @RequestBody StandaloneRecommendationRequestDto requestBody) {
-        String requestId = requestBody.getRequestId();
-        return interactiveAiExecutionService.execute(userId, requestId, () -> {
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.PREPARING_CONTEXT);
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.REQUESTING_MODEL);
-            RecommendationResponseDto<SpecificationRecommendationDto> response =
-                    specificationRecommendationService.recommend(
-                            userId, requestBody.getMaxRecommendations(), requestBody.getLanguage(),
-                            requestBody.getUserRequirement());
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.VALIDATING_RESULT);
-            return Result.success(response);
-        });
+        return executeRecommendation(userId, requestBody.getRequestId(),
+                () -> specificationRecommendationService.recommend(userId, requestBody.getMaxRecommendations(),
+                        requestBody.getLanguage(), requestBody.getUserRequirement()));
     }
 
     /**
@@ -526,6 +497,13 @@ public class BoardStorageController {
         return Result.success(ruleCheckService.checkSimilarity(userId, rule));
     }
 
+    @PostMapping("/rules/check-similarity/batch")
+    public Result<List<RuleSimilarityResultDto>> checkRuleSimilarityBatch(
+            @CurrentUser Long userId,
+            @Valid @RequestBody RuleSimilarityBatchRequestDto request) {
+        return Result.success(ruleCheckService.checkSimilarityBatch(userId, request.rules()));
+    }
+
     /**
      * Generate one coupled, importable scene recommendation.
      */
@@ -538,15 +516,16 @@ public class BoardStorageController {
             @Pattern(regexp = RequestLimits.REQUEST_ID_PATTERN,
                     message = "Request ID contains unsupported characters") String requestId,
             @NotNull @Valid @RequestBody ScenarioRecommendationRequestDto requestBody) {
+        return executeRecommendation(userId, requestId,
+                () -> scenarioRecommendationService.recommend(userId, requestBody));
+    }
 
+    private <T> Result<T> executeRecommendation(Long userId, String requestId, Supplier<T> recommendation) {
         return interactiveAiExecutionService.execute(userId, requestId, () -> {
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.PREPARING_CONTEXT);
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.REQUESTING_MODEL);
-            ScenarioRecommendationResponseDto response = scenarioRecommendationService.recommend(userId, requestBody);
-            interactiveAiExecutionService.markStage(
-                    userId, requestId, InteractiveOperationStage.VALIDATING_RESULT);
+            interactiveAiExecutionService.markStage(userId, requestId, InteractiveOperationStage.PREPARING_CONTEXT);
+            interactiveAiExecutionService.markStage(userId, requestId, InteractiveOperationStage.REQUESTING_MODEL);
+            T response = recommendation.get();
+            interactiveAiExecutionService.markStage(userId, requestId, InteractiveOperationStage.VALIDATING_RESULT);
             return Result.success(response);
         });
     }

@@ -18,8 +18,6 @@ export const buildPlaybackEdges = (scene: ModelPlaybackScene): DeviceEdge[] => {
         id: `playback_edge_${rule.id ?? ruleIndex}_${sourceIndex}_${fromNode.id}`,
         from: fromNode.id,
         to: toNode.id,
-        fromLabel: fromNode.label,
-        toLabel: toNode.label,
         fromPos: fromPoint,
         toPos: toPoint,
         fromApi: condition.attribute,
@@ -28,8 +26,7 @@ export const buildPlaybackEdges = (scene: ModelPlaybackScene): DeviceEdge[] => {
         relation: condition.relation || '',
         value: condition.value ?? '',
         ruleId: rule.id == null ? undefined : String(rule.id),
-        ruleIndex,
-        sourceIndex
+        ruleIndex
       })
     })
   })

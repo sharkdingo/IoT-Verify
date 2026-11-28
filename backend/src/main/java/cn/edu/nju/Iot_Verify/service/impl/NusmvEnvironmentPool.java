@@ -4,6 +4,7 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
+import cn.edu.nju.Iot_Verify.util.EnvironmentDomainUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -30,7 +31,7 @@ final class NusmvEnvironmentPool {
             BoardEnvironmentVariableDto submittedValue = submittedByName.remove(name);
             String value = submittedValue != null ? trimToNull(submittedValue.getValue()) : null;
             if (value == null) {
-                value = defaultValue(definition);
+                value = trimToNull(EnvironmentDomainUtils.rawDefaultValue(definition));
             }
             String trust = submittedValue != null ? submittedValue.getTrust() : definition.getTrust();
             String privacy = submittedValue != null ? submittedValue.getPrivacy() : definition.getPrivacy();
@@ -63,19 +64,6 @@ final class NusmvEnvironmentPool {
             smv.getSharedDeclarations().forEach(required::putIfAbsent);
         }
         return required;
-    }
-
-    static String defaultValue(DeviceManifest.InternalVariable variable) {
-        if (variable == null) {
-            return null;
-        }
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            return trimToNull(variable.getValues().get(0));
-        }
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
-            return String.valueOf(variable.getLowerBound());
-        }
-        return null;
     }
 
     private static Map<String, BoardEnvironmentVariableDto> toMap(List<BoardEnvironmentVariableDto> variables) {

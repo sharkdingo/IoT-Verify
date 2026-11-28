@@ -47,6 +47,8 @@ class SmvTraceParserTest {
         assertEquals("Turn on the hallway light", states.get(1).getTriggeredRules().get(0).getRuleLabel());
         assertEquals("42", states.get(2).getTriggeredRules().get(0).getRuleId());
         assertEquals(1, states.get(2).getTriggeredRules().get(0).getRuleIndex());
+        assertEquals(1, states.get(3).getTriggeredRules().size(),
+                "The final state must contain exactly the carried firing probe");
         assertEquals("42", states.get(3).getTriggeredRules().get(0).getRuleId(),
                 "NuSMV omits unchanged values, so probe state must carry forward");
         assertEquals("41", states.get(0).getCompromisedAutomationLinks().get(0).getRuleId());

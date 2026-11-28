@@ -22,11 +22,6 @@ public final class TemplateNameRule {
     private TemplateNameRule() {
     }
 
-    /** True when the name is safe to store and to compare case-insensitively. */
-    public static boolean isSafe(String name) {
-        return rejectionReason(name) == null;
-    }
-
     /**
      * Why this name is illegal, or {@code null} when it is legal.
      *

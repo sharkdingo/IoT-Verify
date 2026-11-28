@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import FieldSelect from '@/components/common/FieldSelect.vue'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
-import {ref, watch, computed, nextTick, onUnmounted} from 'vue'
+import {ref, reactive, watch, computed, nextTick, onUnmounted} from 'vue'
 import {useI18n} from 'vue-i18n'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
 
@@ -28,6 +28,7 @@ import {
   createDeviceRuntimeDraft,
   findTemplateWorkingState,
   getTemplateLocalVariables,
+  formatDeviceRuntimeVariablePlaceholder,
   getTemplateVariableDefaultValue,
   syncStateDerivedVariables,
   templateVariableIsStateDerived,
@@ -62,7 +63,7 @@ const emit = defineEmits<{
 }>()
 
 const {t} = useI18n()
-const { getToken, isCurrentSessionToken } = useAuth()
+const { state: authState, getToken, isCurrentSessionToken } = useAuth()
 
 const innerVisible = ref(props.visible)
 
@@ -177,6 +178,9 @@ const runtimeSchemaIdentity = computed(() => {
 
 const runtimeDraft = ref(createDeviceRuntimeDraft())
 const runtimeSaveFailure = ref<ApiErrorDetails | null>(null)
+const unconfirmedRuntimeWrites = reactive(new Map<string, { draft: DeviceRuntimeDraft; message: string }>())
+const unconfirmedRuntimeWrite = computed(() => unconfirmedRuntimeWrites.get(props.nodeId ?? ''))
+watch(() => [authState.token, authState.user?.userId], () => unconfirmedRuntimeWrites.clear(), { flush: 'sync' })
 let runtimeSaveEpoch = 0
 let runtimeEditorActive = true
 onUnmounted(() => { runtimeEditorActive = false })
@@ -304,9 +308,7 @@ const runtimeDraftRecordsEqual = (
 }
 
 const runtimeDraftsEqual = (left: DeviceRuntimeDraft, right: DeviceRuntimeDraft) =>
-  runtimeDraftValuesEqual(left.state, right.state)
-  && runtimeDraftValuesEqual(left.currentStateTrust, right.currentStateTrust, true)
-  && runtimeDraftValuesEqual(left.currentStatePrivacy, right.currentStatePrivacy, true)
+  runtimeStateContextsEqual(left, right)
   && runtimeDraftRecordsEqual(left.variables, right.variables)
   && runtimeDraftRecordsEqual(left.variableTrusts, right.variableTrusts, true)
   && runtimeDraftRecordsEqual(left.privacies, right.privacies, true)
@@ -408,18 +410,6 @@ const { setDialogRef, handleModalKeydown } = useModalAccessibility(
   isDialogOpen,
   () => { void requestClose() }
 )
-
-const variableInputPlaceholder = (variable: InternalVariable) => {
-  if (templateVariableUsesNumericBounds(variable)) {
-    const lower = variable.LowerBound ?? '-∞'
-    const upper = variable.UpperBound ?? '∞'
-    const defaultValue = getTemplateVariableDefaultValue(variable)
-    return defaultValue
-      ? `${t('app.useTemplateDefaultWithValue', { value: defaultValue })} / ${lower} - ${upper}`
-      : `${lower} - ${upper}`
-  }
-  return t('app.enterValuePlaceholder')
-}
 
 const createRuntimeDraftFromNode = () => {
   const template = currentTemplate.value
@@ -533,69 +523,32 @@ const reconcileRuntimeDraftFromNode = () => {
   const existingConflicts = new Set(runtimeDraftConflictFields.value)
   const nextConflicts = new Set<string>()
 
-  const mergeValue = (
+  const mergeValue = <T,>(
     path: string,
-    baselineValue = '',
-    currentValue = '',
-    incomingValue = '',
-    submittedValue?: string,
-    acknowledgedValue?: string
-  ) => {
-    const securityLabel = path.startsWith('variableTrusts.') || path.startsWith('privacies.')
-    const valuesEqual = (left: unknown, right: unknown) => runtimeDraftValuesEqual(
-      left,
-      right,
-      securityLabel
-    )
+    read: (draft: DeviceRuntimeDraft) => T,
+    valuesEqual: (left: T, right: T) => boolean
+  ): T => {
+    const current = read(currentDraft)
+    const incoming = read(incomingDraft)
     if (existingConflicts.has(path)) {
-      if (valuesEqual(currentValue, incomingValue)) return incomingValue
+      if (valuesEqual(current, incoming)) return incoming
       nextConflicts.add(path)
-      return currentValue
+      return current
     }
-    if (runtimeSaveSnapshot && valuesEqual(incomingValue, acknowledgedValue)) {
-      // Adopt the server's materialized value when the field is unchanged since Save.
-      // A difference from the submitted draft was typed while the request was in flight.
-      return valuesEqual(currentValue, submittedValue) ? incomingValue : currentValue
+    if (runtimeSaveSnapshot && valuesEqual(incoming, read(runtimeSaveSnapshot.acknowledged))) {
+      // Adopt the materialized value unless the user edited the field after submitting.
+      return valuesEqual(current, read(runtimeSaveSnapshot.submitted)) ? incoming : current
     }
-    if (valuesEqual(currentValue, baselineValue)) return incomingValue
-    if (valuesEqual(incomingValue, baselineValue) || valuesEqual(currentValue, incomingValue)) {
-      return currentValue
-    }
-    nextConflicts.add(path)
-    return currentValue
+    const baseline = read(baselineDraft)
+    if (valuesEqual(current, baseline)) return incoming
+    if (!valuesEqual(incoming, baseline) && !valuesEqual(current, incoming)) nextConflicts.add(path)
+    return current
   }
 
   const mergedDraft = createDeviceRuntimeDraft()
-  const baselineStateContext = runtimeStateContext(baselineDraft)
-  const currentStateContext = runtimeStateContext(currentDraft)
-  const incomingStateContext = runtimeStateContext(incomingDraft)
-  const submittedStateContext = runtimeSaveSnapshot
-    ? runtimeStateContext(runtimeSaveSnapshot.submitted)
-    : null
-  const acknowledgedStateContext = runtimeSaveSnapshot
-    ? runtimeStateContext(runtimeSaveSnapshot.acknowledged)
-    : null
-  let mergedStateContext = currentStateContext
-  if (existingConflicts.has(RUNTIME_STATE_CONTEXT_CONFLICT)) {
-    if (runtimeStateContextsEqual(currentStateContext, incomingStateContext)) {
-      mergedStateContext = incomingStateContext
-    } else {
-      nextConflicts.add(RUNTIME_STATE_CONTEXT_CONFLICT)
-    }
-  } else if (submittedStateContext && acknowledgedStateContext
-    && runtimeStateContextsEqual(incomingStateContext, acknowledgedStateContext)) {
-    mergedStateContext = runtimeStateContextsEqual(currentStateContext, submittedStateContext)
-      ? incomingStateContext
-      : currentStateContext
-  } else if (runtimeStateContextsEqual(currentStateContext, baselineStateContext)) {
-    mergedStateContext = incomingStateContext
-  } else if (runtimeStateContextsEqual(incomingStateContext, baselineStateContext)
-    || runtimeStateContextsEqual(currentStateContext, incomingStateContext)) {
-    mergedStateContext = currentStateContext
-  } else {
-    nextConflicts.add(RUNTIME_STATE_CONTEXT_CONFLICT)
-  }
-  applyRuntimeStateContext(mergedDraft, mergedStateContext)
+  applyRuntimeStateContext(mergedDraft, mergeValue(
+    RUNTIME_STATE_CONTEXT_CONFLICT, runtimeStateContext, runtimeStateContextsEqual
+  ))
 
   for (const field of ['variables', 'variableTrusts', 'privacies'] as const) {
     const names = new Set([
@@ -603,15 +556,9 @@ const reconcileRuntimeDraftFromNode = () => {
       ...Object.keys(currentDraft[field]),
       ...Object.keys(incomingDraft[field])
     ])
+    const valuesEqual = (left: string, right: string) => runtimeDraftValuesEqual(left, right, field !== 'variables')
     for (const name of names) {
-      mergedDraft[field][name] = mergeValue(
-        `${field}.${name}`,
-        baselineDraft[field][name],
-        currentDraft[field][name],
-        incomingDraft[field][name],
-        runtimeSaveSnapshot?.submitted[field][name],
-        runtimeSaveSnapshot?.acknowledged[field][name]
-      )
+      mergedDraft[field][name] = mergeValue(`${field}.${name}`, draft => draft[field][name] ?? '', valuesEqual)
     }
   }
 
@@ -683,6 +630,19 @@ watch(
   { flush: 'post' }
 )
 
+const runtimeRequest = computed(() => currentTemplate.value
+  ? buildDeviceRuntimeConfig(currentTemplate.value, runtimeDraft.value, {
+    includeEmptyCollections: true,
+    variableScope: 'local'
+  }) || {}
+  : {})
+
+const runtimeSaveUnconfirmed = computed(() => {
+  const template = currentTemplate.value
+  const write = unconfirmedRuntimeWrite.value
+  return Boolean(template && write && runtimeDraftsEqual(write.draft, materializeSubmittedRuntimeDraft(template, runtimeRequest.value)))
+})
+
 /**
  * Why the runtime draft cannot be saved yet, or `null` when it is valid. Drives both the save
  * button's disabled state and the inline message beside it, so the reason stays visible while
@@ -694,17 +654,13 @@ const runtimeSaveBlockedReason = computed<string | null>(() => {
   // The schema/field conflict already renders its own detailed panel below.
   if (hasRuntimeDraftConflict.value) return t('app.deviceRuntimeConflictUnresolved')
 
-  const runtime = buildDeviceRuntimeConfig(template, runtimeDraft.value, {
-    includeEmptyCollections: true,
-    variableScope: 'local'
-  }) || {}
-  return validateDeviceRuntimeConfig(template, runtime, t, { variableScope: 'local' }) || null
+  return validateDeviceRuntimeConfig(template, runtimeRequest.value, t, { variableScope: 'local' }) || null
 })
 
 const saveRuntime = () => {
   const template = currentTemplate.value
   const node = currentNode.value
-  if (!template || !node || !props.nodeId) return
+  if (!template || !node || !props.nodeId || props.runtimeSaving || runtimeSaveUnconfirmed.value) return
   // Reported inline by `runtimeSaveBlockedReason`, which also disables the save button.
   if (runtimeSaveBlockedReason.value) return
   runtimeSaveFailure.value = null
@@ -712,18 +668,24 @@ const saveRuntime = () => {
   const requestToken = getToken()
   const submittedDraft = JSON.stringify(runtimeDraft.value)
 
-  const runtime = buildDeviceRuntimeConfig(template, runtimeDraft.value, {
-    includeEmptyCollections: true,
-    variableScope: 'local'
-  }) || {}
+  const runtime = runtimeRequest.value
+  const acknowledged = materializeSubmittedRuntimeDraft(template, runtime)
 
   runtimeSaveSnapshot = {
     submitted: canonicalizeRuntimeDraft(runtimeDraft.value),
-    acknowledged: materializeSubmittedRuntimeDraft(template, runtime)
+    acknowledged
   }
   emit('save-runtime', props.nodeId, runtime, (saved, failure) => {
-    if (!runtimeEditorActive || !isDialogOpen.value || runtimeSaveEpoch !== epoch
-      || !isCurrentSessionToken(requestToken) || JSON.stringify(runtimeDraft.value) !== submittedDraft) return
+    if (!runtimeEditorActive || !isCurrentSessionToken(requestToken)) return
+    if (saved) unconfirmedRuntimeWrites.delete(node.id)
+    if (failure?.reasonCode === 'DEVICE_WRITE_OUTCOME_UNKNOWN') {
+      unconfirmedRuntimeWrites.set(node.id, {
+        draft: acknowledged,
+        message: failure.cause ?? t('app.deviceWriteOutcomeUnknown')
+      })
+      return
+    }
+    if (!isDialogOpen.value || runtimeSaveEpoch !== epoch || JSON.stringify(runtimeDraft.value) !== submittedDraft) return
     if (!saved && failure) runtimeSaveFailure.value = failure
   })
   void nextTick(() => {
@@ -1135,8 +1097,9 @@ const deviceSpecs = computed(() => {
                       type="button"
                       data-testid="device-runtime-save"
                       @click="saveRuntime"
-                      :disabled="runtimeSaving || Boolean(runtimeSaveBlockedReason)"
-                      :aria-describedby="runtimeSaveBlockedReason && !hasRuntimeDraftConflict
+                      :disabled="runtimeSaving || runtimeSaveUnconfirmed || Boolean(runtimeSaveBlockedReason)"
+                      :aria-describedby="runtimeSaveUnconfirmed ? 'device-runtime-save-unconfirmed'
+                        : runtimeSaveBlockedReason && !hasRuntimeDraftConflict
                         ? 'device-runtime-save-blocked-reason'
                         : undefined"
                       class="board-action-inline board-action-disarmed shrink-0"
@@ -1159,6 +1122,8 @@ const deviceSpecs = computed(() => {
                   </p>
                 </div>
 
+                <p v-if="unconfirmedRuntimeWrite" id="device-runtime-save-unconfirmed" data-testid="device-runtime-save-unconfirmed"
+                  role="status" class="mb-3 text-sm board-text-warning">{{ unconfirmedRuntimeWrite.message }}</p>
                 <div v-if="runtimeSaveFailure" data-testid="device-runtime-save-failure" role="alert" class="mb-3 text-sm">
                   <p class="font-semibold board-text-danger">{{ t('app.instanceConfigSaveRejected') }}</p>
                   <FailureDetails v-bind="runtimeSaveFailure" suggestion="" />
@@ -1231,7 +1196,7 @@ const deviceSpecs = computed(() => {
                           </span>
                         </div>
                         <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-xs font-semibold board-text-muted">
-                          {{ variableInputPlaceholder(variable) }}
+                          {{ formatDeviceRuntimeVariablePlaceholder(variable, t) }}
                         </span>
                       </div>
 
@@ -1271,7 +1236,7 @@ const deviceSpecs = computed(() => {
                             v-model="runtimeDraft.variables[variable.Name]"
                             :data-testid="`device-runtime-variable-${variable.Name}`"
                             class="board-field"
-                            :placeholder="variableInputPlaceholder(variable)"
+                            :placeholder="formatDeviceRuntimeVariablePlaceholder(variable, t)"
                             type="text"
                           />
                         </label>

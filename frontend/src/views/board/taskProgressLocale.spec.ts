@@ -37,9 +37,11 @@ const setup = () => {
     activeVerificationTasks: ref([]), activeSimulationTasks: ref([]), activeFuzzingTasks: ref([]),
     verificationTasks: ref([]), simulationTasks: ref([]), fuzzingTasks: ref([]),
     normalizeTaskProgress: (value: number) => value, boardLifecycleDisposed: false,
+    captureBoardRunOwner: () => () => true, isActiveTaskStatus: (status: string) => ['PENDING', 'RUNNING'].includes(status),
+    showHistoryPanel: ref(false), activeHistoryLayer: ref('results'), historyPanelIntentEpoch: 0,
     pendingTaskActionKeys: ref(new Set<string>()), loadTaskInbox: vi.fn().mockResolvedValue(true),
     notifyTaskCancellationResult: vi.fn(),
-    acknowledgeFailure: vi.fn(), notifyError: vi.fn(), errorDetails, localizedErrorMessage,
+    acknowledgeFailure: vi.fn(), notifyError: vi.fn(), notifyBlocked: vi.fn(), errorDetails, localizedErrorMessage,
     locale: i18n.global.locale, chooseRunPresentation, foregroundRunBlock,
     isModelPlaybackActive: ref(false), openModalDepth: ref(0),
     historyDetailRequests: createPagedRequestCoordinator(),
@@ -47,7 +49,8 @@ const setup = () => {
   }
   ports.automaticRunPresentationBlock = bind('automaticRunPresentationBlock', ports)
   ports.automaticRunPresentation = bind('automaticRunPresentation', ports)
-  ports.presentTaskCancellationFailure = bind('presentTaskCancellationFailure', ports)
+  ports.tracksRun = (kind: string) => ports[`${kind}PanelTracksRun`].value
+  ports.presentUnconfirmedTaskCancellation = bind('presentUnconfirmedTaskCancellation', ports)
   ports.taskActionKey = bind('taskActionKey', ports)
   ports.withTaskActionLock = bind('withTaskActionLock', ports)
   ports.taskProgressStatusKey = bind('taskProgressStatusKey', ports)
@@ -56,22 +59,39 @@ const setup = () => {
   ports.isWatchedTaskCancelled = bind('isWatchedTaskCancelled', ports)
   ports.ensureActiveWatchedTaskPoll = bind('ensureActiveWatchedTaskPoll', ports)
   ports.readWatchedTaskStatus = bind('readWatchedTaskStatus', ports)
-  ports.applyTaskCancellationReceipt = bind('applyTaskCancellationReceipt', ports)
+  ports.pollWatchedTask = bind('pollWatchedTask', ports)
+  ports.applyTaskCancellationStatus = bind('applyTaskCancellationStatus', ports)
+  ports.hasCancelledTaskRow = bind('hasCancelledTaskRow', ports)
+  ports.isTaskCancellationKnown = bind('isTaskCancellationKnown', ports)
   for (const kind of ['Verification', 'Simulation', 'Fuzzing']) {
     ports[`async${kind}Task`] = bind(`async${kind}Task`, ports)
     ports[`async${kind}Task`].value.taskId = 7
     ports[`${kind.toLowerCase()}CancelRequested`] = ref(false)
     ports[`watched${kind}TaskIds`] = bind(`watched${kind}TaskIds`, ports)
     ports[`cancelling${kind}Task`] = bind(`cancelling${kind}Task`, ports)
-    ports[`cancelWatched${kind}`] = bind(`cancelWatched${kind}`, ports)
   }
   ports.watchedTaskId = bind('watchedTaskId', ports)
   ports.isWatchedTaskCancellationPending = bind('isWatchedTaskCancellationPending', ports)
+  ports.cancelBoardTask = bind('cancelBoardTask', ports)
   ports.cancelTaskFromProgress = bind('cancelTaskFromProgress', ports)
   return { ports, i18n, items: bind('miniTaskItems', ports) }
 }
 
 describe('live task status language', () => {
+  it('keeps one watched row before the other active tasks of each kind', () => {
+    const { ports, items } = setup()
+    for (const [suffix, nextId] of [['Verification', 11], ['Fuzzing', 12], ['Simulation', 13]] as const) {
+      ports[`active${suffix}Tasks`].value = [
+        { id: nextId, status: 'RUNNING', progress: 60 },
+        { id: 7, status: 'RUNNING', progress: 41 }
+      ]
+    }
+    expect(items.value.map(({ key, progress }: { key: string; progress: number }) => [key, progress])).toEqual([
+      ['verification-7', 0], ['verification-11', 60], ['fuzzing-7', 0], ['fuzzing-12', 60],
+      ['simulation-7', 0], ['simulation-13', 60]
+    ])
+  })
+
   it.each(['Verification', 'Simulation', 'Fuzzing'] as const)(
     'keeps the active inbox %s task visible after its local watch stops', (suffix) => {
       const { ports, items } = setup()
@@ -89,18 +109,41 @@ describe('live task status language', () => {
 
   it('cancels an inbox task through its own action after the local watch stops', async () => {
     const { ports } = setup()
-    const result = { taskId: 7, cancellationOutcome: 'ACCEPTED' }
+    const result = { taskId: 7, cancellationOutcome: 'ACCEPTED', taskStatus: 'CANCELLED' }
     Object.assign(ports, {
-      cancelWatchedSimulation: vi.fn(),
       simulationApi: { cancelTask: vi.fn().mockResolvedValue(result) }
     })
     ports.asyncSimulationActive.value = false
 
-    await bind('cancelSimulationTaskFromInbox', ports)(7)
+    await ports.cancelBoardTask('simulation', 7)
 
     expect(ports.simulationApi.cancelTask).toHaveBeenCalledExactlyOnceWith(7)
-    expect(ports.cancelWatchedSimulation).not.toHaveBeenCalled()
+    expect(ports.loadTaskInbox).toHaveBeenCalledExactlyOnceWith({ showLoading: false })
     expect(ports.notifyTaskCancellationResult).toHaveBeenCalledExactlyOnceWith('simulation', result)
+  })
+
+  it.each([true, false])('uses the completed observation trace when the originating inbox is still selected (%s)', async selected => {
+    const { ports } = setup()
+    ports.asyncSimulationActive.value = false
+    ports.showHistoryPanel.value = true
+    ports.activeHistoryLayer.value = 'tasks'
+    ports.isCurrentHistoryPanelIntent = vi.fn(() => selected)
+    ports.ensureHistoricalPlaybackUiAdmission = () => true
+    ports.openRunTarget = vi.fn()
+    ports.presentUnconfirmedTaskCancellation = vi.fn()
+    ports.presentCompletedTaskAfterCancellation = bind('presentCompletedTaskAfterCancellation', ports)
+    ports.simulationApi = {
+      cancelTask: vi.fn().mockResolvedValue({ taskId: 7, taskStatus: 'COMPLETED', cancellationOutcome: 'ALREADY_COMPLETED' }),
+      getTask: vi.fn().mockResolvedValue({ id: 7, status: 'COMPLETED', simulationTraceId: 17 })
+    }
+
+    await ports.cancelBoardTask('simulation', 7)
+
+    expect(ports.simulationApi.getTask).toHaveBeenCalledExactlyOnceWith(7)
+    if (selected) expect(ports.openRunTarget).toHaveBeenCalledExactlyOnceWith({ kind: 'simulation', runId: 17 }, true)
+    else expect(ports.openRunTarget).not.toHaveBeenCalled()
+    expect(ports.presentUnconfirmedTaskCancellation).not.toHaveBeenCalled()
+    expect(ports.notifyTaskCancellationResult).toHaveBeenCalledTimes(selected ? 0 : 1)
   })
 
   it.each([
@@ -115,7 +158,7 @@ describe('live task status language', () => {
     const watching = suffix === 'Fuzzing' ? ports.isFuzzing : ports[`async${suffix}Active`]
     watching.value = false
 
-    const requestedFromInbox = bind(`cancel${suffix}TaskFromInbox`, ports)(7)
+    const requestedFromInbox = ports.cancelBoardTask(kind, 7)
     watching.value = true
     const requestedFromProgress = bind(`cancelAsync${suffix}`, ports)()
     try {
@@ -169,6 +212,7 @@ describe('live task status language', () => {
       isPermanentPollError: () => false,
       waitForNextPoll: vi.fn(() => new Promise((_resolve, reject) => { stop = reject })),
       [`upsert${suffix}TaskSummary`]: vi.fn(),
+      fuzzingWatchedTask: ref(null),
       [api]: { getTask: vi.fn().mockResolvedValue({ id: 7, status: 'RUNNING', progressStage: stage, progress: 31 }) }
     })
     const pending = bind(handler, ports)(7).catch((error: Error) => error)
@@ -217,12 +261,13 @@ describe('live task status language', () => {
   ])('restores the known %s phase when cancellation cannot be confirmed', async (kind, handler, api) => {
     const { ports, i18n, items } = setup()
     ports[`async${kind[0]!.toUpperCase() + kind.slice(1)}Task`].value.statusKey = 'app.taskProgressStage_GENERATING_MODEL'
-    ports[api] = { cancelTask: vi.fn().mockRejectedValue(new Error('gateway unavailable')) }
+    ports[api] = { cancelTask: vi.fn().mockRejectedValue(new Error('gateway unavailable')),
+      getTask: vi.fn().mockResolvedValue({ id: 7, status: 'RUNNING' }) }
     const status = () => items.value.find((entry: any) => entry.kind === kind).status
     await bind(handler, ports)()
     expect(status()).toBe(i18n.global.t('app.taskProgressStage_GENERATING_MODEL'))
     expect(ports.acknowledgeFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      cause: 'gateway unavailable', suggestion: i18n.global.t('app.cancelFailureNextStep')
+      title: i18n.global.t('app.taskCancellationUnconfirmed'), cause: 'gateway unavailable', suggestion: i18n.global.t('app.cancelFailureNextStep')
     }))
     expect(ports.notifyError).not.toHaveBeenCalled()
     expect(ports[`${kind}CancelRequested`].value).toBe(false)
@@ -244,7 +289,7 @@ describe('live task status language', () => {
     i18n.global.locale.value = 'zh-CN'
     expect(status()).toBe(i18n.global.t('app.taskStatusCompleted'))
     expect(ports[`${kind}CancelRequested`].value).toBe(false)
-    expect(ports.notifyTaskCancellationResult).toHaveBeenCalledOnce()
+    expect(ports.notifyTaskCancellationResult).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -254,7 +299,8 @@ describe('live task status language', () => {
   ])('does not replace a newer %s poll phase after a failed cancellation request', async (kind, handler, api) => {
     const { ports, i18n, items } = setup()
     let reject!: (error: Error) => void
-    ports[api] = { cancelTask: vi.fn(() => new Promise((_resolve, fail) => { reject = fail })) }
+    ports[api] = { cancelTask: vi.fn(() => new Promise((_resolve, fail) => { reject = fail })),
+      getTask: vi.fn().mockRejectedValue(new Error('status unavailable')) }
     const pending = bind(handler, ports)()
     ports[`async${kind[0]!.toUpperCase() + kind.slice(1)}Task`].value.statusKey = 'app.taskProgressStage_PERSISTING_RESULT'
     reject(new Error('late cancellation response'))
@@ -271,7 +317,8 @@ describe('live task status language', () => {
     const kind = suffix.toLowerCase()
     const panelTracksRun = ports[`${kind}PanelTracksRun`]
     let reject!: (error: Error) => void
-    ports[api] = { cancelTask: vi.fn(() => new Promise((_resolve, fail) => { reject = fail })) }
+    ports[api] = { cancelTask: vi.fn(() => new Promise((_resolve, fail) => { reject = fail })),
+      getTask: vi.fn().mockRejectedValue(new Error('status unavailable')) }
     if (transition === 'returning to progress from the inbox') panelTracksRun.value = false
 
     const pending = bind(`cancelAsync${suffix}`, ports)()
@@ -282,7 +329,7 @@ describe('live task status language', () => {
     await pending
 
     expect(ports.acknowledgeFailure).not.toHaveBeenCalled()
-    expect(ports.notifyError).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(
       i18n.global.t('app.cancelFailureNextStep')))
     expect(ports[`${kind}CancelRequested`].value).toBe(false)
     expect(ports[`cancelling${suffix}Task`].value).toBe(false)

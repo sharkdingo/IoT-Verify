@@ -24,6 +24,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,7 +51,7 @@ class ManageRuleToolTest {
     @BeforeEach
     void setUp() {
         ObjectMapper objectMapper = new ObjectMapper();
-        destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
+        destructiveActionGuard = inMemoryActionGuard(objectMapper);
         reads = new AiToolReadFixture();
         tool = new ManageRuleTool(boardStorageService, objectMapper, destructiveActionGuard, reads.service);
         UserContextHolder.setUserId(1L);

@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { nextTick, reactive } from 'vue'
+import { nextTick, reactive, type VNodeProps } from 'vue'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import postcss from 'postcss'
@@ -9,12 +9,13 @@ import CanvasBoard from '@/components/CanvasBoard.vue'
 import { i18n } from '@/assets/i18n'
 import { getLinkPoints, getSelfLoopPath } from '@/utils/rule'
 import type { DeviceNode } from '@/types/node'
+import type { DeviceEdge } from '@/types/edge'
 
 afterEach(() => { vi.useRealTimers() })
-const pointerEvent = (type: string, x: number, y: number) => {
+const pointerEvent = (type: string, x: number, y: number, pointerId = 1) => {
   const event = new MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 })
   Object.defineProperties(event, {
-    pointerId: { value: 1 },
+    pointerId: { value: pointerId },
     isPrimary: { value: true }
   })
   return event
@@ -44,7 +45,64 @@ const controlAnimationFrames = () => {
   }
 }
 
+type CanvasProps = Omit<InstanceType<typeof CanvasBoard>['$props'], keyof VNodeProps>
+
+const mountCanvas = (
+  props: Partial<CanvasProps> = {},
+  stubs?: Record<string, boolean>
+) => mount(CanvasBoard, {
+  props: {
+    nodes: [],
+    edges: [],
+    pan: { x: 0, y: 0 },
+    zoom: 1,
+    getNodeIcon: () => '',
+    hasNodeStateMachine: () => true,
+    getNodeEffectiveState: current => current.state,
+    ...props
+  },
+  global: { plugins: [i18n], stubs }
+})
+
 describe('CanvasBoard live edge geometry', () => {
+  it('does not read unrelated node coordinates in a painted drag frame', async () => {
+    const frames = controlAnimationFrames()
+    let unrelatedXReads = 0
+    const nodes = reactive(['a', 'b', 'c', 'd'].map((id, index) => ({
+      id, templateName: 'Light', label: id, state: 'on',
+      position: { x: index * 250, y: 30 }, width: 176, height: 128
+    })))
+    // A detached connection and its cards share no geometry with the dragged node.
+    Object.defineProperty(nodes[2]!.position, 'x', { get: () => { unrelatedXReads++; return 500 } })
+    const edges = [[nodes[0]!, nodes[1]!], [nodes[2]!, nodes[3]!]].map(([from, to]) => ({
+      id: `${from!.id}-${to!.id}`, from: from!.id, to: to!.id,
+      fromPos: { x: 0, y: 0 }, toPos: { x: 0, y: 0 }
+    }))
+    const wrapper = mountCanvas({ nodes, edges })
+    try {
+      wrapper.get('[data-node-id="a"]').element.dispatchEvent(pointerEvent('pointerdown', 40, 50))
+      window.dispatchEvent(pointerEvent('pointermove', 70, 80))
+      await frames.flush()
+      const lines = wrapper.findAll('.edge-base-line')
+      const unaffected = lines[1]!.attributes()
+      const connectedX = lines[0]!.attributes('x1')
+      unrelatedXReads = 0
+      window.dispatchEvent(pointerEvent('pointermove', 100, 110))
+      await frames.flush()
+      expect(lines[0]!.attributes('x1')).not.toBe(connectedX)
+      expect(lines[1]!.attributes()).toEqual(unaffected)
+      expect(unrelatedXReads).toBe(0)
+
+      await wrapper.setProps({ pan: { x: -60, y: -30 } })
+      expect(wrapper.get('.canvas-inner').attributes('style')).toContain('translate(-60px, -30px)')
+      expect(lines[1]!.attributes()).toEqual(unaffected)
+      expect(unrelatedXReads).toBe(0)
+    } finally {
+      wrapper.unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('resolves sparse runtime readings with a linear number of historical device visits', async () => {
     const deviceCount = 30
     const stepCount = 24
@@ -62,15 +120,7 @@ describe('CanvasBoard live edge geometry', () => {
           : []
       }))
     }))
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes, edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        highlightedTrace: { states, selectedStateIndex: stepCount - 1 },
-        getNodeIcon: () => '', hasNodeStateMachine: () => true,
-        getNodeEffectiveState: node => node.state
-      },
-      global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes, highlightedTrace: { states, selectedStateIndex: stepCount - 1 } })
     try {
       const chips = wrapper.findAll('.device-runtime-chip')
       expect(chips).toHaveLength(deviceCount * 3)
@@ -96,14 +146,7 @@ describe('CanvasBoard live edge geometry', () => {
       id: 'light-1', templateName: 'Light', label: 'Hall light',
       position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
     })
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: () => '', hasNodeStateMachine: () => true,
-        getNodeEffectiveState: current => current.state
-      },
-      global: { plugins: [i18n], stubs: { transition: false } }
-    })
+    const wrapper = mountCanvas({ nodes: [node] }, { transition: false })
     try {
       node.state = 'on'
       await nextTick()
@@ -129,16 +172,13 @@ describe('CanvasBoard live edge geometry', () => {
         id: 'light-1', templateName: 'Light', label: 'Hall light',
         position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
       })
-      const wrapper = mount(CanvasBoard, {
-        props: {
-          nodes: [node], edges: [{
-            id: 'self', from: node.id, to: node.id, fromLabel: node.label, toLabel: node.label,
-            fromPos: node.position, toPos: node.position
-          }], pan: { x: 0, y: 0 }, zoom: 1.5,
-          getNodeIcon: () => '', hasNodeStateMachine: () => true,
-          getNodeEffectiveState: current => current.state
-        },
-        global: { plugins: [i18n] }
+      const wrapper = mountCanvas({
+        nodes: [node],
+        edges: [{
+          id: 'self', from: node.id, to: node.id,
+          fromPos: node.position, toPos: node.position
+        }],
+        zoom: 1.5
       })
       try {
         const originalPath = getSelfLoopPath(node)
@@ -171,20 +211,18 @@ describe('CanvasBoard live edge geometry', () => {
       })
       const edges = [source, target].map((node, index) => ({
         id: `edge-${index}`, from: source.id, to: node.id,
-        fromLabel: source.label, toLabel: node.label,
         fromPos: source.position, toPos: node.position,
         ruleId: `rule-${index}`, ruleIndex: index, toApi: 'turn on'
       }))
-      const wrapper = mount(CanvasBoard, {
-        props: {
-          nodes: [source, target], edges, pan: { x: 350, y: 350 }, zoom,
-          highlightedTrace: { selectedStateIndex: 0, states: [{
-            devices: [], triggeredRules: [{ ruleId: 'rule-0', ruleIndex: 0 }]
-          }] },
-          getNodeIcon: () => '', hasNodeStateMachine: () => true,
-          getNodeEffectiveState: node => node.state || 'off'
-        },
-        global: { plugins: [i18n] }
+      const wrapper = mountCanvas({
+        nodes: [source, target],
+        edges,
+        pan: { x: 350, y: 350 },
+        zoom,
+        highlightedTrace: { selectedStateIndex: 0, states: [{
+          devices: [], triggeredRules: [{ ruleId: 'rule-0', ruleIndex: 0 }]
+        }] },
+        getNodeEffectiveState: node => node.state || 'off'
       })
       try {
         Object.defineProperty(wrapper.get('[data-testid="canvas-board"]').element, 'clientWidth', { value: 2000 })
@@ -249,13 +287,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
 
   it.each([0.2, 1, 2])('keeps resize geometry in direct properties without inherited zoom variables at zoom %s', zoom => {
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes: [source], zoom })
     try {
       const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
       const content = rendered.get<HTMLElement>('.device-node-content')
@@ -293,13 +325,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     const width = vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(1200)
     const height = vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(800)
     const style = vi.spyOn(window, 'getComputedStyle')
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas()
     let unmounted = false
     try {
       expect(observe).toHaveBeenCalledWith(wrapper.get('.canvas').element)
@@ -336,12 +362,11 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     const getState = vi.fn((current: DeviceNode) => current.state)
     const getIcon = vi.fn(() => display.icon)
     const formatToken = vi.fn((_node: DeviceNode, value: unknown) => `${display.prefix}${String(value)}`)
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: getIcon, getNodeEffectiveState: getState,
-        hasNodeStateMachine: () => true, formatNodeModelToken: formatToken
-      }, global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source],
+      getNodeIcon: getIcon,
+      getNodeEffectiveState: getState,
+      formatNodeModelToken: formatToken
     })
     try {
       const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
@@ -388,12 +413,12 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     const getState = vi.fn((current: DeviceNode) => current.state)
     const getIcon = vi.fn(() => '/light.svg')
     const formatToken = vi.fn((_node: DeviceNode, value: unknown) => String(value))
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 0.4,
-        getNodeIcon: getIcon, getNodeEffectiveState: getState,
-        hasNodeStateMachine: () => true, formatNodeModelToken: formatToken
-      }, global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source],
+      zoom: 0.4,
+      getNodeIcon: getIcon,
+      getNodeEffectiveState: getState,
+      formatNodeModelToken: formatToken
     })
     try {
       const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
@@ -437,13 +462,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     'commits release coordinates at zoom %s with a preceding move: %s', async (zoom, moved) => {
       const frames = controlAnimationFrames()
       const source = node()
-      const wrapper = mount(CanvasBoard, {
-        props: {
-          nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom,
-          getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-          hasNodeStateMachine: () => true
-        }, global: { plugins: [i18n] }
-      })
+      const wrapper = mountCanvas({ nodes: [source], zoom })
       try {
         const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
         rendered.element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
@@ -474,13 +493,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
   it('keeps a release below the drag threshold as a click', async () => {
     const frames = controlAnimationFrames()
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes: [source] })
     try {
       wrapper.get('[data-node-id="light-1"]').element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
       window.dispatchEvent(pointerEvent('pointerup', 103, 102))
@@ -503,15 +516,13 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     { zoom: 1.5, corner: 'br', x: 40, y: 50, width: 209, height: 148 }
   ])('commits release coordinates for the $corner resize handle at zoom $zoom', async item => {
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [{
-          id: 'self', from: source.id, to: source.id, fromLabel: source.label, toLabel: source.label,
-          fromPos: source.position, toPos: source.position
-        }], pan: { x: 0, y: 0 }, zoom: item.zoom,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source],
+      edges: [{
+        id: 'self', from: source.id, to: source.id,
+        fromPos: source.position, toPos: source.position
+      }],
+      zoom: item.zoom
     })
     try {
       wrapper.get(`.resize-handle.${item.corner}`).element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
@@ -532,13 +543,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
 
   it('does not reinterpret a stationary resize release after zoom changes', async () => {
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 0.5,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes: [source], zoom: 0.5 })
     try {
       wrapper.get('.resize-handle.br').element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
       window.dispatchEvent(pointerEvent('pointermove', 120, 110))
@@ -553,12 +558,10 @@ describe('CanvasBoard drag scheduling and presentation', () => {
   it.each(['queued', 'painted'])('keeps the %s pointer sample in the zoom at which it was received', async phase => {
     const frames = controlAnimationFrames()
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 0.4,
-        getNodeIcon: () => '/light.svg', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source],
+      zoom: 0.4,
+      getNodeIcon: () => '/light.svg'
     })
     try {
       wrapper.get('[data-node-id="light-1"]').element.dispatchEvent(pointerEvent('pointerdown', 100, 100))
@@ -582,13 +585,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     'discards the %s interaction with a %s preview without saving or leaving a frame behind', async (finish, phase) => {
       const frames = controlAnimationFrames()
       const source = node()
-      const wrapper = mount(CanvasBoard, {
-        props: {
-          nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-          getNodeIcon: () => '/light.svg', getNodeEffectiveState: current => current.state,
-          hasNodeStateMachine: () => true
-        }, global: { plugins: [i18n] }
-      })
+      const wrapper = mountCanvas({ nodes: [source], getNodeIcon: () => '/light.svg' })
       let unmounted = false
       try {
         const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
@@ -621,16 +618,37 @@ describe('CanvasBoard drag scheduling and presentation', () => {
     }
   )
 
+  it('ignores another pointer losing capture and restores the owning resize without saving', async () => {
+    const source = node()
+    const wrapper = mountCanvas({ nodes: [source] })
+    try {
+      const target = wrapper.get('[data-node-id="light-1"] .resize-handle.br').element
+      target.dispatchEvent(pointerEvent('pointerdown', 100, 100))
+      window.dispatchEvent(pointerEvent('pointermove', 130, 115))
+      await nextTick()
+      expect(source).toMatchObject({ width: 206, height: 143 })
+      expect(wrapper.emitted('node-layout-interaction-start')).toEqual([[source.id]])
+
+      target.dispatchEvent(pointerEvent('lostpointercapture', 130, 115, 2))
+      await nextTick()
+      expect(source).toMatchObject({ width: 206, height: 143 })
+      expect(wrapper.emitted('node-layout-interaction-end')).toBeUndefined()
+
+      target.dispatchEvent(pointerEvent('lostpointercapture', 130, 115))
+      window.dispatchEvent(pointerEvent('pointerup', 130, 115))
+      await nextTick()
+      expect(source).toMatchObject({ position: { x: 40, y: 50 }, width: 176, height: 128 })
+      expect(wrapper.emitted('node-layout-interaction-end')).toEqual([[source.id]])
+      expect(wrapper.emitted('node-moved-or-resized')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it.each(['drag', 'resize'] as const)('rejects context menus while a %s pointer owns the layout', async gesture => {
     const frames = controlAnimationFrames()
     const source = node()
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-        hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes: [source] })
     try {
       const rendered = wrapper.get('[data-node-id="light-1"]')
       const target = gesture === 'drag' ? rendered : rendered.get('.resize-handle.br')
@@ -667,13 +685,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
       const other = node()
       other.id = 'light-2'
       other.position = { x: 300, y: 80 }
-      const wrapper = mount(CanvasBoard, {
-        props: {
-          nodes: [source, other], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-          getNodeIcon: () => '', getNodeEffectiveState: current => current.state,
-          hasNodeStateMachine: () => true
-        }, global: { plugins: [i18n] }
-      })
+      const wrapper = mountCanvas({ nodes: [source, other] })
       const geometry = (current: DeviceNode) => ({
         x: current.position.x, y: current.position.y, width: current.width, height: current.height
       })
@@ -721,13 +733,7 @@ describe('CanvasBoard drag scheduling and presentation', () => {
   it('updates memoized content for runtime edits, locale, density, focus and read-only changes', async () => {
     const source = node()
     const originalLocale = i18n.global.locale.value
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source], edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        getNodeIcon: current => `/${current.state}.svg`,
-        getNodeEffectiveState: current => current.state, hasNodeStateMachine: () => true
-      }, global: { plugins: [i18n] }
-    })
+    const wrapper = mountCanvas({ nodes: [source], getNodeIcon: current => `/${current.state}.svg` })
     try {
       const rendered = wrapper.get<HTMLElement>('[data-node-id="light-1"]')
       source.label = 'Updated light'
@@ -762,22 +768,47 @@ describe('CanvasBoard drag scheduling and presentation', () => {
   })
 })
 
+const motionRuleFixture = (
+  targetDetails: Pick<DeviceNode, 'id' | 'templateName' | 'label' | 'state'>,
+  connection: Pick<DeviceEdge, 'fromApi' | 'toApi' | 'itemType' | 'relation' | 'value' | 'ruleIndex'>
+) => {
+  const size = { width: 176, height: 128 }
+  const source: DeviceNode = {
+    id: 'motion-1',
+    templateName: 'Motion Detector',
+    label: 'Hall motion',
+    position: { x: 40, y: 50 },
+    state: 'idle',
+    ...size
+  }
+  const target: DeviceNode = {
+    ...targetDetails,
+    position: { x: 420, y: 220 },
+    ...size
+  }
+  const edge: DeviceEdge = {
+    id: 'rule-1-source-0',
+    from: source.id,
+    to: target.id,
+    fromPos: source.position,
+    toPos: target.position,
+    ruleId: 'rule-1',
+    ...connection
+  }
+  return { source, target, edge }
+}
+
 describe('CanvasBoard device context actions', () => {
   it('keeps a compromised device marker outside the clipped card content', async () => {
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [{
-          id: 'light-1', templateName: 'Light', label: 'Hall light',
-          position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
-        }],
-        edges: [], pan: { x: 0, y: 0 }, zoom: 1,
-        highlightedTrace: { selectedStateIndex: 0, states: [{
-          devices: [{ deviceId: 'light_1', state: 'off', compromised: true }]
-        }] },
-        getNodeIcon: () => '', hasNodeStateMachine: () => true,
-        getNodeEffectiveState: node => node.state || 'off'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [{
+        id: 'light-1', templateName: 'Light', label: 'Hall light',
+        position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128
+      }],
+      highlightedTrace: { selectedStateIndex: 0, states: [{
+        devices: [{ deviceId: 'light_1', state: 'off', compromised: true }]
+      }] },
+      getNodeEffectiveState: node => node.state || 'off'
     })
     try {
       const card = wrapper.get('[data-node-id="light-1"]')
@@ -801,17 +832,9 @@ describe('CanvasBoard device context actions', () => {
       width: 176,
       height: 128
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working'
     })
 
     await wrapper.get('[data-node-id="light-1"]').trigger('contextmenu', {
@@ -834,56 +857,28 @@ describe('CanvasBoard device context actions', () => {
   })
 
   it('keeps rule labels hidden until the edge is hovered or keyboard-focused', async () => {
-    const source = {
-      id: 'motion-1',
-      templateName: 'Motion Detector',
-      label: 'Hall motion',
-      position: { x: 40, y: 50 },
-      state: 'idle',
-      width: 176,
-      height: 128
-    }
-    const target = {
+    const { source, target, edge } = motionRuleFixture({
       id: 'camera-1',
       templateName: 'Camera',
       label: 'Hall camera',
-      position: { x: 420, y: 220 },
-      state: 'on',
-      width: 176,
-      height: 128
-    }
-    const edge = {
-      id: 'rule-1-source-0',
-      from: source.id,
-      to: target.id,
-      fromLabel: source.label,
-      toLabel: target.label,
-      fromPos: source.position,
-      toPos: target.position,
+      state: 'on'
+    }, {
       fromApi: 'state',
       toApi: 'take photo',
-      itemType: 'variable' as const,
+      itemType: 'variable',
       relation: 'in',
-      value: 'active',
-      ruleId: 'rule-1'
-    }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source, target],
-        edges: [edge],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        focusedRuleId: 'rule-1',
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working',
-        formatNodeModelToken: (_node, value) => ({
-          state: '状态',
-          active: '活动',
-          'take photo': '拍照'
-        }[String(value)] || String(value ?? ''))
-      },
-      global: { plugins: [i18n] }
+      value: 'active'
+    })
+    const wrapper = mountCanvas({
+      nodes: [source, target],
+      edges: [edge],
+      focusedRuleId: 'rule-1',
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working',
+      formatNodeModelToken: (_node, value) => ({
+        state: '状态',
+        active: '活动',
+        'take photo': '拍照'
+      }[String(value)] || String(value ?? ''))
     })
 
     expect(wrapper.find('.edge-label').exists()).toBe(false)
@@ -909,72 +904,44 @@ describe('CanvasBoard device context actions', () => {
   })
 
   it('localizes each playback delta on the changed device while the triggered edge carries command flow', () => {
-    const source = {
-      id: 'motion-1',
-      templateName: 'Motion Detector',
-      label: 'Hall motion',
-      position: { x: 40, y: 50 },
-      state: 'idle',
-      width: 176,
-      height: 128
-    }
-    const target = {
+    const { source, target, edge } = motionRuleFixture({
       id: 'light-1',
       templateName: 'Light',
       label: 'Living-room Temperature Sensor',
-      position: { x: 420, y: 220 },
-      state: 'off',
-      width: 176,
-      height: 128
-    }
-    const edge = {
-      id: 'rule-1-source-0',
-      from: source.id,
-      to: target.id,
-      fromLabel: source.label,
-      toLabel: target.label,
-      fromPos: source.position,
-      toPos: target.position,
+      state: 'off'
+    }, {
       fromApi: 'motion',
       toApi: 'turn on',
-      itemType: 'api' as const,
-      ruleId: 'rule-1',
+      itemType: 'api',
       ruleIndex: 0
-    }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source, target],
-        edges: [edge],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: {
-          selectedStateIndex: 1,
-          states: [
-            {
-              stateIndex: 1,
-              triggeredRules: [],
-              compromisedAutomationLinks: [],
-              devices: [
-                { deviceId: 'motion_1', deviceLabel: source.label, state: 'idle', variables: [] },
-                { deviceId: 'light_1', deviceLabel: target.label, state: 'off', variables: [{ name: 'brightness', value: '0' }] }
-              ]
-            },
-            {
-              stateIndex: 2,
-              triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Motion turns on light' }],
-              compromisedAutomationLinks: [],
-              devices: [
-                { deviceId: 'motion_1', deviceLabel: source.label, state: 'active', variables: [] },
-                { deviceId: 'light_1', deviceLabel: target.label, state: 'on', variables: [{ name: 'brightness', value: '100' }] }
-              ]
-            }
-          ]
-        },
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working'
+    })
+    const wrapper = mountCanvas({
+      nodes: [source, target],
+      edges: [edge],
+      highlightedTrace: {
+        selectedStateIndex: 1,
+        states: [
+          {
+            stateIndex: 1,
+            triggeredRules: [],
+            compromisedAutomationLinks: [],
+            devices: [
+              { deviceId: 'motion_1', deviceLabel: source.label, state: 'idle', variables: [] },
+              { deviceId: 'light_1', deviceLabel: target.label, state: 'off', variables: [{ name: 'brightness', value: '0' }] }
+            ]
+          },
+          {
+            stateIndex: 2,
+            triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Motion turns on light' }],
+            compromisedAutomationLinks: [],
+            devices: [
+              { deviceId: 'motion_1', deviceLabel: source.label, state: 'active', variables: [] },
+              { deviceId: 'light_1', deviceLabel: target.label, state: 'on', variables: [{ name: 'brightness', value: '100' }] }
+            ]
+          }
+        ]
       },
-      global: { plugins: [i18n] }
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working'
     })
 
     const changedTarget = wrapper.get('[data-node-id="light-1"]')
@@ -989,43 +956,25 @@ describe('CanvasBoard device context actions', () => {
     wrapper.unmount()
   })
 
-  it('restarts delivered-rule edge flow for each model transition', async () => {
-    const source = {
-      id: 'motion-1',
-      templateName: 'Motion Detector',
-      label: 'Hall motion',
-      position: { x: 40, y: 50 },
-      state: 'idle',
-      width: 176,
-      height: 128
-    }
-    const target = {
+  it('requires a recorded delivery for edge flow and restarts it for each model transition', async () => {
+    const { source, target, edge } = motionRuleFixture({
       id: 'light-1',
       templateName: 'Light',
       label: 'Hall light',
-      position: { x: 420, y: 220 },
-      state: 'off',
-      width: 176,
-      height: 128
-    }
-    const edge = {
-      id: 'rule-1-source-0',
-      from: source.id,
-      to: target.id,
-      fromLabel: source.label,
-      toLabel: target.label,
-      fromPos: source.position,
-      toPos: target.position,
+      state: 'off'
+    }, {
       fromApi: 'motion',
       toApi: 'turn on',
-      itemType: 'variable' as const,
+      itemType: 'variable',
       relation: '=',
       value: 'active',
-      ruleId: 'rule-1',
       ruleIndex: 0
-    }
+    })
     const states = [
-      { triggeredRules: [], compromisedAutomationLinks: [], devices: [] },
+      {
+        triggeredRules: [], compromisedAutomationLinks: [],
+        devices: [{ deviceId: 'motion_1', variables: [{ name: 'motion', value: 'active' }] }]
+      },
       {
         triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Motion turns on light' }],
         compromisedAutomationLinks: [],
@@ -1037,20 +986,16 @@ describe('CanvasBoard device context actions', () => {
         devices: []
       }
     ]
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [source, target],
-        edges: [edge],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: { states, selectedStateIndex: 1 },
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source, target],
+      edges: [edge],
+      highlightedTrace: { states, selectedStateIndex: 0 },
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working'
     })
 
+    expect(wrapper.find('.edge-line--active').exists()).toBe(false)
+    expect(wrapper.find('.particle-line').exists()).toBe(false)
+    await wrapper.setProps({ highlightedTrace: { states, selectedStateIndex: 1 } })
     const firstFlow = wrapper.get('.particle-line').element
     expect(firstFlow.getAttribute('data-playback-state')).toBe('1')
     expect(wrapper.html()).toContain('repeatCount="1"')
@@ -1061,7 +1006,7 @@ describe('CanvasBoard device context actions', () => {
 
     const secondFlow = wrapper.get('.particle-line').element
     expect(secondFlow.getAttribute('data-playback-state')).toBe('2')
-    expect(secondFlow).not.toBe(firstFlow)
+    expect(secondFlow.isSameNode(firstFlow)).toBe(false)
     wrapper.unmount()
   })
 
@@ -1106,18 +1051,11 @@ describe('CanvasBoard device context actions', () => {
       }
     ]
     const getNodeIcon = vi.fn((_node: typeof node, state?: string) => `/${state}.svg`)
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: { states, selectedStateIndex: 0 },
-        getNodeIcon,
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      highlightedTrace: { states, selectedStateIndex: 0 },
+      getNodeIcon,
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working'
     })
 
     try {
@@ -1144,6 +1082,34 @@ describe('CanvasBoard device context actions', () => {
       wrapper.unmount()
       vi.useRealTimers()
     }
+  })
+
+  it('renders violation rings only on the selected step and its subject devices', async () => {
+    const nodes = ['subject', 'neighbor', 'unobserved'].map((id, index) => ({
+      id, templateName: 'Light', label: id, state: 'off',
+      position: { x: index * 250, y: 40 }, width: 176, height: 128
+    }))
+    const state = { devices: nodes.slice(0, 2).map(node => ({ deviceId: node.id, state: node.state })) }
+    const trace = {
+      states: [state, state, state, state], selectedStateIndex: 1, violationStateIndex: 1,
+      violationStateIndexes: [] as number[], violationDeviceIds: ['subject']
+    }
+    const wrapper = mountCanvas({ nodes, highlightedTrace: trace })
+    const emphasized = () => wrapper.findAll('.device-at-violation').map(node => node.attributes('data-node-id'))
+    const select = async (selectedStateIndex: number, evidence = trace) => {
+      await wrapper.setProps({ highlightedTrace: { ...evidence, selectedStateIndex } })
+      return emphasized()
+    }
+
+    try {
+      expect(emphasized()).toEqual(['subject'])
+      expect(await select(0)).toEqual([])
+      const cycle = { ...trace, violationStateIndex: 0, violationStateIndexes: [1, 2], violationDeviceIds: [] }
+      expect(await select(1, cycle)).toEqual(['subject', 'neighbor'])
+      expect(await select(2, cycle)).toEqual(['subject', 'neighbor'])
+      expect(await select(3, cycle)).toEqual([])
+      expect(await select(0, cycle)).toEqual([])
+    } finally { wrapper.unmount() }
   })
 
   it('localizes playback security labels without changing canonical trace facts', () => {
@@ -1178,21 +1144,13 @@ describe('CanvasBoard device context actions', () => {
       on: '开启',
       photo: '照片'
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'Working',
-        formatPlaybackModelToken: (source, value) => source === 'BUNDLED'
-          ? (labels[String(value)] || String(value ?? ''))
-          : String(value ?? '')
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      highlightedTrace,
+      getNodeEffectiveState: currentNode => currentNode.state || 'Working',
+      formatPlaybackModelToken: (source, value) => source === 'BUNDLED'
+        ? (labels[String(value)] || String(value ?? ''))
+        : String(value ?? '')
     })
 
     const titles = wrapper.findAll('.device-node-trust').map(badge => badge.attributes('title'))
@@ -1232,18 +1190,10 @@ describe('CanvasBoard device context actions', () => {
         }]
       }
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        deviceTemplates: [template],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'active'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      deviceTemplates: [template],
+      getNodeEffectiveState: currentNode => currentNode.state || 'active'
     })
 
     try {
@@ -1281,47 +1231,39 @@ describe('CanvasBoard device context actions', () => {
     const playbackFormatter = vi.fn((source, value) => source === 'BUNDLED'
       ? `history:${String(value ?? '')}`
       : String(value ?? ''))
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes,
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: {
-          selectedStateIndex: 0,
-          states: [{
-            devices: [
-              {
-                deviceId: 'bundled_1',
-                state: 'off',
-                mode: 'MachineState',
-                modelTokenSource: 'BUNDLED' as const,
-                variables: [{ name: 'workingState', value: 'on', trust: 'untrusted', modelTokenSource: 'BUNDLED' as const }]
-              },
-              {
-                deviceId: 'custom_1',
-                state: 'off',
-                mode: 'MachineState',
-                modelTokenSource: 'CUSTOM' as const,
-                variables: [{ name: 'workingState', value: 'on', trust: 'untrusted', modelTokenSource: 'CUSTOM' as const }]
-              },
-              {
-                deviceId: 'unknown_1',
-                state: 'off',
-                mode: 'MachineState',
-                modelTokenSource: 'UNKNOWN' as const,
-                variables: [{ name: 'workingState', value: 'on', modelTokenSource: 'UNKNOWN' as const }]
-              }
-            ]
-          }]
-        },
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: () => 'current',
-        formatNodeModelToken: liveFormatter,
-        formatPlaybackModelToken: playbackFormatter
+    const wrapper = mountCanvas({
+      nodes,
+      highlightedTrace: {
+        selectedStateIndex: 0,
+        states: [{
+          devices: [
+            {
+              deviceId: 'bundled_1',
+              state: 'off',
+              mode: 'MachineState',
+              modelTokenSource: 'BUNDLED' as const,
+              variables: [{ name: 'workingState', value: 'on', trust: 'untrusted', modelTokenSource: 'BUNDLED' as const }]
+            },
+            {
+              deviceId: 'custom_1',
+              state: 'off',
+              mode: 'MachineState',
+              modelTokenSource: 'CUSTOM' as const,
+              variables: [{ name: 'workingState', value: 'on', trust: 'untrusted', modelTokenSource: 'CUSTOM' as const }]
+            },
+            {
+              deviceId: 'unknown_1',
+              state: 'off',
+              mode: 'MachineState',
+              modelTokenSource: 'UNKNOWN' as const,
+              variables: [{ name: 'workingState', value: 'on', modelTokenSource: 'UNKNOWN' as const }]
+            }
+          ]
+        }]
       },
-      global: { plugins: [i18n] }
+      getNodeEffectiveState: () => 'current',
+      formatNodeModelToken: liveFormatter,
+      formatPlaybackModelToken: playbackFormatter
     })
 
     const bundled = wrapper.get('[data-node-id="bundled-1"]')
@@ -1351,40 +1293,32 @@ describe('CanvasBoard device context actions', () => {
   // with `observed: false` and an empty value, and the chip must disappear rather than render blank —
   // `getNodeRuntimeBadges` has a second disjunct that resurrects any merely-empty value.
   it('drops an unobserved trace variable from the node strip and keeps observed ones', () => {
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [{
-          id: 'light-1', label: 'Porch Light', templateName: 'Light',
-          position: { x: 0, y: 0 }, state: 'on', width: 176, height: 128
-        }],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: {
-          selectedStateIndex: 0,
-          states: [{
-            devices: [{
-              deviceId: 'light_1',
-              state: 'on',
-              modelTokenSource: 'BUNDLED' as const,
-              variables: [
-                {
-                  name: 'illuminance', value: '', trust: 'untrusted',
-                  observed: false, modelTokenSource: 'BUNDLED' as const
-                },
-                {
-                  name: 'brightness', value: '80', trust: 'trusted',
-                  modelTokenSource: 'BUNDLED' as const
-                }
-              ]
-            }]
+    const wrapper = mountCanvas({
+      nodes: [{
+        id: 'light-1', label: 'Porch Light', templateName: 'Light',
+        position: { x: 0, y: 0 }, state: 'on', width: 176, height: 128
+      }],
+      highlightedTrace: {
+        selectedStateIndex: 0,
+        states: [{
+          devices: [{
+            deviceId: 'light_1',
+            state: 'on',
+            modelTokenSource: 'BUNDLED' as const,
+            variables: [
+              {
+                name: 'illuminance', value: '', trust: 'untrusted',
+                observed: false, modelTokenSource: 'BUNDLED' as const
+              },
+              {
+                name: 'brightness', value: '80', trust: 'trusted',
+                modelTokenSource: 'BUNDLED' as const
+              }
+            ]
           }]
-        },
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: () => 'on'
+        }]
       },
-      global: { plugins: [i18n] }
+      getNodeEffectiveState: () => 'on'
     })
 
     const node = wrapper.get('[data-node-id="light-1"]')
@@ -1413,37 +1347,30 @@ describe('CanvasBoard device context actions', () => {
       width: 176,
       height: 128
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [recordedStateful, recordedStateless],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        highlightedTrace: {
-          selectedStateIndex: 0,
-          states: [{
-            devices: [
-              {
-                deviceId: 'was_stateful_1',
-                state: 'historic-state',
-                mode: 'HistoricMode',
-                modelTokenSource: 'CUSTOM' as const,
-                variables: []
-              },
-              {
-                deviceId: 'was_stateless_1',
-                modelTokenSource: 'BUNDLED' as const,
-                variables: []
-              }
-            ]
-          }]
-        },
-        getNodeIcon: () => '',
-        hasNodeStateMachine: node => node.id === recordedStateless.id,
-        getNodeEffectiveState: node => node.state || 'Working',
-        formatPlaybackModelToken: (_source, value) => String(value ?? '')
+    const wrapper = mountCanvas({
+      nodes: [recordedStateful, recordedStateless],
+      highlightedTrace: {
+        selectedStateIndex: 0,
+        states: [{
+          devices: [
+            {
+              deviceId: 'was_stateful_1',
+              state: 'historic-state',
+              mode: 'HistoricMode',
+              modelTokenSource: 'CUSTOM' as const,
+              variables: []
+            },
+            {
+              deviceId: 'was_stateless_1',
+              modelTokenSource: 'BUNDLED' as const,
+              variables: []
+            }
+          ]
+        }]
       },
-      global: { plugins: [i18n] }
+      hasNodeStateMachine: node => node.id === recordedStateless.id,
+      getNodeEffectiveState: node => node.state || 'Working',
+      formatPlaybackModelToken: (_source, value) => String(value ?? '')
     })
 
     const stateful = wrapper.get('[data-node-id="was-stateful-1"]')
@@ -1466,17 +1393,10 @@ describe('CanvasBoard device context actions', () => {
       width: 176,
       height: 128
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => false,
-        getNodeEffectiveState: () => 'Working'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      hasNodeStateMachine: () => false,
+      getNodeEffectiveState: () => 'Working'
     })
 
     const rendered = wrapper.get('[data-node-id="sensor-1"]')
@@ -1496,17 +1416,9 @@ describe('CanvasBoard device context actions', () => {
       width: 176,
       height: 128
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 1,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'off'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      getNodeEffectiveState: currentNode => currentNode.state || 'off'
     })
     const rendered = wrapper.get('[data-node-id="light-1"]')
 
@@ -1545,17 +1457,10 @@ describe('CanvasBoard device context actions', () => {
       state: 'off',
       ...dimensions
     }
-    const wrapper = mount(CanvasBoard, {
-      props: {
-        nodes: [node],
-        edges: [],
-        pan: { x: 0, y: 0 },
-        zoom: 0.2,
-        getNodeIcon: () => '',
-        hasNodeStateMachine: () => true,
-        getNodeEffectiveState: currentNode => currentNode.state || 'off'
-      },
-      global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [node],
+      zoom: 0.2,
+      getNodeEffectiveState: currentNode => currentNode.state || 'off'
     })
     const rendered = wrapper.get('[data-node-id="small-light-1"]')
 
@@ -1591,13 +1496,15 @@ describe('CanvasBoard edge legibility across zoom', () => {
     const source = reactive({ id: 'source', templateName: 'Light', label: 'Source',
       position: { x: 40, y: 50 }, state: 'off', width: 176, height: 128 })
     const target = { ...source, id: 'target', position: { x: 400, y: 350 }, width: 130, height: 93 }
-    const wrapper = mount(CanvasBoard, {
-      props: { nodes: [source, target], pan: { x: 70, y: -30 }, zoom,
-        getNodeIcon: () => '', hasNodeStateMachine: () => true, getNodeEffectiveState: () => 'off',
-        edges: [[source, target], [target, source]].map(([from, to], index) => ({
-          id: `edge-${index}`, from: from.id, to: to.id, fromLabel: from.label, toLabel: to.label,
-          fromPos: from.position, toPos: to.position
-        })) }, global: { plugins: [i18n] }
+    const wrapper = mountCanvas({
+      nodes: [source, target],
+      pan: { x: 70, y: -30 },
+      zoom,
+      getNodeEffectiveState: () => 'off',
+      edges: [[source, target], [target, source]].map(([from, to], index) => ({
+        id: `edge-${index}`, from: from.id, to: to.id,
+        fromPos: from.position, toPos: to.position
+      }))
     })
     const expectRenderedAnchors = () => {
       const lines = wrapper.findAll('line.edge-base-line')

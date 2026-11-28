@@ -57,9 +57,7 @@ public class ReadConversationActivityTool extends AbstractAiTool {
             response.put("hasMore", page.hasMore());
             if (page.nextBeforeMessageId() != null) response.put("nextBeforeMessageId", page.nextBeforeMessageId());
             response.put("historicalEvidenceOnly", true);
-            return readOnlySuccessJson(response, "Saved conversation activity loaded; current data was not changed.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return readOnlySuccessJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (BaseException e) {

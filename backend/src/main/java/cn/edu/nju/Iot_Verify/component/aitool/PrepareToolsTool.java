@@ -55,8 +55,6 @@ public class PrepareToolsTool extends AbstractAiTool {
             }
             return objectMapper.writeValueAsString(Map.of(
                     "operation", "toolSchemasPrepared", "loadedTools", selected, "count", selected.size()));
-        } catch (ArgParseException failure) {
-            return failure.getErrorResponse();
         } catch (ArgValidationException failure) {
             return failure.getErrorResponse();
         } catch (Exception failure) {

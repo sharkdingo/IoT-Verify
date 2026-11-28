@@ -1,13 +1,10 @@
-import type { APIResponse, Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
+import type { TraceState } from '../src/types/verify'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
 import { selectHistoryResultType } from './support/historyFilter'
+import { holdHistoryReply } from './support/historyReply'
 
-const unwrap = async (response: APIResponse) => {
-  expect(response.ok(), await response.text()).toBe(true)
-  const body = await response.json()
-  expect(body.code).toBe(200)
-  return body.data
-}
 const noHints = async (page: Page) => {
   await page.mouse.move(1, 1)
   await expect(page.locator('.iot-hint-tooltip-popper:visible')).toHaveCount(0)
@@ -32,7 +29,8 @@ for (const locale of ['zh-CN']) {
       const post = async (path: string, data: unknown) => unwrap(await request.post(`${apiBaseURL}/api/${path}`, { headers, data }))
       await post('board/nodes', { devices: [{ id: 'replay_light', templateName: 'Light',
         label: '历史回放测试灯 / Historical playback test light', position: { x: 180, y: 160 },
-        width: 176, height: 128, state: 'off', variables: [], privacies: [] }], environmentVariablePatches: [] })
+        width: 176, height: 128, state: 'off', variables: [], privacies: [] }],
+        environmentVariablePatches: [{ name: 'illuminance', value: '17', trust: 'untrusted', privacy: 'public' }] })
       await post('board/rules', { conditions: [{ deviceName: 'replay_light', targetType: 'mode',
         attribute: 'SwitchState', relation: '=', value: 'off' }], command: { deviceName: 'replay_light', action: 'on' },
         ruleString: 'Turn on when off' })
@@ -45,6 +43,33 @@ for (const locale of ['zh-CN']) {
       const runId = verification.historyPersistence.runId
       const trace = verification.traces[0]
       const simulation = await post('simulate/traces', { ...settings, steps: 5 })
+      // The solver may choose several legal illuminance trajectories. Supply a saved transition
+      // with a visible delta while preserving the real run identity and frozen variable provenance.
+      for (const path of [`verify/traces/${trace.id}`, `simulate/traces/${simulation.id}`]) {
+        await page.route(`**/api/${path}`, async route => {
+          const response = await route.fetch()
+          const body = await response.json()
+          expect(response.ok(), JSON.stringify(body)).toBe(true)
+          const states: TraceState[] = body.data.states
+          expect(states.length).toBeGreaterThan(1)
+          for (const [index, state] of states.entries()) {
+            const illuminance = state.envVariables?.find(variable => variable.name === 'illuminance')
+            expect(illuminance).toBeDefined()
+            illuminance!.value = index === 0 ? '17' : '18'
+          }
+          await route.fulfill({ response, json: body })
+        })
+      }
+      const expectFrozenChanges = async (prefix: string) => {
+        const step = page.getByTestId(`${prefix}-step-input`)
+        await step.fill('2')
+        await step.press('Enter')
+        const timeline = page.getByTestId(prefix)
+        await expect(timeline).toHaveAttribute('data-selected-state-index', '1')
+        const changes = timeline.getByTestId('playback-changes-panel')
+        await expect(changes.getByTestId('playback-change-environment')).toContainText(/17\s*→\s*18/)
+        await expect(changes.getByTestId('playback-change-devices')).toContainText('Historical playback test light')
+      }
       const accepted = await post('fuzz/async', { explorationMode: 'BOARD_SNAPSHOT', targetSpecIds: ['never_on'],
         maxIterations: 1, pathLength: 3, populationSize: 1, seed: 17 })
       let fuzzRunId = 0
@@ -87,6 +112,7 @@ for (const locale of ['zh-CN']) {
       await expect(toolbar).toBeFocused()
       await noHints(page)
       await expectControlsReachable(page, 'trace-timeline')
+      await expect(page.getByTestId('trace-timeline-host')).toHaveAccessibleName('反例回放')
       await page.screenshot({ path: testInfo.outputPath('counterexample-focused.png') })
       await page.keyboard.press('Tab')
       await expect(page.getByTestId('trace-timeline-play')).toBeFocused()
@@ -95,6 +121,7 @@ for (const locale of ['zh-CN']) {
       await expect(page.getByTestId('trace-timeline-state-0')).toBeFocused()
       await page.keyboard.press('End')
       await expect(page.getByTestId(`trace-timeline-state-${trace.states.length - 1}`)).toBeFocused()
+      await expectFrozenChanges('trace-timeline')
       await page.getByTestId('trace-timeline-changes-tab').press('ArrowRight')
       await expect(page.getByTestId('trace-timeline-details-tab')).toBeFocused()
       await page.keyboard.press('End')
@@ -127,12 +154,26 @@ for (const locale of ['zh-CN']) {
       await expect(result).toBeHidden()
       await expect(historyEntry).toBeFocused()
       await openHistory('simulation')
-      await page.getByTestId(`replay-simulation-trace-${simulation.id}`).press('Enter')
+      const heldSimulation = await holdHistoryReply(page, `/api/simulate/traces/${simulation.id}`)
+      const replaySimulation = page.getByTestId(`replay-simulation-trace-${simulation.id}`)
+      try {
+        await Promise.all([heldSimulation.requested, replaySimulation.press('Enter')])
+        await page.keyboard.press('Escape')
+        await expect(page.getByTestId('trace-history-panel')).toBeHidden()
+      } finally {
+        heldSimulation.release()
+      }
+      expect((await heldSimulation.delivered()).ok()).toBe(true)
+      await expect(toolbar).toBeHidden()
+      await expect(historyEntry).toBeFocused()
+      await openHistory('simulation')
+      await replaySimulation.press('Enter')
       await expect(toolbar).toBeFocused()
       await noHints(page)
       await expectControlsReachable(page, 'simulation-timeline')
       await page.getByTestId('simulation-timeline-state-0').press('End')
       await expect(page.getByTestId(`simulation-timeline-state-${simulation.states.length - 1}`)).toBeFocused()
+      await expectFrozenChanges('simulation-timeline')
       await page.getByTestId('simulation-timeline-changes-tab').press('End')
       await expect(page.getByTestId('simulation-timeline-run-tab')).toBeFocused()
       await noHints(page)
@@ -141,11 +182,20 @@ for (const locale of ['zh-CN']) {
       await expect(toolbar).toBeHidden()
       await expect(historyEntry).toBeFocused()
       await openHistory('fuzzing')
-      await page.getByTestId(`open-fuzzing-run-${fuzzRunId}`).press('Enter')
       const fuzzResult = page.getByTestId('fuzzing-result-dialog')
-      await expect(fuzzResult.getByRole('dialog')).toBeFocused()
-      await noHints(page)
-      await page.keyboard.press('Escape')
+      const heldRun = await holdHistoryReply(page, `/api/fuzz/runs/${fuzzRunId}`)
+      try {
+        await page.getByTestId(`open-fuzzing-run-${fuzzRunId}`).press('Enter')
+        await heldRun.requested
+        await expect(fuzzResult.getByRole('dialog')).toBeFocused()
+        await noHints(page)
+        await page.keyboard.press('Escape')
+        await expect(fuzzResult).toBeHidden()
+        await expect(historyEntry).toBeFocused()
+      } finally {
+        heldRun.release()
+      }
+      expect((await heldRun.delivered()).ok()).toBe(true)
       await expect(fuzzResult).toBeHidden()
       await expect(historyEntry).toBeFocused()
       await openHistory('fuzzing')
@@ -154,6 +204,7 @@ for (const locale of ['zh-CN']) {
       await expect(toolbar).toBeFocused()
       await noHints(page)
       await expectControlsReachable(page, 'trace-timeline')
+      await expect(page.getByTestId('trace-timeline-host')).toHaveAccessibleName('候选反例回放')
       await page.getByTestId('trace-timeline-close').press('Enter')
       await expect(toolbar).toBeHidden()
       await expect(historyEntry).toBeFocused()

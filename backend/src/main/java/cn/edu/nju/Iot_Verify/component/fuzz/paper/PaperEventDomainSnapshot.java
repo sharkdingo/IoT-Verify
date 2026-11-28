@@ -52,52 +52,15 @@ public record PaperEventDomainSnapshot(
 
     @Override
     public List<PaperInitialValue> materializeInitialValues(long initializationNonce) {
-        SplittableRandom random = new SplittableRandom(initializationNonce);
-        List<PaperInitialValue> initial = new ArrayList<>(initialValueDomains().size());
-        for (PaperDeviceDomain device : deviceDomains) {
+        List<PaperInitialValueDomain> domains = initialValueDomains();
+        List<PaperInitialValue> initial = new ArrayList<>(domains.size());
+        SplittableRandom sharedRandom = new SplittableRandom(initializationNonce);
+        // Adding local targets must not advance the device and environment sequence.
+        SplittableRandom localRandom = new SplittableRandom(initializationNonce ^ LOCAL_INITIALIZATION_SALT);
+        for (PaperInitialValueDomain domain : domains) {
+            SplittableRandom source = domain.type() == PaperInitialValue.Type.DEVICE_VARIABLE ? localRandom : sharedRandom;
             initial.add(new PaperInitialValue(
-                    PaperInitialValue.Type.DEVICE_STATE,
-                    device.targetId(),
-                    device.property(),
-                    device.legalValues().get(random.nextInt(device.legalValues().size()))));
-        }
-        for (PaperEnvironmentDomain environment : environmentDomains) {
-            initial.add(new PaperInitialValue(
-                    PaperInitialValue.Type.ENVIRONMENT_VALUE,
-                    environment.targetId(),
-                    environment.property(),
-                    environment.randomInitialValue(random)));
-        }
-        SplittableRandom localRandom = new SplittableRandom(
-                initializationNonce ^ LOCAL_INITIALIZATION_SALT);
-        for (PaperInitialValueDomain local : localVariableDomains) {
-            initial.add(new PaperInitialValue(
-                    local.type(),
-                    local.targetId(),
-                    local.property(),
-                    local.randomValue(localRandom)));
-        }
-        return List.copyOf(initial);
-    }
-
-    @Override
-    public List<PaperEvent> materializeInitialState(long initializationNonce) {
-        SplittableRandom random = new SplittableRandom(initializationNonce);
-        List<PaperEvent> initial = new ArrayList<>(
-                deviceDomains.size() + environmentDomains.size());
-        for (PaperDeviceDomain device : deviceDomains) {
-            initial.add(new PaperEvent(
-                    PaperEvent.Type.DEVICE,
-                    device.targetId(),
-                    device.legalValues().get(random.nextInt(device.legalValues().size())),
-                    1));
-        }
-        for (PaperEnvironmentDomain environment : environmentDomains) {
-            initial.add(new PaperEvent(
-                    PaperEvent.Type.ENVIRONMENT,
-                    environment.name(),
-                    environment.randomInitialValue(random),
-                    1));
+                    domain.type(), domain.targetId(), domain.property(), domain.randomValue(source)));
         }
         return List.copyOf(initial);
     }

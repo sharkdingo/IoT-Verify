@@ -146,12 +146,7 @@ public class ManageRuleTool extends AbstractAiTool {
 
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "conditions", "command", "label", "ruleId", "ruleIds",
                     "expectedRuleIds", "readRef", "confirmed", "impactToken"));
@@ -196,7 +191,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("executionOrder", mutation.getCurrentCount());
         response.put("rule", RuleToolPresenter.present(userId, mutation.getAffectedItem(), nodes));
         response.put("totalRules", mutation.getCurrentCount());
-        return successJson(response, "Rule created but not formally verified.");
+        return successJson(response);
     }
 
     /** Add and update share the same strict condition, command and conjunction admission. */
@@ -272,7 +267,8 @@ public class ManageRuleTool extends AbstractAiTool {
                 }
             }
 
-            if (("in".equals(relation) || "not in".equals(relation)) && isEmptyValueList(value)) {
+            if (("in".equals(relation) || "not in".equals(relation))
+                    && SmvRelationUtils.splitRuleValues(value).isEmpty()) {
                 throw new ArgValidationException(errorJson("Condition value list cannot be empty for relation '" + relation
                         + "' in condition " + (index + 1) + ".",
                         "VALIDATION_ERROR", 400));
@@ -393,7 +389,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("executionOrder", mutation.getCurrentItems().indexOf(saved) + 1);
         response.put("rule", RuleToolPresenter.present(userId, saved, baseline.nodes()));
         response.put("totalRules", mutation.getCurrentCount());
-        return successJson(response, "Rule updated but not formally verified.");
+        return successJson(response);
     }
 
     private String executeDelete(Long userId, JsonNode args) throws Exception {
@@ -421,7 +417,7 @@ public class ManageRuleTool extends AbstractAiTool {
             preview.put("requiresUserConfirmation", true);
             preview.put("rule", presentedRule);
             preview.put("impactToken", impactToken);
-            return readOnlySuccessJson(preview, "Rule deletion preview unavailable.");
+            return readOnlySuccessJson(preview);
         }
 
         String impactToken = requiredTextField(args, "impactToken", "arguments");
@@ -470,7 +466,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("deletedRule", RuleToolPresenter.present(userId,
                 mutation.getAffectedItem(), nodes));
         response.put("totalRules", mutation.getCurrentCount());
-        return successJson(response, "Rule deleted successfully.");
+        return successJson(response);
     }
 
     private String executeReorder(Long userId, JsonNode args) throws Exception {
@@ -493,7 +489,7 @@ public class ManageRuleTool extends AbstractAiTool {
         response.put("verificationStatus", "NOT_VERIFIED");
         response.put("totalRules", presented.size());
         response.put("rules", presented);
-        return successJson(response, "Rule execution order updated.");
+        return successJson(response);
     }
 
     private List<Long> positiveRuleIdsArg(JsonNode args, String field) throws ArgValidationException {
@@ -610,17 +606,5 @@ public class ManageRuleTool extends AbstractAiTool {
         }
         String label = labelsById.get(id);
         return label != null ? label : id;
-    }
-
-    private boolean isEmptyValueList(String value) {
-        if (value == null) {
-            return true;
-        }
-        for (String item : value.split("[,;|]")) {
-            if (item != null && !item.trim().isEmpty()) {
-                return false;
-            }
-        }
-        return true;
     }
 }

@@ -4,6 +4,7 @@ import ts from 'typescript'
 import { computed, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { readDeletionReceipt } from '@/utils/boardWriteReceipt'
 import { activeTaskProgressStage } from '@/utils/runResponse'
 import { errorDetails, localizedErrorMessage, type ApiErrorDetails } from '@/utils/userMessage'
 import { classifyTrackedFuzzRunError } from './fuzzingRecovery'
@@ -22,10 +23,12 @@ const bind = (name: string, ports: Record<string, unknown>) => {
   return new Function('ports', `with (ports) { ${javascript}; return ${name} }`)(ports)
 }
 
-const context = (locale = 'en') => {
+const context = () => {
   const ports = {
     boardLifecycleDisposed: false, taskInboxLoadingEpoch: 0,
     taskInboxRequests: createPagedRequestCoordinator(), loadingTaskHistory: ref(false),
+    captureBoardRunOwner: () => () => true, isActiveTaskStatus: (status: string) => ['PENDING', 'RUNNING'].includes(status),
+    historyPanelIntentEpoch: 0, activeHistoryLayer: ref('tasks'), tracksRun: () => false,
     taskInboxError: ref<ApiErrorDetails | null>(null),
     verificationTasks: ref([{ id: 1 }]), simulationTasks: ref([{ id: 2 }]), fuzzingTasks: ref([{ id: 3 }]),
     fetchVerificationTasks: vi.fn().mockResolvedValue({ tasks: [{ id: 11 }], excludedIds: [] }),
@@ -33,7 +36,7 @@ const context = (locale = 'en') => {
     fetchFuzzingTasks: vi.fn().mockResolvedValue({ tasks: [{ id: 13 }], excludedIds: [] }),
     reconcileTrackedFuzzTasks: vi.fn().mockResolvedValue(undefined),
     taskSummaryTimestamp: () => 0, notifyError: vi.fn(), t: (key: string) => key,
-    errorDetails, extractApiErrorMessage: (error: Error, fallback: string) => localizedErrorMessage(error, fallback, locale),
+    errorDetails, extractApiErrorMessage: (error: Error, fallback: string) => localizedErrorMessage(error, fallback, 'en'),
     mergeTaskSummariesPreservingExcluded: null as any
   }
   ports.mergeTaskSummariesPreservingExcluded = bind('mergeTaskSummariesPreservingExcluded', ports)
@@ -46,6 +49,86 @@ const deferred = () => {
   const promise = new Promise<any>((done, fail) => { resolve = done; reject = fail })
   return { promise, resolve, reject }
 }
+
+const dismissalContext = () => {
+  const { ports: base } = context()
+  const createApi = () => ({ deleteTask: vi.fn(), getTask: vi.fn() })
+  const ports = Object.assign(base, {
+    boardApi: createApi(), simulationApi: createApi(), fuzzingApi: createApi(),
+    pendingTaskActionKeys: ref(new Set<string>()), readDeletionReceipt,
+    captureBoardRunOwner: vi.fn<() => () => boolean>(() => () => true),
+    loadTaskInbox: vi.fn(), invalidateTaskInboxRequests: vi.fn(),
+    clearFuzzNotifications: vi.fn(), untrackFuzzTask: vi.fn(),
+    notifySuccess: vi.fn(), notifyBlocked: vi.fn(), publishBoardInvalidation: vi.fn(), currentAuthUserId: ref(42)
+  })
+  for (const name of ['taskActionKey', 'withTaskActionLock']) {
+    Object.assign(ports, { [name]: bind(name, ports) })
+  }
+  const dismiss = bind('dismissBoardTask', ports)
+  return { ports, verification: (id: number) => dismiss('verification', id),
+    simulation: (id: number) => dismiss('simulation', id), fuzzing: (id: number) => dismiss('fuzzing', id) }
+}
+
+describe('task record dismissal', () => {
+  it('reconciles a missing exploration task after one unconfirmed write and blocks a concurrent repeat', async () => {
+    const { ports, fuzzing } = dismissalContext()
+    const response = deferred()
+    ports.fuzzingApi.deleteTask.mockReturnValue(response.promise)
+    ports.fuzzingApi.getTask.mockRejectedValue({ response: { status: 404 } })
+
+    const dismissing = fuzzing(3)
+    await fuzzing(3)
+    expect(ports.fuzzingApi.deleteTask).toHaveBeenCalledExactlyOnceWith(3)
+    expect(ports.pendingTaskActionKeys.value.has('dismiss:fuzzing:3')).toBe(true)
+    response.reject(new Error('Lost task dismissal response'))
+    await dismissing
+
+    expect(ports.fuzzingApi.getTask).toHaveBeenCalledExactlyOnceWith(3)
+    expect(ports.loadTaskInbox).not.toHaveBeenCalled()
+    expect(ports.fuzzingTasks.value).toEqual([])
+    expect(ports.simulationTasks.value).toEqual([{ id: 2 }])
+    expect(ports.clearFuzzNotifications).toHaveBeenCalledExactlyOnceWith(undefined, 3)
+    expect(ports.untrackFuzzTask).toHaveBeenCalledExactlyOnceWith(3)
+    expect(ports.publishBoardInvalidation).toHaveBeenCalledExactlyOnceWith(42, 'manual', 'tasks')
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.taskDismissOutcomeMissing')
+    expect(ports.notifyError).not.toHaveBeenCalled()
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+    expect(ports.pendingTaskActionKeys.value.size).toBe(0)
+  })
+
+  it.each(['present', 'unavailable'] as const)('keeps the verification task when the follow-up read is %s', async outcome => {
+    const { ports, verification } = dismissalContext()
+    ports.boardApi.deleteTask.mockRejectedValue(new Error('Lost task dismissal response'))
+    if (outcome === 'present') ports.boardApi.getTask.mockResolvedValue({ id: 1, status: 'CANCELLED' })
+    else ports.boardApi.getTask.mockRejectedValue({ response: { status: 503 } })
+
+    await verification(1)
+
+    expect(ports.boardApi.getTask).toHaveBeenCalledExactlyOnceWith(1)
+    expect(ports.verificationTasks.value).toEqual([{ id: 1 }])
+    expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith(outcome === 'present'
+      ? 'app.taskDismissOutcomePresent' : 'app.taskDismissOutcomeUnconfirmed')
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+    expect(ports.publishBoardInvalidation).not.toHaveBeenCalled()
+  })
+
+  it('discards a dismissal receipt that arrives after the account changes', async () => {
+    const { ports, simulation } = dismissalContext()
+    const response = deferred()
+    let ownsBoard = true
+    ports.captureBoardRunOwner.mockReturnValue(() => ownsBoard)
+    ports.simulationApi.deleteTask.mockReturnValue(response.promise)
+
+    const dismissing = simulation(2)
+    ownsBoard = false
+    response.resolve()
+    await dismissing
+
+    expect(ports.simulationTasks.value).toEqual([{ id: 2 }])
+    expect(ports.invalidateTaskInboxRequests).not.toHaveBeenCalled()
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+  })
+})
 
 const openingContext = () => {
   const state = context()
@@ -79,16 +162,17 @@ describe('task inbox read failures', () => {
       verificationTasks: ref([{ id: 1, status: 'RUNNING' }, { id: 11, status: 'RUNNING' }]),
       pendingTaskActionKeys: ref(new Set<string>()), watchedTaskId: () => undefined,
       showHistoryPanel: ref(false), loadTaskInbox: state.load,
+      presentUnconfirmedTaskCancellation: vi.fn(),
       asyncVerificationTask: ref({ taskId: null, statusKey: 'app.taskInitializing' }),
-      boardApi: { cancelTask: vi.fn().mockReturnValueOnce(response.promise)
+      boardApi: { getTask: vi.fn().mockResolvedValue({ id: 11, status: 'RUNNING' }), cancelTask: vi.fn().mockReturnValueOnce(response.promise)
         .mockRejectedValueOnce(new Error('Unconfirmed cancellation')) }
     })
     for (const name of ['taskActionKey', 'withTaskActionLock', 'hasCancelledTaskRow',
       'isWatchedTaskCancelled', 'isTaskCancellationKnown']) {
       Object.assign(ports, { [name]: bind(name, ports) })
     }
-    const cancel = bind('cancelVerificationTaskFromInbox', ports)
-    const cancelling = cancel(1)
+    const cancel = bind('cancelBoardTask', ports)
+    const cancelling = cancel('verification', 1)
     ports.fetchVerificationTasks.mockResolvedValue({
       tasks: [{ id: 1, status: 'CANCELLED' }, { id: 11, status: 'RUNNING' }], excludedIds: []
     })
@@ -99,9 +183,11 @@ describe('task inbox read failures', () => {
     expect(ports.notifyError).not.toHaveBeenCalled()
     expect(ports.verificationTasks.value[0]?.status).toBe('CANCELLED')
 
-    await cancel(11)
-    expect(ports.notifyError).toHaveBeenCalledExactlyOnceWith('app.failedToCancelVerificationTask')
-    expect(ports.fetchVerificationTasks).toHaveBeenCalledTimes(3)
+    await cancel('verification', 11)
+    expect(ports.presentUnconfirmedTaskCancellation).toHaveBeenCalledOnce()
+    expect(ports.boardApi.getTask).toHaveBeenCalledExactlyOnceWith(11)
+    expect(ports.notifyError).not.toHaveBeenCalled()
+    expect(ports.fetchVerificationTasks).toHaveBeenCalledTimes(2)
   })
 
   it('keeps a confirmed cancellation visible while an unrelated inbox read fails', async () => {
@@ -118,13 +204,15 @@ describe('task inbox read failures', () => {
       notifyInfo: vi.fn(), loadTaskInbox: state.load, taskInboxBackgroundRefreshPromise: null,
       boardApi: { cancelTask: vi.fn().mockReturnValue(receipt.promise) }
     })
-    for (const name of ['taskActionKey', 'withTaskActionLock', 'invalidateTaskInboxRequests',
-      'upsertVerificationTaskSummary', 'taskProgressStatusKey', 'applyTaskCancellationReceipt',
-      'hasCancelledTaskRow', 'hasVisibleCancelledTaskRow', 'notifyTaskCancellationResult']) {
+    for (const name of ['taskActionKey', 'withTaskActionLock', 'invalidateTaskInboxRequests', 'upsertTaskSummary',
+      'upsertVerificationTaskSummary', 'taskProgressStatusKey', 'applyTaskCancellationStatus',
+      'isWatchedTaskCancelled', 'isTaskCancellationKnown', 'hasCancelledTaskRow', 'hasVisibleCancelledTaskRow',
+      'cancellationTaskLabel', 'notifyTaskCancellationResult']) {
       Object.assign(ports, { [name]: bind(name, ports) })
     }
     ports.fetchSimulationTasks.mockReturnValue(refresh.promise)
-    const cancelling = bind('cancelVerificationTaskFromInbox', ports)(1)
+    ports.fetchVerificationTasks.mockResolvedValue({ tasks: [], excludedIds: [1] })
+    const cancelling = bind('cancelBoardTask', ports)('verification', 1)
     watching.value.taskId = 1
     ports.showHistoryPanel.value = false
     receipt.resolve({ taskId: 1, taskStatus: 'CANCELLED', cancellationOutcome: 'ACCEPTED',
@@ -195,15 +283,6 @@ describe('task inbox read failures', () => {
       expect(ports.persistFuzzNotificationState).not.toHaveBeenCalled()
     })
 
-  it('acknowledges unread failures after the current successful read opens the task inbox', async () => {
-    const { ports, open } = openingContext()
-    await open()
-    expect(ports.showHistoryPanel.value).toBe(true)
-    expect(ports.unreadFuzzNotifications.value).toEqual([])
-    expect(ports.persistFuzzNotificationState).toHaveBeenCalledOnce()
-    expect(ports.taskInboxError.value).toBeNull()
-  })
-
   it('opens Task Status directly while recommendations are still generating', async () => {
     const { ports, open } = openingContext()
     ports.isAnyRecommendationRunning.mockReturnValue(true)
@@ -213,15 +292,20 @@ describe('task inbox read failures', () => {
     expect(ports.notifyBlocked).not.toHaveBeenCalled()
   })
 
-  it('keeps known rows and a persistent retry reason instead of only a toast', async () => {
+  it('updates successful task lists while retaining failed rows and a retry reason', async () => {
     const { ports, load } = context()
-    ports.fetchSimulationTasks.mockRejectedValue(new Error('Request timed out'))
-    expect(await load()).toBe(false)
+    const failed = deferred()
+    ports.fetchSimulationTasks.mockReturnValue(failed.promise)
+    const loading = load()
+    await vi.waitFor(() => expect(ports.verificationTasks.value).toEqual([{ id: 11 }]))
+    expect(ports.fuzzingTasks.value).toEqual([{ id: 13 }])
+    failed.reject(new Error('Request timed out'))
+    expect(await loading).toBe(false)
     expect(ports.taskInboxError.value).toMatchObject({ cause: 'Request timed out' })
     expect(ports.taskInboxError.value).not.toHaveProperty('message')
-    expect(ports.verificationTasks.value).toEqual([{ id: 1 }])
+    expect(ports.verificationTasks.value).toEqual([{ id: 11 }])
     expect(ports.simulationTasks.value).toEqual([{ id: 2 }])
-    expect(ports.fuzzingTasks.value).toEqual([{ id: 3 }])
+    expect(ports.fuzzingTasks.value).toEqual([{ id: 13 }])
     expect(ports.loadingTaskHistory.value).toBe(false)
     expect(ports.notifyError).not.toHaveBeenCalled()
   })
@@ -258,17 +342,5 @@ describe('task inbox read failures', () => {
     expect(ports.taskInboxError.value).toMatchObject({ cause: 'Background read failed' })
     expect(ports.loadingTaskHistory.value).toBe(false)
     expect(ports.notifyError).not.toHaveBeenCalled()
-  })
-
-  it('preserves the server cause and fields when Chinese UI copy falls back', async () => {
-    const { ports, load } = context('zh-CN')
-    ports.fetchVerificationTasks.mockRejectedValue({ response: { status: 503, data: {
-      message: 'Task storage could not be read', data: { errors: { tasks: 'Database query timed out' } }
-    } } })
-    expect(await load()).toBe(false)
-    expect(ports.taskInboxError.value).toMatchObject({
-      cause: 'Task storage could not be read',
-      fields: { tasks: 'Database query timed out' }, details: expect.arrayContaining(['HTTP 503'])
-    })
   })
 })

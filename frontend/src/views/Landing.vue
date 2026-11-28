@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, shallowRef, toRef, watch, type Ref } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import TopologyShowcase from '@/components/common/TopologyShowcase.vue'
 import PublicHeader from '@/components/common/PublicHeader.vue'
 import { authApi } from '@/api/auth'
+import type { LoginResponse, Result } from '@/types/auth'
 import { useAuth } from '@/stores/auth'
 import { errorDetails, technicalErrorLines, type ApiErrorDetails } from '@/utils/userMessage'
 import FailureDetails from '@/components/FailureDetails.vue'
@@ -275,53 +276,19 @@ const authRequestErrorMessage = (error: any, fallbackKey: string) => {
 const requestErrorMessage = computed(() => requestError.value
   ? authRequestErrorMessage(requestError.value.error, requestError.value.key) : '')
 
-const handleLogin = async () => {
-  if (loading.value || workspaceNavigation.value) return
-  if (!validateLogin()) return
-  const requestEpoch = ++authRequestEpoch
-  let requestToken = auth.getToken()
-  const requestCurrent = () => !disposed && requestEpoch === authRequestEpoch && auth.isCurrentSessionToken(requestToken)
-
-  requestError.value = null
-  requestDiagnostics.value = null
-  loading.value = true
-  try {
-    const res = await authApi.login({
-      identifier: normalizeAccountIdentifier(loginForm.identifier),
-      password: loginForm.password
-    })
-    if (!requestCurrent()) return
-
-    if (res.code === 200) {
-      if (!res.data) {
-        throw new Error(t('auth.loginFailed'))
-      }
-      requestToken = res.data.token
-      login(res.data.token, {
-        userId: res.data.userId,
-        phone: res.data.phone,
-        username: res.data.username
-      })
-      loading.value = true
-      await openAuthenticatedWorkspace(res.data.token, redirectTarget.value)
-    } else {
-      requestError.value = { key: 'auth.loginFailed', error: { response: { data: res } } }
-      requestDiagnostics.value = errorDetails({ response: { data: res } })
-      await focusRequestError()
-    }
-  } catch (error: any) {
-    if (!requestCurrent()) return
-    requestError.value = { key: 'auth.loginFailed', error }
-    requestDiagnostics.value = errorDetails(error)
-    await focusRequestError()
-  } finally {
-    if (requestCurrent()) loading.value = false
-  }
+const showAuthFailure = async (key: string, error: unknown, diagnostics = errorDetails(error)) => {
+  requestError.value = { key, error }
+  requestDiagnostics.value = diagnostics
+  await focusRequestError()
 }
 
-const handleRegister = async () => {
-  if (loading.value || workspaceNavigation.value) return
-  if (!validateRegister()) return
+const submitAuth = async (
+  mode: AuthMode,
+  validate: () => boolean,
+  submit: () => Promise<Result<LoginResponse>>
+) => {
+  if (loading.value || workspaceNavigation.value || !validate()) return
+  const failureKey = mode === 'login' ? 'auth.loginFailed' : 'auth.registerFailed'
   const requestEpoch = ++authRequestEpoch
   let requestToken = auth.getToken()
   const requestCurrent = () => !disposed && requestEpoch === authRequestEpoch && auth.isCurrentSessionToken(requestToken)
@@ -330,52 +297,113 @@ const handleRegister = async () => {
   requestDiagnostics.value = null
   loading.value = true
   try {
-    const res = await authApi.register({
-      phone: registerForm.phone.trim(),
-      username: normalizeAccountIdentifier(registerForm.username),
-      password: registerForm.password
-    })
+    const res = await submit()
     if (!requestCurrent()) return
-
-    if (res.code === 200) {
-      if (!res.data) {
-        throw new Error(t('auth.registerFailed'))
-      }
-      requestToken = res.data.token
-      login(res.data.token, {
-        userId: res.data.userId,
-        phone: res.data.phone,
-        username: res.data.username
-      })
-      loading.value = true
-      await openAuthenticatedWorkspace(res.data.token, redirectTarget.value)
-    } else {
-      requestError.value = { key: 'auth.registerFailed', error: { response: { data: res } } }
-      requestDiagnostics.value = errorDetails({ response: { data: res } })
-      await focusRequestError()
+    if (res.code !== 200) {
+      await showAuthFailure(failureKey, { response: { data: res } })
+      return
     }
-  } catch (error: any) {
+    if (!res.data) throw new Error(t(failureKey))
+    const { token, userId, phone, username } = res.data
+    requestToken = token
+    login(token, { userId, phone, username })
+    loading.value = true
+    await openAuthenticatedWorkspace(token, redirectTarget.value)
+  } catch (error) {
     if (!requestCurrent()) return
-    requestDiagnostics.value = errorDetails(error)
-    if (requestDiagnostics.value.reasonCode === 'PHONE_ALREADY_EXISTS') {
-      formErrors.registerPhone = 'auth.phoneAlreadyExists'
-    } else if (requestDiagnostics.value.reasonCode === 'USERNAME_ALREADY_EXISTS') {
-      formErrors.registerUsername = 'account.usernameExists'
+    const diagnostics = errorDetails(error)
+    const reason = diagnostics.reasonCode
+    if (mode === 'register' && (reason === 'PHONE_ALREADY_EXISTS' || reason === 'USERNAME_ALREADY_EXISTS')) {
+      requestDiagnostics.value = diagnostics
+      if (reason === 'PHONE_ALREADY_EXISTS') formErrors.registerPhone = 'auth.phoneAlreadyExists'
+      else formErrors.registerUsername = 'account.usernameExists'
     } else {
-      requestError.value = { key: 'auth.registerFailed', error }
-      await focusRequestError()
+      await showAuthFailure(failureKey, error, diagnostics)
     }
   } finally {
     if (requestCurrent()) {
       loading.value = false
-      await nextTick()
-      if (requestCurrent()) {
-        if (formErrors.registerPhone) registerPhoneRef.value?.focus()
-        else if (formErrors.registerUsername) registerUsernameRef.value?.focus()
+      if (mode === 'register') {
+        await nextTick()
+        if (requestCurrent()) {
+          if (formErrors.registerPhone) registerPhoneRef.value?.focus()
+          else if (formErrors.registerUsername) registerUsernameRef.value?.focus()
+        }
       }
     }
   }
 }
+
+const handleLogin = () => submitAuth('login', validateLogin, () => authApi.login({
+  identifier: normalizeAccountIdentifier(loginForm.identifier),
+  password: loginForm.password
+}))
+
+const handleRegister = () => submitAuth('register', validateRegister, () => authApi.register({
+  phone: registerForm.phone.trim(),
+  username: normalizeAccountIdentifier(registerForm.username),
+  password: registerForm.password
+}))
+
+type AuthField = {
+  id: string
+  label: string
+  errorKey: string
+  model: Ref<string>
+  input: Ref<HTMLInputElement | null>
+  type: 'text' | 'password' | 'tel'
+  autocomplete: string
+  inputMode?: 'numeric'
+  hint?: string
+}
+
+const credentialForms: readonly {
+  mode: AuthMode
+  fields: readonly AuthField[]
+  submit: () => Promise<void>
+  submitLabel: string
+}[] = [
+  {
+    mode: 'login', submit: handleLogin, submitLabel: 'auth.signInToConsole',
+    fields: [
+      {
+        id: 'login-account', label: 'auth.account', errorKey: 'loginIdentifier',
+        model: toRef(loginForm, 'identifier'), input: loginIdentifierRef,
+        type: 'text', autocomplete: 'username'
+      },
+      {
+        id: 'login-password', label: 'auth.password', errorKey: 'loginPassword',
+        model: toRef(loginForm, 'password'), input: loginPasswordRef,
+        type: 'password', autocomplete: 'current-password'
+      }
+    ]
+  },
+  {
+    mode: 'register', submit: handleRegister, submitLabel: 'auth.registerNow',
+    fields: [
+      {
+        id: 'register-phone', label: 'auth.phoneNumber', errorKey: 'registerPhone',
+        model: toRef(registerForm, 'phone'), input: registerPhoneRef,
+        type: 'tel', inputMode: 'numeric', autocomplete: 'tel', hint: 'auth.phoneHint'
+      },
+      {
+        id: 'register-username', label: 'auth.username', errorKey: 'registerUsername',
+        model: toRef(registerForm, 'username'), input: registerUsernameRef,
+        type: 'text', autocomplete: 'username', hint: 'auth.usernameLength'
+      },
+      {
+        id: 'register-password', label: 'auth.password', errorKey: 'registerPassword',
+        model: toRef(registerForm, 'password'), input: registerPasswordRef,
+        type: 'password', autocomplete: 'new-password', hint: 'auth.passwordHint'
+      },
+      {
+        id: 'register-confirm-password', label: 'auth.confirmPassword', errorKey: 'confirmPassword',
+        model: toRef(registerForm, 'confirmPassword'), input: confirmPasswordRef,
+        type: 'password', autocomplete: 'new-password'
+      }
+    ]
+  }
+]
 </script>
 
 <template>
@@ -503,187 +531,52 @@ const handleRegister = async () => {
             </div>
           </div>
 
-          <form
-            v-if="!workspaceNavigation && !isRegisterMode"
-            id="login-panel"
-            class="auth-form"
-            role="tabpanel"
-            aria-labelledby="auth-tab-login"
-            @submit.prevent="handleLogin"
-          >
-            <label>
-              <span id="login-account-label">{{ t('auth.account') }}</span>
-              <input
-                class="board-field"
-                ref="loginIdentifierRef"
-                v-model="loginForm.identifier"
-                type="text"
-                autocomplete="username"
-                aria-labelledby="login-account-label"
-                :disabled="loading"
-                :aria-invalid="Boolean(formErrors.loginIdentifier)"
-                :aria-describedby="formErrors.loginIdentifier ? 'login-account-hint' : undefined"
-                @input="clearFieldError('loginIdentifier')"
-              />
-              <small
-                v-if="formErrors.loginIdentifier"
-                id="login-account-hint"
-                :role="formErrors.loginIdentifier ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.loginIdentifier }"
-              >
-                {{ t(formErrors.loginIdentifier) }}
-              </small>
-            </label>
-
-            <label>
-              <span id="login-password-label">{{ t('auth.password') }}</span>
-              <input
-                class="board-field"
-                ref="loginPasswordRef"
-                v-model="loginForm.password"
-                type="password"
-                autocomplete="current-password"
-                aria-labelledby="login-password-label"
-                :disabled="loading"
-                :aria-invalid="Boolean(formErrors.loginPassword)"
-                :aria-describedby="formErrors.loginPassword ? 'login-password-hint' : undefined"
-                @input="clearFieldError('loginPassword')"
-              />
-              <small
-                v-if="formErrors.loginPassword"
-                id="login-password-hint"
-                :role="formErrors.loginPassword ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.loginPassword }"
-              >
-                {{ t(formErrors.loginPassword) }}
-              </small>
-            </label>
-
-            <button
-              class="auth-submit"
-              :class="{ 'auth-submit--busy': loading }"
-              type="submit"
-              :disabled="loading"
-              :aria-busy="loading ? 'true' : undefined"
+          <template v-for="form in credentialForms" :key="form.mode">
+            <form
+              v-if="!workspaceNavigation && authMode === form.mode"
+              :id="`${form.mode}-panel`"
+              class="auth-form"
+              role="tabpanel"
+              :aria-labelledby="`auth-tab-${form.mode}`"
+              @submit.prevent="form.submit"
             >
-              <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
-              {{ loading ? loadingLabel : t('auth.signInToConsole') }}
-            </button>
-          </form>
+              <label v-for="field in form.fields" :key="field.id">
+                <span :id="`${field.id}-label`">{{ t(field.label) }}</span>
+                <input
+                  class="board-field"
+                  :ref="element => { field.input.value = element as HTMLInputElement | null }"
+                  v-model="field.model.value"
+                  :type="field.type"
+                  :inputmode="field.inputMode"
+                  :autocomplete="field.autocomplete"
+                  :aria-labelledby="`${field.id}-label`"
+                  :disabled="loading"
+                  :aria-invalid="Boolean(formErrors[field.errorKey])"
+                  :aria-describedby="formErrors[field.errorKey] || field.hint ? `${field.id}-hint` : undefined"
+                  @input="clearFieldError(field.errorKey)"
+                />
+                <small
+                  v-if="formErrors[field.errorKey] || field.hint"
+                  :id="`${field.id}-hint`"
+                  :role="formErrors[field.errorKey] ? 'alert' : undefined"
+                  :class="{ 'auth-form__hint--error': formErrors[field.errorKey] }"
+                >
+                  {{ t(formErrors[field.errorKey] || field.hint || '') }}
+                </small>
+              </label>
 
-          <form
-            v-else-if="!workspaceNavigation"
-            id="register-panel"
-            class="auth-form"
-            role="tabpanel"
-            aria-labelledby="auth-tab-register"
-            @submit.prevent="handleRegister"
-          >
-            <label>
-              <span id="register-phone-label">{{ t('auth.phoneNumber') }}</span>
-              <input
-                class="board-field"
-                ref="registerPhoneRef"
-                v-model="registerForm.phone"
-                type="tel"
-                inputmode="numeric"
-                autocomplete="tel"
-                aria-labelledby="register-phone-label"
+              <button
+                class="auth-submit"
+                :class="{ 'auth-submit--busy': loading }"
+                type="submit"
                 :disabled="loading"
-                :aria-invalid="Boolean(formErrors.registerPhone)"
-                aria-describedby="register-phone-hint"
-                @input="clearFieldError('registerPhone')"
-              />
-              <small
-                id="register-phone-hint"
-                :role="formErrors.registerPhone ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.registerPhone }"
+                :aria-busy="loading ? 'true' : undefined"
               >
-                {{ t(formErrors.registerPhone || 'auth.phoneHint') }}
-              </small>
-            </label>
-
-            <label>
-              <span id="register-username-label">{{ t('auth.username') }}</span>
-              <input
-                class="board-field"
-                ref="registerUsernameRef"
-                v-model="registerForm.username"
-                type="text"
-                autocomplete="username"
-                aria-labelledby="register-username-label"
-                :disabled="loading"
-                :aria-invalid="Boolean(formErrors.registerUsername)"
-                aria-describedby="register-username-hint"
-                @input="clearFieldError('registerUsername')"
-              />
-              <small
-                id="register-username-hint"
-                :role="formErrors.registerUsername ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.registerUsername }"
-              >
-                {{ t(formErrors.registerUsername || 'auth.usernameLength') }}
-              </small>
-            </label>
-
-            <label>
-              <span id="register-password-label">{{ t('auth.password') }}</span>
-              <input
-                class="board-field"
-                ref="registerPasswordRef"
-                v-model="registerForm.password"
-                type="password"
-                autocomplete="new-password"
-                aria-labelledby="register-password-label"
-                :disabled="loading"
-                :aria-invalid="Boolean(formErrors.registerPassword)"
-                aria-describedby="register-password-hint"
-                @input="clearFieldError('registerPassword')"
-              />
-              <small
-                id="register-password-hint"
-                :role="formErrors.registerPassword ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.registerPassword }"
-              >
-                {{ t(formErrors.registerPassword || 'auth.passwordHint') }}
-              </small>
-            </label>
-
-            <label>
-              <span id="register-confirm-password-label">{{ t('auth.confirmPassword') }}</span>
-              <input
-                class="board-field"
-                ref="confirmPasswordRef"
-                v-model="registerForm.confirmPassword"
-                type="password"
-                autocomplete="new-password"
-                aria-labelledby="register-confirm-password-label"
-                :disabled="loading"
-                :aria-invalid="Boolean(formErrors.confirmPassword)"
-                :aria-describedby="formErrors.confirmPassword ? 'register-confirm-password-hint' : undefined"
-                @input="clearFieldError('confirmPassword')"
-              />
-              <small
-                v-if="formErrors.confirmPassword"
-                id="register-confirm-password-hint"
-                :role="formErrors.confirmPassword ? 'alert' : undefined"
-                :class="{ 'auth-form__hint--error': formErrors.confirmPassword }"
-              >
-                {{ t(formErrors.confirmPassword) }}
-              </small>
-            </label>
-
-            <button
-              class="auth-submit"
-              :class="{ 'auth-submit--busy': loading }"
-              type="submit"
-              :disabled="loading"
-              :aria-busy="loading ? 'true' : undefined"
-            >
-              <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
-              {{ loading ? loadingLabel : t('auth.registerNow') }}
-            </button>
-          </form>
+                <span v-if="loading" class="material-symbols-outlined auth-submit__spinner" aria-hidden="true">progress_activity</span>
+                {{ loading ? loadingLabel : t(form.submitLabel) }}
+              </button>
+            </form>
+          </template>
 
           <FailureDetails v-if="requestDiagnostics && !requestError" :details="technicalErrorLines(requestDiagnostics)" suggestion="" />
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { mount } from '@vue/test-utils'
 import { createI18n } from 'vue-i18n'
-import { afterEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import PlaybackChangesPanel from '../PlaybackChangesPanel.vue'
 import { playbackDeviceChangeDetails } from '@/utils/traceView'
 import { buildTraceEdgePlaybackStates } from '@/utils/traceEdgePlayback'
@@ -11,60 +11,20 @@ import { i18n as appI18n } from '@/assets/i18n'
 const i18n = createI18n({
   legacy: false,
   locale: 'en',
+  fallbackLocale: 'en',
   messages: {
-    en: {
-      app: {
-        state: 'State',
-        mode: 'Mode',
-        variableValue: 'Value',
-        trusted: 'trusted',
-        untrusted: 'untrusted',
-        private: 'private data',
-        public: 'public data',
-        trust: 'trust',
-        privacy: 'privacy',
-        unknown: 'Unknown',
-        playbackDeviceChanges: 'Device changes',
-        fuzzFirstViolation: 'First violation',
-        traceViolationHere: 'Violation',
-        traceVisualization: {
-          simulationStepChanges: 'Device Changes in This Step',
-          counterexampleStepChanges: 'Counterexample Changes in This Step',
-          fuzzingStepChanges: 'Candidate Changes in This Step',
-          fuzzInputsInThisStep: 'Exploration inputs in this state',
-          fuzzDeviceStateInput: 'Device-state input',
-          fuzzDeviceInput: 'Device-variable input',
-          fuzzEnvironmentInput: 'Environment-value input',
-          fuzzEnvironmentRateInput: 'Environment-rate input',
-          fuzzRandomInitialSource: 'Random initial state',
-          fuzzSeedEventSource: 'Seed-generated input',
-          fuzzModelChoiceSource: 'Model choice',
-          noFuzzInputInThisStep: 'No exploration input was injected',
-          fuzzObservedModelChanges: 'Observable model or natural changes',
-          playbackInitialStateSummary: 'Initial path state; there is no previous state to compare.',
-          playbackChangesSummaryWithRules: '{devices} device(s) and {environment} environment value(s) changed; {rules} user automation(s) ran in this step.',
-          playbackChangesSummaryWithoutRules: '{devices} device(s) and {environment} environment value(s) changed; no user automation ran in this step.',
-          playbackNoObservableChanges: 'No observable values changed',
-          environmentChanges: 'Environment changes',
-          automationInThisStep: 'Automations run in this step',
-          playbackAnimatedEdges: 'At least one command entering this state was delivered.',
-          securityLabels: 'Trust / privacy labels',
-          compromiseStatus: 'Compromise status',
-          compromised: 'Compromised',
-          notCompromised: 'Not compromised',
-          changeCountSuffix: 'change(s)',
-          stateLabel: 'State'
-        }
-      }
-    }
+    en: appI18n.global.getLocaleMessage('en'),
+    'zh-CN': appI18n.global.getLocaleMessage('zh-CN')
   }
 })
 
 describe('PlaybackChangesPanel', () => {
+  beforeEach(() => { i18n.global.locale.value = 'en' })
+
   it('does not infer missing canvas connections from a compromised command without delivery animation', async () => {
     const rule = { ruleId: 'rule-1', ruleIndex: 0, ruleLabel: 'Recorded alarm rule' }
     const edge: DeviceEdge = {
-      id: 'edge-1', from: 'sensor', to: 'alarm', fromLabel: 'Sensor', toLabel: 'Alarm',
+      id: 'edge-1', from: 'sensor', to: 'alarm',
       fromPos: { x: 0, y: 0 }, toPos: { x: 1, y: 1 }, ruleId: rule.ruleId, ruleIndex: rule.ruleIndex
     }
     const edgeStates = buildTraceEdgePlaybackStates([edge], {
@@ -89,8 +49,7 @@ describe('PlaybackChangesPanel', () => {
   })
 
   it.each(['en', 'zh-CN'] as const)('marks only identified rules absent from the current board, with readable %s text', async locale => {
-    const previousLocale = appI18n.global.locale.value
-    appI18n.global.locale.value = locale
+    i18n.global.locale.value = locale
     const wrapper = mount(PlaybackChangesPanel, {
       props: {
         kind: 'counterexample', stateNumber: 2, totalStates: 3,
@@ -101,10 +60,10 @@ describe('PlaybackChangesPanel', () => {
           { ruleIndex: 2, ruleLabel: 'Recorded rule without identity' }
         ]
       },
-      global: { plugins: [appI18n] }
+      global: { plugins: [i18n] }
     })
     try {
-      const absentRule = appI18n.global.t('app.traceVisualization.historicalRuleNotOnCurrentBoard')
+      const absentRule = i18n.global.t('app.traceVisualization.historicalRuleNotOnCurrentBoard')
       const rules = wrapper.get('[data-testid="playback-change-automation"]').findAll('li')
       expect(rules[0].text()).toContain(absentRule)
       expect(rules[1].text()).not.toContain(absentRule)
@@ -114,7 +73,7 @@ describe('PlaybackChangesPanel', () => {
       await wrapper.setProps({ currentRuleIds: ['present', 'removed'] })
       expect(rules[0].text()).not.toContain(absentRule)
       expect(rules[0].text()).toContain('Recorded removed rule')
-    } finally { wrapper.unmount(); appI18n.global.locale.value = previousLocale }
+    } finally { wrapper.unmount() }
   })
 
   it('names a changed state machine without repeating unchanged tuple values', () => {
@@ -156,7 +115,7 @@ describe('PlaybackChangesPanel', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.attributes('aria-label')).toBe('Device Changes in This Step')
+    expect(wrapper.attributes('aria-label')).toBe('Changes in This Step')
     expect(wrapper.text()).toContain('Hall camera')
     expect(wrapper.text()).toContain('idle')
     expect(wrapper.text()).toContain('recording')
@@ -182,7 +141,9 @@ describe('PlaybackChangesPanel', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.get('[data-testid="playback-change-empty"]').text()).toContain('No observable values changed')
+    const empty = wrapper.get('[data-testid="playback-change-empty"]').text()
+    expect(empty).toContain('No device-property or environment-value changes were observed')
+    expect(empty).toContain('unshown model choices may still have changed')
     expect(wrapper.text()).toContain('no user automation ran in this step')
     expect(wrapper.find('[data-testid="playback-change-automation"]').exists()).toBe(false)
   })
@@ -245,7 +206,7 @@ describe('PlaybackChangesPanel', () => {
     expect(wrapper.get('[data-testid="playback-change-fuzz-inputs"]').text()).toContain('active')
     expect(wrapper.get('[data-testid="playback-change-fuzz-inputs"]').text()).toContain('Model choice')
     expect(wrapper.get('[data-testid="playback-change-automation"]').text()).toContain('Motion activates alarm')
-    expect(wrapper.text()).toContain('Observable model or natural changes')
+    expect(wrapper.text()).toContain('Observable model or natural-evolution changes')
     expect(wrapper.get('[data-testid="playback-violation-badge"]').text()).toContain('First violation')
   })
 
@@ -366,7 +327,7 @@ describe('PlaybackChangesPanel', () => {
   })
 
   it('localizes canonical model evidence in Chinese and leaves custom tokens unchanged', () => {
-    appI18n.global.locale.value = 'zh-CN'
+    i18n.global.locale.value = 'zh-CN'
     const wrapper = mount(PlaybackChangesPanel, {
       props: {
         kind: 'fuzzing',
@@ -395,7 +356,7 @@ describe('PlaybackChangesPanel', () => {
         animatedEdgeCount: 0,
         bundledDeviceIds: ['door-1']
       },
-      global: { plugins: [appI18n] }
+      global: { plugins: [i18n] }
     })
 
     const text = wrapper.text()
@@ -408,7 +369,7 @@ describe('PlaybackChangesPanel', () => {
   })
 
   it('keeps custom tokens raw when they collide with bundled identifiers', () => {
-    appI18n.global.locale.value = 'zh-CN'
+    i18n.global.locale.value = 'zh-CN'
     const wrapper = mount(PlaybackChangesPanel, {
       props: {
         kind: 'fuzzing',
@@ -435,7 +396,7 @@ describe('PlaybackChangesPanel', () => {
         triggeredRules: [],
         animatedEdgeCount: 0,
       },
-      global: { plugins: [appI18n] }
+      global: { plugins: [i18n] }
     })
 
     const text = wrapper.text()
@@ -447,7 +408,7 @@ describe('PlaybackChangesPanel', () => {
   })
 
   it('keeps a custom device-state property raw when its name collides with a bundled token', () => {
-    appI18n.global.locale.value = 'zh-CN'
+    i18n.global.locale.value = 'zh-CN'
     const wrapper = mount(PlaybackChangesPanel, {
       props: {
         kind: 'fuzzing',
@@ -467,7 +428,7 @@ describe('PlaybackChangesPanel', () => {
         triggeredRules: [],
         animatedEdgeCount: 0,
       },
-      global: { plugins: [appI18n] }
+      global: { plugins: [i18n] }
     })
 
     const text = wrapper.get('[data-testid="playback-change-fuzz-inputs"]').text()
@@ -480,15 +441,9 @@ describe('PlaybackChangesPanel', () => {
    * loop-back block is ordered before the generic empty state. That check cannot see what the block
    * *says*, which is how the liveness wording came to be "State 3 loops back to state 2" — mechanically
    * true, but the same kind of statement as the safety wording, silent on the one fact the liveness
-   * branch exists to convey. Mounted with the real `appI18n` so the assertions read the shipped strings.
+   * branch exists to convey.
    */
   describe('the sentence on the state that closes the cycle', () => {
-    // `appI18n` is a module singleton and the cases above switch it to zh-CN without restoring it, so each
-    // case here sets the locale it asserts against and this hook hands the module back in a known state.
-    afterEach(() => {
-      appI18n.global.locale.value = 'en'
-    })
-
     const loopProps = (overrides: Record<string, unknown>) => ({
       kind: 'counterexample' as const,
       stateNumber: 3,
@@ -502,10 +457,9 @@ describe('PlaybackChangesPanel', () => {
     })
 
     it('says the cycle itself is the violation for a liveness property', () => {
-      appI18n.global.locale.value = 'en'
       const wrapper = mount(PlaybackChangesPanel, {
         props: loopProps({ isLivenessViolation: true, loopRange: { start: 2, end: 3 } }),
-        global: { plugins: [appI18n] }
+        global: { plugins: [i18n] }
       })
 
       const text = wrapper.get('[data-testid="playback-change-loop-back"]').text()
@@ -521,14 +475,13 @@ describe('PlaybackChangesPanel', () => {
     it('claims nothing about liveness for a safety counterexample that ends on a cycle', () => {
       // NuSMV reports a loop for these too — measured on both a CTL `AX` and an LTL `G(p)` refutation —
       // and there the fault is a single state, so "the required state is never reached" would be false.
-      appI18n.global.locale.value = 'en'
       const wrapper = mount(PlaybackChangesPanel, {
         props: loopProps({
           isLivenessViolation: false,
           loopRange: { start: 2, end: 3 },
           violationStateNumber: 3
         }),
-        global: { plugins: [appI18n] }
+        global: { plugins: [i18n] }
       })
 
       const text = wrapper.get('[data-testid="playback-change-loop-back"]').text()
@@ -541,7 +494,6 @@ describe('PlaybackChangesPanel', () => {
       // longer cycle prints the deltas that return to the entry, so this step looks like an ordinary one and
       // the explanation is the only thing distinguishing it from the path continuing. The `v-else-if` chain
       // selects the explanatory box, so it must not also suppress the change list it sits above.
-      appI18n.global.locale.value = 'en'
       const wrapper = mount(PlaybackChangesPanel, {
         props: loopProps({
           isLivenessViolation: true,
@@ -554,7 +506,7 @@ describe('PlaybackChangesPanel', () => {
             details: [{ kind: 'state', previousValue: 'on', currentValue: 'off' }]
           }]
         }),
-        global: { plugins: [appI18n] }
+        global: { plugins: [i18n] }
       })
 
       expect(wrapper.get('[data-testid="playback-change-loop-back"]').text()).toMatch(/never reached/i)
@@ -565,10 +517,9 @@ describe('PlaybackChangesPanel', () => {
     it('falls back to the range-free sentence when no loop range is resolved', () => {
       // Both flags can be absent independently, so the popover must not render a half-built sentence
       // with a literal `{start}` in it.
-      appI18n.global.locale.value = 'en'
       const wrapper = mount(PlaybackChangesPanel, {
         props: loopProps({ isLivenessViolation: true, loopRange: null }),
-        global: { plugins: [appI18n] }
+        global: { plugins: [i18n] }
       })
 
       const text = wrapper.get('[data-testid="playback-change-loop-back"]').text()

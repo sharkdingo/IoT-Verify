@@ -48,7 +48,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.indexLocalVariables;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.normalizePrivacy;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.normalizeTrust;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.readLocalPrivacies;
 
 /**
  * Scenario-level recommendation and chat-draft lifecycle.
@@ -226,18 +232,8 @@ public class ScenarioRecommendationService {
         }
         Map<String, Object> result;
         if (templates.isEmpty()) {
-            result = new LinkedHashMap<>();
-            result.put("message", message(language, "noTemplates", 0, 0, 0));
-            result.put("count", 0);
-            result.put("requestedCount", objectiveTargets.requestedCount());
-            result.put("validatedCount", 0);
-            result.put("filteredCount", 0);
-            result.put("filteredItems", Collections.emptyList());
-            result.put("adjustedCount", 0);
-            result.put("adjustedItems", Collections.emptyList());
-            result.put("rawCandidateCount", 0);
-            result.put("inspectedCount", 0);
-            result.put("truncatedCount", 0);
+            result = RecommendationResultParser.auditFields(message(language, "noTemplates", 0, 0, 0),
+                    0, objectiveTargets.requestedCount(), 0, List.of(), List.of(), 0, 0);
             result.put("scenarioName", "");
             Map<String, Object> scene = emptyScene();
             result.put("scene", scene);
@@ -352,7 +348,7 @@ public class ScenarioRecommendationService {
                                                  int maxDevices,
                                                  int maxRules,
                                                  int maxSpecs) throws Exception {
-        String cleaned = stripCodeFence(aiResponse);
+        String cleaned = RecommendationProviderOutput.stripCodeFence(Objects.requireNonNullElse(aiResponse, ""));
         JsonNode root = objectMapper.readTree(cleaned.isBlank() ? "{}" : cleaned);
         JsonNode sceneNode = root.has("scene") ? root.path("scene") : root;
         if (!sceneNode.isObject()
@@ -396,21 +392,13 @@ public class ScenarioRecommendationService {
         scene.put("specs", specs);
 
         int count = devices.size() + environmentVariables.size() + rules.size() + specs.size();
-        Map<String, Object> result = new LinkedHashMap<>();
         String messageKey = devices.isEmpty()
                 ? (stats.rawCandidateCount == 0 ? "noCandidates" : "empty")
                 : "found";
-        result.put("message", message(language, messageKey, devices.size(), rules.size(), specs.size()));
-        result.put("count", count);
-        result.put("requestedCount", objectiveTargets.requestedCount());
-        result.put("validatedCount", stats.validatedCount);
-        result.put("filteredCount", filteredItems.size());
-        result.put("filteredItems", filteredItems);
-        result.put("adjustedCount", adjustedItems.size());
-        result.put("adjustedItems", adjustedItems);
-        result.put("rawCandidateCount", stats.rawCandidateCount);
-        result.put("inspectedCount", stats.inspectedCount);
-        result.put("truncatedCount", Math.max(0, stats.rawCandidateCount - stats.inspectedCount));
+        Map<String, Object> result = RecommendationResultParser.auditFields(
+                message(language, messageKey, devices.size(), rules.size(), specs.size()),
+                count, objectiveTargets.requestedCount(), stats.validatedCount,
+                filteredItems, adjustedItems, stats.rawCandidateCount, stats.inspectedCount);
         result.put("scenarioName", text(root.path("scenarioName"), language.equals("zh-CN") ? "AI 推荐场景" : "AI Scenario"));
         result.put("scene", scene);
         ScenarioVerificationReadiness.Status analysis = putScenarioAnalysis(
@@ -533,8 +521,7 @@ public class ScenarioRecommendationService {
             Map<String, Object> appliedDefaults = new LinkedHashMap<>();
             List<Map<String, Object>> variables = normalizeDeviceVariables(
                     template, row.path("variables"), appliedDefaults);
-            List<Map<String, Object>> privacies = normalizeDevicePrivacies(
-                    template, row.path("privacies"), appliedDefaults);
+            List<Map<String, Object>> privacies = readLocalPrivacies(template, row.path("privacies"), false);
             if (variables == null || privacies == null) {
                 usedIds.remove(id);
                 usedLabels.remove(labelKey);
@@ -615,7 +602,7 @@ public class ScenarioRecommendationService {
                                                                JsonNode node,
                                                                Map<String, Object> appliedDefaults) {
         if (isPresentNode(node) && !node.isArray()) return null;
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = localVariableMap(template);
+        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = indexLocalVariables(template);
         List<Map<String, Object>> normalized = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         if (node.isArray()) {
@@ -653,46 +640,6 @@ public class ScenarioRecommendationService {
             appliedDefaults.put("variables." + variable.getName() + ".value", value);
         }
         return normalized;
-    }
-
-    private List<Map<String, Object>> normalizeDevicePrivacies(DeviceTemplateDto template,
-                                                               JsonNode node,
-                                                               Map<String, Object> appliedDefaults) {
-        if (isPresentNode(node) && !node.isArray()) return null;
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = localVariableMap(template);
-        List<Map<String, Object>> normalized = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        if (node.isArray()) {
-            for (JsonNode row : node) {
-                if (!row.isObject()) return null;
-                String requestedName = text(row.path("name"), "");
-                DeviceTemplateDto.DeviceManifest.InternalVariable variable =
-                        localVariables.get(requestedName.toLowerCase(Locale.ROOT));
-                if (variable == null || !seen.add(variable.getName().toLowerCase(Locale.ROOT))) return null;
-                JsonNode privacyNode = row.path("privacy");
-                String privacy = normalizePrivacy(text(privacyNode, ""));
-                if (isPresentNode(privacyNode) && privacy == null) return null;
-                if (privacy != null) {
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("name", variable.getName());
-                    item.put("privacy", privacy);
-                    normalized.add(item);
-                }
-            }
-        }
-        return normalized;
-    }
-
-    private Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariableMap(DeviceTemplateDto template) {
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> variables = new LinkedHashMap<>();
-        if (template == null || template.getManifest() == null) return variables;
-        for (DeviceTemplateDto.DeviceManifest.InternalVariable variable :
-                safeList(template.getManifest().getInternalVariables())) {
-            if (variable.getName() != null && Boolean.TRUE.equals(variable.getIsInside())) {
-                variables.put(variable.getName().toLowerCase(Locale.ROOT), variable);
-            }
-        }
-        return variables;
     }
 
     private boolean hasValidOptionalLayout(JsonNode row) {
@@ -1557,22 +1504,6 @@ public class ScenarioRecommendationService {
         };
     }
 
-    @SafeVarargs
-    private List<Map<String, Object>> specDeviceRefs(List<Map<String, Object>>... conditionLists) {
-        Map<String, Map<String, Object>> refs = new LinkedHashMap<>();
-        for (List<Map<String, Object>> conditions : conditionLists) {
-            for (Map<String, Object> condition : conditions) {
-                String deviceId = String.valueOf(condition.get("deviceId"));
-                refs.putIfAbsent(deviceId, new LinkedHashMap<>(Map.of(
-                        "deviceId", deviceId,
-                        "deviceLabel", String.valueOf(condition.get("deviceLabel")),
-                        "selectedApis", List.of()
-                )));
-            }
-        }
-        return new ArrayList<>(refs.values());
-    }
-
     private boolean validSpecShape(String templateId,
                                    List<Map<String, Object>> aConditions,
                                    List<Map<String, Object>> ifConditions,
@@ -1668,7 +1599,7 @@ public class ScenarioRecommendationService {
                                           String relation,
                                           String rawValue) {
         if (variable == null || rawValue == null || rawValue.isBlank()) return null;
-        List<String> candidates = splitValues(rawValue, relation, false);
+        List<String> candidates = RecommendationConditionValues.splitValueCandidates(rawValue, relation, false);
         if (candidates.isEmpty()) return null;
         if (variable.getValues() != null && !variable.getValues().isEmpty()) {
             if (!isEnumRelation(relation)) return null;
@@ -1707,7 +1638,7 @@ public class ScenarioRecommendationService {
 
     private String canonicalEnumSet(List<String> allowed, String rawValue, String relation, boolean preserveSemicolon) {
         if (allowed == null || allowed.isEmpty() || rawValue == null || rawValue.isBlank()) return null;
-        List<String> candidates = splitValues(rawValue, relation, preserveSemicolon);
+        List<String> candidates = RecommendationConditionValues.splitValueCandidates(rawValue, relation, preserveSemicolon);
         if (candidates.isEmpty()) return null;
         List<String> canonical = new ArrayList<>();
         for (String candidate : candidates) {
@@ -1716,18 +1647,6 @@ public class ScenarioRecommendationService {
             canonical.add(matched);
         }
         return joinValues(canonical, relation);
-    }
-
-    private List<String> splitValues(String rawValue, String relation, boolean preserveSemicolon) {
-        if ("in".equals(relation) || "not in".equals(relation)) {
-            String regex = preserveSemicolon ? "[,|]" : "[,;|]";
-            List<String> values = new ArrayList<>();
-            for (String part : rawValue.split(regex)) {
-                if (!part.trim().isEmpty()) values.add(part.trim());
-            }
-            return values;
-        }
-        return rawValue.trim().isEmpty() ? List.of() : List.of(rawValue.trim());
     }
 
     private String joinValues(List<String> values, String relation) {
@@ -1862,18 +1781,6 @@ public class ScenarioRecommendationService {
         scene.put("rules", List.of());
         scene.put("specs", List.of());
         return scene;
-    }
-
-    private String stripCodeFence(String value) {
-        String cleaned = value == null ? "" : value.trim();
-        if (cleaned.startsWith("```")) {
-            int firstNewline = cleaned.indexOf('\n');
-            if (firstNewline > 0) cleaned = cleaned.substring(firstNewline).trim();
-        }
-        if (cleaned.endsWith("```")) {
-            cleaned = cleaned.substring(0, cleaned.lastIndexOf("```")).trim();
-        }
-        return cleaned;
     }
 
     private int arraySize(JsonNode node) {
@@ -2059,18 +1966,6 @@ public class ScenarioRecommendationService {
             return String.valueOf(variable.getLowerBound());
         }
         return "";
-    }
-
-    private String normalizeTrust(String value) {
-        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
-        if ("trusted".equals(normalized) || "untrusted".equals(normalized)) return normalized;
-        return null;
-    }
-
-    private String normalizePrivacy(String value) {
-        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
-        if ("public".equals(normalized) || "private".equals(normalized)) return normalized;
-        return null;
     }
 
     private String defaultTrust(String value) {

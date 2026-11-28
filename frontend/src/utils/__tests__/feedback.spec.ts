@@ -321,6 +321,7 @@ describe('confirmChoice', () => {
     expect(options.confirmButtonText).toBe('Save anyway')
     expect(options.cancelButtonText).toBeTruthy()
     expect(options.confirmButtonClass).toBeUndefined()
+    expect(elementPlus.message.closeAll).not.toHaveBeenCalled()
     // Same surface contract as the destructive variant: teleported, and no scroll lock.
     expect(options.lockScroll).toBe(false)
     expect(options.appendTo).toBe('body')

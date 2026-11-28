@@ -93,9 +93,7 @@ public class ReadRunModelTool extends AbstractAiTool {
             body.put("modelText", model.substring(startIndex, endIndex));
             body.put("message", "Exact excerpt of this saved run's generated model. It does not establish a "
                     + "current-Board or safety conclusion; read the matching run result and remaining excerpts.");
-            return readOnlySuccessJson(body, "Saved model excerpt unavailable.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return readOnlySuccessJson(body);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ResourceNotFoundException e) {

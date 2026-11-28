@@ -91,12 +91,7 @@ public class RecommendScenarioTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "$", Set.of(
                     "minDevices", "minRules", "minSpecs", "maxDevices", "maxRules", "maxSpecs",
                     "language", "userRequirement", "templateNames"));

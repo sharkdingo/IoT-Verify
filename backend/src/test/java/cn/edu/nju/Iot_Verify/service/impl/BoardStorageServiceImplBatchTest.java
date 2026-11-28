@@ -59,11 +59,13 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -128,6 +130,13 @@ class BoardStorageServiceImplBatchTest {
                 .thenReturn(BoardUndoAvailability.EMPTY);
         lenient().when(editJournal.historyState(anyLong()))
                 .thenReturn(historyState(0, "0"));
+    }
+
+    private BoardStorageServiceImpl newServiceWithEnvironmentRepository() {
+        return new BoardStorageServiceImpl(
+                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
+                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
+                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
     }
 
     @Test
@@ -495,46 +504,6 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
-    void saveSpecsInternal_persistsAndReturnsTheSubmittedSpecificationOrder() {
-        SpecificationDto first = new SpecificationDto();
-        first.setId("spec-b");
-        first.setName("Safety requirement");
-        first.setTemplateId("1");
-        first.setAConditions(List.of());
-        first.setIfConditions(List.of());
-        first.setThenConditions(List.of());
-        SpecificationDto second = new SpecificationDto();
-        second.setId("spec-a");
-        second.setName("Safety requirement");
-        second.setTemplateId("2");
-        second.setAConditions(List.of());
-        second.setIfConditions(List.of());
-        second.setThenConditions(List.of());
-
-        when(specificationMapper.toEntity(any(), anyLong())).thenAnswer(invocation -> {
-            SpecificationDto dto = invocation.getArgument(0);
-            return SpecificationPo.builder().name("Safety requirement").id(dto.getId()).userId(1L).build();
-        });
-        when(specRepo.saveAll(any())).thenReturn(List.of());
-        when(specificationMapper.toDto(any())).thenAnswer(invocation -> {
-            SpecificationPo po = invocation.getArgument(0);
-            SpecificationDto dto = new SpecificationDto();
-            dto.setId(po.getId());
-            return dto;
-        });
-
-        @SuppressWarnings("unchecked")
-        List<SpecificationDto> saved = ReflectionTestUtils.invokeMethod(
-                service, "saveSpecsInternal", 1L, List.of(first, second), List.of());
-
-        ArgumentCaptor<List<SpecificationPo>> captor = ArgumentCaptor.forClass(List.class);
-        verify(specRepo).saveAll(captor.capture());
-        assertEquals(List.of(0, 1), captor.getValue().stream()
-                .map(SpecificationPo::getListOrder).toList());
-        assertEquals(List.of("spec-b", "spec-a"), saved.stream().map(SpecificationDto::getId).toList());
-    }
-
-    @Test
     void saveBoardBatch_acceptsRepairNamesAndCanonicalizesRuleAndSpecConditions() {
         String nodeId = "param_r0_c0";
         DeviceNodeDto node = boardNode(nodeId, "Temperature Sensor", "Living Sensor");
@@ -638,22 +607,7 @@ class BoardStorageServiceImplBatchTest {
          * it must not do is block writes that have nothing to do with it.
          */
         DeviceNodeDto node = boardNode("sensor1", "Temperature Sensor", "Living Sensor");
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Temperature Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Temperature Sensor")
-                        .internalVariables(List.of(
-                                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                                        .name("temperature")
-                                        .isInside(false)
-                                        .lowerBound(0)
-                                        .upperBound(100)
-                                        .trust("untrusted")
-                                        .privacy("public")
-                                        .build()))
-                        .build()))
-                .build();
+        DeviceTemplatePo template = storedTemperature("Temperature Sensor", null, null);
 
         SpecConditionDto legacyCondition = new SpecConditionDto();
         legacyCondition.setId("legacy-c1");
@@ -674,7 +628,7 @@ class BoardStorageServiceImplBatchTest {
         SpecificationPo legacyPo = new SpecificationPo();
         // Lenient: the point of the test is that the write SUCCEEDS, so which of the persistence collabo-
         // rators it happens to touch is not the claim. Strict stubbing would make this test fail whenever
-        // saveNodes' internals change, for a reason unrelated to what it asserts.
+        // device persistence changes, for a reason unrelated to what it asserts.
         lenient().when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
         lenient().when(specRepo.findByUserId(1L)).thenReturn(List.of(legacyPo));
         lenient().when(specificationMapper.toDto(legacyPo)).thenReturn(legacySpec);
@@ -683,7 +637,7 @@ class BoardStorageServiceImplBatchTest {
         lenient().when(nodeRepo.saveAll(any())).thenReturn(List.of(new DeviceNodePo()));
         lenient().when(deviceNodeMapper.toDto(any())).thenReturn(node);
 
-        assertDoesNotThrow(() -> service.saveNodes(1L, List.of(node)),
+        assertDoesNotThrow(() -> service.addNodes(1L, List.of(node), List.of()),
                 "a stored specification with no recorded reading must not block an unrelated device write");
     }
 
@@ -697,22 +651,7 @@ class BoardStorageServiceImplBatchTest {
          * tests could not see it; they stop one layer above.
          */
         DeviceNodeDto node = boardNode("sensor1", "Temperature Sensor", "Living Sensor");
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Temperature Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Temperature Sensor")
-                        .internalVariables(List.of(
-                                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                                        .name("temperature")
-                                        .isInside(false)
-                                        .lowerBound(0)
-                                        .upperBound(100)
-                                        .trust("untrusted")
-                                        .privacy("public")
-                                        .build()))
-                        .build()))
-                .build();
+        DeviceTemplatePo template = storedTemperature("Temperature Sensor", null, null);
 
         SpecConditionDto condition = new SpecConditionDto();
         condition.setId("c1");
@@ -750,39 +689,11 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_savesEnvironmentVariablesWithImportedNodes() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
-                .name("Thermostat")
-                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(50)
-                        .trust("trusted")
-                        .privacy("public")
-                        .build()))
-                .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Thermostat")
-                .manifestJson(JsonUtils.toJson(manifest))
-                .defaultTemplate(true)
-                .build();
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("thermostat_1");
-        node.setTemplateName("Thermostat");
-        node.setLabel("Living Thermostat");
-        DeviceNodeDto.Position position = new DeviceNodeDto.Position();
-        position.setX(10.0);
-        position.setY(20.0);
-        node.setPosition(position);
-        node.setState("Working");
-        node.setWidth(176);
-        node.setHeight(128);
+        DeviceTemplateDto.DeviceManifest manifest = thermostatManifest();
+        DeviceTemplatePo template = storedThermostat(manifest);
+        DeviceNodeDto node = positionedThermostat();
 
         BoardEnvironmentVariableDto importedEnvironment =
                 new BoardEnvironmentVariableDto("temperature", "26", "untrusted", "private");
@@ -823,31 +734,10 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_rejectsActiveDevicesWithConflictingEnvironmentSemantics() {
-        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithTemplates = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest.InternalVariable slowTemperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature").isInside(false)
-                        .lowerBound(0).upperBound(100).naturalChangeRate("[-1,1]")
-                        .trust("untrusted").privacy("public").build();
-        DeviceTemplateDto.DeviceManifest.InternalVariable fastTemperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature").isInside(false)
-                        .lowerBound(0).upperBound(100).naturalChangeRate("[-5,5]")
-                        .trust("untrusted").privacy("public").build();
-        DeviceTemplatePo firstTemplate = DeviceTemplatePo.builder()
-                .userId(1L).name("Indoor Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Indoor Sensor").internalVariables(List.of(slowTemperature)).build()))
-                .build();
-        DeviceTemplatePo secondTemplate = DeviceTemplatePo.builder()
-                .userId(1L).name("Outdoor Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Outdoor Sensor").internalVariables(List.of(fastTemperature)).build()))
-                .build();
+        DeviceTemplatePo firstTemplate = storedTemperature("Indoor Sensor", "[-1,1]", null);
+        DeviceTemplatePo secondTemplate = storedTemperature("Outdoor Sensor", "[-5,5]", null);
         DeviceNodeDto indoor = boardNode("indoor_1", "Indoor Sensor", "Hallway sensor");
         DeviceNodeDto outdoor = boardNode("outdoor_1", "Outdoor Sensor", "Patio sensor");
 
@@ -868,27 +758,9 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void getEnvironmentVariables_whenPersistedDevicesConflictOnDiscreteEffects_staysReadable() {
-        // A pair-wise invariant must not run on a read path.
-        //
-        // The discrete-writer conflict check belongs to `validateBoardReferences`, which every write
-        // route reaches — including scene replacement, via `saveBoardBatch`. It was briefly *also*
-        // wired into `requireActiveEnvironmentDomainConsistency`, justified by a claim that scene
-        // replacement reached only the latter. That claim was false, and it named
-        // `applySceneReplacement`, a method that does not exist in this repo.
-        //
-        // The redundancy was not harmless: one of that method's five call sites sits inside
-        // `projectEnvironmentVariablesForNodes`, which `getEnvironmentVariables` reaches through
-        // `refreshEnvironmentVariablesInternal`. So `GET /api/board/environment` began rejecting any
-        // board that already held a conflicting pair — locking the user out of reading their own
-        // environment pool, for data saved before the check existed.
-        //
-        // A per-declaration consistency check is idempotent and safe to repeat on a read; a pair-wise
-        // conflict check is not. This pins the read side; the write side is pinned by
-        // `saveNodes_whenTwoDevicesDeclareConflictingDiscreteEffects_shouldRejectBeforePersisting`.
-        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        // Boards can contain conflicting writers saved before writes rejected them.
+        // Keep their environment pools readable.
+        BoardStorageServiceImpl serviceWithTemplates = newServiceWithEnvironmentRepository();
 
         DeviceTemplateDto.DeviceManifest.InternalVariable airQuality =
                 DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
@@ -940,31 +812,10 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveEnvironmentVariables_rejectsActiveDevicesWithConflictingEnvironmentSemantics() {
-        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithTemplates = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest.InternalVariable slowTemperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature").isInside(false)
-                        .lowerBound(0).upperBound(100).naturalChangeRate("[-1,1]")
-                        .trust("untrusted").privacy("public").build();
-        DeviceTemplateDto.DeviceManifest.InternalVariable fastTemperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature").isInside(false)
-                        .lowerBound(0).upperBound(100).naturalChangeRate("[-5,5]")
-                        .trust("untrusted").privacy("public").build();
-        DeviceTemplatePo firstTemplate = DeviceTemplatePo.builder()
-                .userId(1L).name("Indoor Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Indoor Sensor").internalVariables(List.of(slowTemperature)).build()))
-                .build();
-        DeviceTemplatePo secondTemplate = DeviceTemplatePo.builder()
-                .userId(1L).name("Outdoor Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Outdoor Sensor").internalVariables(List.of(fastTemperature)).build()))
-                .build();
+        DeviceTemplatePo firstTemplate = storedTemperature("Indoor Sensor", "[-1,1]", null);
+        DeviceTemplatePo secondTemplate = storedTemperature("Outdoor Sensor", "[-5,5]", null);
         DeviceNodeDto indoor = boardNode("indoor_1", "Indoor Sensor", "Hallway sensor");
         DeviceNodeDto outdoor = boardNode("outdoor_1", "Outdoor Sensor", "Patio sensor");
         when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo(), new DeviceNodePo()));
@@ -989,10 +840,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_rejectsDeviceReferenceThatCollidesWithGeneratedEnvironmentName() {
-        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithTemplates = newServiceWithEnvironmentRepository();
         DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
                 .name("Sensor")
                 .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
@@ -1088,10 +936,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_rejectsDeviceReferenceThatWouldDisableRulePlaybackAndAttackAnalysis() {
-        BoardStorageServiceImpl serviceWithTemplates = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithTemplates = newServiceWithEnvironmentRepository();
         DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
                 .name("Switch")
                 .modes(List.of("Power"))
@@ -1137,6 +982,75 @@ class BoardStorageServiceImplBatchTest {
         return node;
     }
 
+    private static DeviceTemplateDto.DeviceManifest thermostatManifest() {
+        return DeviceTemplateDto.DeviceManifest.builder()
+                .name("Thermostat")
+                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                        .name("temperature")
+                        .isInside(false)
+                        .lowerBound(0)
+                        .upperBound(50)
+                        .trust("trusted")
+                        .privacy("public")
+                        .build()))
+                .build();
+    }
+
+    private static DeviceTemplatePo storedTemperature(String templateName, String naturalRate, Boolean falsifiable) {
+        var temperature = DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
+                .name("temperature").isInside(false).lowerBound(0).upperBound(100)
+                .naturalChangeRate(naturalRate).falsifiableWhenCompromised(falsifiable)
+                .trust("untrusted").privacy("public").build();
+        var manifest = DeviceTemplateDto.DeviceManifest.builder()
+                .name(templateName).internalVariables(List.of(temperature)).build();
+        return DeviceTemplatePo.builder().userId(1L).name(templateName)
+                .manifestJson(JsonUtils.toJson(manifest)).build();
+    }
+
+    private static DeviceTemplatePo storedThermostat(DeviceTemplateDto.DeviceManifest manifest) {
+        return DeviceTemplatePo.builder()
+                .userId(1L)
+                .name("Thermostat")
+                .manifestJson(JsonUtils.toJson(manifest))
+                .defaultTemplate(true)
+                .build();
+    }
+
+    private static DeviceNodeDto positionedThermostat() {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("thermostat_1");
+        node.setTemplateName("Thermostat");
+        node.setLabel("Living Thermostat");
+        DeviceNodeDto.Position position = new DeviceNodeDto.Position();
+        position.setX(10.0);
+        position.setY(20.0);
+        node.setPosition(position);
+        node.setState("Working");
+        node.setWidth(176);
+        node.setHeight(128);
+        return node;
+    }
+
+    private void stubThermostatWithStoredTemperature() {
+        DeviceTemplatePo template = storedThermostat(thermostatManifest());
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("thermostat_1");
+        node.setTemplateName("Thermostat");
+        BoardEnvironmentVariablePo previous = BoardEnvironmentVariablePo.builder()
+                .userId(1L)
+                .name("temperature")
+                .value("27")
+                .trust("untrusted")
+                .privacy("private")
+                .build();
+
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo()));
+        when(deviceNodeMapper.toDto(any())).thenReturn(node);
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
+        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(List.of(previous));
+        when(environmentRepo.saveAll(any())).thenAnswer(inv -> inv.getArgument(0));
+    }
+
     private static BoardBatchDto confirmedBatch(BoardStorageServiceImpl target, BoardBatchDto batch) {
         batch.setImpactToken(target.previewBoardReplacement(1L).getImpactToken());
         return batch;
@@ -1158,39 +1072,11 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveBoardBatch_sceneImportRejectsMissingEnvironmentValuesBeforeBoardMutation() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
-                .name("Thermostat")
-                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(50)
-                        .trust("trusted")
-                        .privacy("public")
-                        .build()))
-                .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Thermostat")
-                .manifestJson(JsonUtils.toJson(manifest))
-                .defaultTemplate(true)
-                .build();
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("thermostat_1");
-        node.setTemplateName("Thermostat");
-        node.setLabel("Living Thermostat");
-        DeviceNodeDto.Position position = new DeviceNodeDto.Position();
-        position.setX(10.0);
-        position.setY(20.0);
-        node.setPosition(position);
-        node.setState("Working");
-        node.setWidth(176);
-        node.setHeight(128);
+        DeviceTemplateDto.DeviceManifest manifest = thermostatManifest();
+        DeviceTemplatePo template = storedThermostat(manifest);
+        DeviceNodeDto node = positionedThermostat();
 
         when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
 
@@ -1221,44 +1107,9 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void updateEnvironmentVariables_resetsOneVariableToTemplateDefaultsInsideAtomicMutation() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
-                .name("Thermostat")
-                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(50)
-                        .trust("trusted")
-                        .privacy("public")
-                        .build()))
-                .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Thermostat")
-                .manifestJson(JsonUtils.toJson(manifest))
-                .defaultTemplate(true)
-                .build();
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("thermostat_1");
-        node.setTemplateName("Thermostat");
-        BoardEnvironmentVariablePo previous = BoardEnvironmentVariablePo.builder()
-                .userId(1L)
-                .name("temperature")
-                .value("27")
-                .trust("untrusted")
-                .privacy("private")
-                .build();
-
-        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo()));
-        when(deviceNodeMapper.toDto(any())).thenReturn(node);
-        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
-        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(List.of(previous));
-        when(environmentRepo.saveAll(any())).thenAnswer(inv -> inv.getArgument(0));
+        stubThermostatWithStoredTemperature();
 
         List<BoardEnvironmentVariableDto> result = serviceWithEnvironment.updateEnvironmentVariables(
                 1L,
@@ -1275,44 +1126,9 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveEnvironmentVariables_preservesEveryFieldNotPresentInThePatch() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
-                .name("Thermostat")
-                .internalVariables(List.of(DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(50)
-                        .trust("trusted")
-                        .privacy("public")
-                        .build()))
-                .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Thermostat")
-                .manifestJson(JsonUtils.toJson(manifest))
-                .defaultTemplate(true)
-                .build();
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("thermostat_1");
-        node.setTemplateName("Thermostat");
-        BoardEnvironmentVariablePo previous = BoardEnvironmentVariablePo.builder()
-                .userId(1L)
-                .name("temperature")
-                .value("27")
-                .trust("untrusted")
-                .privacy("private")
-                .build();
-
-        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo()));
-        when(deviceNodeMapper.toDto(any())).thenReturn(node);
-        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
-        when(environmentRepo.findByUserIdOrderByNameAsc(1L)).thenReturn(List.of(previous));
-        when(environmentRepo.saveAll(any())).thenAnswer(inv -> inv.getArgument(0));
+        stubThermostatWithStoredTemperature();
 
         EnvironmentMutationResultDto result = serviceWithEnvironment.saveEnvironmentVariables(
                 1L,
@@ -1361,10 +1177,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveEnvironmentVariables_checksEveryBaselineBeforeWritingAnyItem() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
         DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
                 .name("Climate")
@@ -1439,10 +1252,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveEnvironmentVariables_reportsRemovedVariableAsStaleConflict() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
         DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
                 .name("CurrentTemplate")
@@ -1488,10 +1298,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void saveEnvironmentVariables_requiresANonBlankExpectedValue() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
         ValidationException error = assertThrows(
                 ValidationException.class,
@@ -1571,7 +1378,7 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
-    void saveNodes_acceptsPortableSceneLayoutBoundaries() {
+    void addNodes_acceptsPortableSceneLayoutBoundaries() {
         DeviceNodeDto node = boardNode("device-1", null, "Device");
         node.setWidth(DeviceLayoutDto.MAX_WIDTH);
         node.setHeight(DeviceLayoutDto.MIN_HEIGHT);
@@ -1580,7 +1387,7 @@ class BoardStorageServiceImplBatchTest {
         when(nodeRepo.saveAll(any())).thenReturn(List.of(new DeviceNodePo()));
         when(deviceNodeMapper.toDto(any())).thenReturn(node);
 
-        List<DeviceNodeDto> saved = service.saveNodes(1L, List.of(node));
+        List<DeviceNodeDto> saved = service.addNodes(1L, List.of(node), List.of()).getCurrentNodes();
 
         assertEquals(DeviceLayoutDto.MAX_WIDTH, saved.get(0).getWidth());
         assertEquals(DeviceLayoutDto.MIN_HEIGHT, saved.get(0).getHeight());
@@ -2425,6 +2232,33 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
+    void addRule_reportsRangeAndEnumRelationBeforeWriting() throws Exception {
+        var node = boardNode("oven1", "Oven", "Oven");
+        node.setState("heating;ready");
+        var template = DeviceTemplatePo.builder().name("Oven")
+                .manifestJson(Files.readString(Path.of("src/main/resources/deviceTemplate/Oven.json"))).build();
+        when(nodeRepo.findByUserId(1L)).thenReturn(List.of(new DeviceNodePo()));
+        when(deviceNodeMapper.toDto(any())).thenReturn(node);
+        when(deviceTemplateRepo.findByUserId(1L)).thenReturn(List.of(template));
+        var rule = RuleDto.builder()
+                .conditions(List.of(
+                        RuleDto.Condition.builder().deviceName("oven1").targetType("variable")
+                                .attribute("operationTime").relation(" LTE ").value("101").build(),
+                        RuleDto.Condition.builder().deviceName("oven1").targetType("variable")
+                                .attribute("ovenJobState").relation(" GT ").value("missing").build()))
+                .command(RuleDto.Command.builder().deviceName("oven1").action("heating").build())
+                .build();
+
+        var failure = assertThrows(ValidationException.class, () -> service.addRule(1L, rule));
+
+        assertEquals(Map.of(
+                "rules[0].conditions[0].value", "Variable value out of range for 'operationTime': 101 (allowed 0..100)",
+                "rules[0].conditions[1].value", "enum variable conditions support only =, !=, IN, and NOT_IN"),
+                failure.getErrors());
+        verify(ruleRepo, never()).save(any());
+    }
+
+    @Test
     void addRule_canonicalizesRelationAndTargetTypeBeforePersistence() {
         DeviceNodeDto node = boardNode("sensor1", null, "Sensor");
 
@@ -2576,7 +2410,7 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
-    void saveNodes_isNotBlockedByAStoredRuleThatExceedsTheConditionCap() {
+    void addNodes_isNotBlockedByAStoredRuleThatExceedsTheConditionCap() {
         /*
          * Same shape as the stored-specification-with-no-reading test above, and the reason the caps
          * live in the authoring paths rather than in `validateBoardReferences`.
@@ -2603,7 +2437,7 @@ class BoardStorageServiceImplBatchTest {
         lenient().when(nodeRepo.saveAll(any())).thenReturn(List.of(new DeviceNodePo()));
         lenient().when(deviceNodeMapper.toDto(any())).thenReturn(node);
 
-        assertDoesNotThrow(() -> service.saveNodes(1L, List.of(node)),
+        assertDoesNotThrow(() -> service.addNodes(1L, List.of(node), List.of()),
                 "a stored oversized rule must not block an unrelated device write");
     }
 
@@ -2948,29 +2782,9 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void createNode_returnsEnvironmentPoolChangesFromTheSameTransaction() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
-        DeviceTemplateDto.DeviceManifest.InternalVariable temperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .falsifiableWhenCompromised(true)
-                        .lowerBound(0)
-                        .upperBound(100)
-                        .trust("untrusted")
-                        .privacy("public")
-                        .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Temperature Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Temperature Sensor")
-                        .internalVariables(List.of(temperature))
-                        .build()))
-                .build();
+        DeviceTemplatePo template = storedTemperature("Temperature Sensor", null, true);
         DeviceNodeDto draft = boardNode("sensor1", "Temperature Sensor", "Hall sensor");
         DeviceNodePo savedNode = new DeviceNodePo();
         BoardEnvironmentVariablePo savedEnvironment = BoardEnvironmentVariablePo.builder()
@@ -3009,32 +2823,11 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void deletionPreviewIncludesEnvironmentRemovalAndConfirmationRejectsEnvironmentDrift() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
         DeviceNodeDto node = boardNode("sensor1", "Temperature Sensor", "Hall sensor");
         DeviceNodePo nodePo = new DeviceNodePo();
-        DeviceTemplateDto.DeviceManifest.InternalVariable temperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .falsifiableWhenCompromised(true)
-                        .lowerBound(0)
-                        .upperBound(100)
-                        .naturalChangeRate("[-1,1]")
-                        .trust("untrusted")
-                        .privacy("public")
-                        .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Temperature Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Temperature Sensor")
-                        .internalVariables(List.of(temperature))
-                        .build()))
-                .build();
+        DeviceTemplatePo template = storedTemperature("Temperature Sensor", "[-1,1]", true);
         BoardEnvironmentVariablePo environment = BoardEnvironmentVariablePo.builder()
                 .userId(1L)
                 .name("temperature")
@@ -3065,10 +2858,7 @@ class BoardStorageServiceImplBatchTest {
 
     @Test
     void deletionPreviewKeepsEnvironmentRequiredByAnotherDevice() {
-        BoardStorageServiceImpl serviceWithEnvironment = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl serviceWithEnvironment = newServiceWithEnvironmentRepository();
 
         DeviceNodeDto target = boardNode("sensor1", "Temperature Sensor", "Hall sensor");
         DeviceNodeDto remaining = boardNode("sensor2", "Temperature Sensor", "Bedroom sensor");
@@ -3078,24 +2868,7 @@ class BoardStorageServiceImplBatchTest {
         DeviceNodePo remainingPo = new DeviceNodePo();
         remainingPo.setId("sensor2");
         remainingPo.setUserId(1L);
-        DeviceTemplateDto.DeviceManifest.InternalVariable temperature =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(100)
-                        .naturalChangeRate("[-1,1]")
-                        .trust("untrusted")
-                        .privacy("public")
-                        .build();
-        DeviceTemplatePo template = DeviceTemplatePo.builder()
-                .userId(1L)
-                .name("Temperature Sensor")
-                .manifestJson(JsonUtils.toJson(DeviceTemplateDto.DeviceManifest.builder()
-                        .name("Temperature Sensor")
-                        .internalVariables(List.of(temperature))
-                        .build()))
-                .build();
+        DeviceTemplatePo template = storedTemperature("Temperature Sensor", "[-1,1]", null);
         BoardEnvironmentVariablePo environment = BoardEnvironmentVariablePo.builder()
                 .userId(1L)
                 .name("temperature")
@@ -3129,42 +2902,6 @@ class BoardStorageServiceImplBatchTest {
     }
 
     @Test
-    void persistTimeValidationRefusesAnAffectOnlySharedValueAsAConditionSource() {
-        DeviceTemplateDto.DeviceManifest.InternalVariable affectOnly =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("illuminance").isInside(false).reads(false)
-                        .falsifiableWhenCompromised(false)
-                        .lowerBound(0).upperBound(100).naturalChangeRate("0")
-                        .trust("trusted").privacy("public").build();
-        DeviceTemplateDto.DeviceManifest.InternalVariable readable =
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature").isInside(false).reads(true)
-                        .falsifiableWhenCompromised(true)
-                        .lowerBound(15).upperBound(35).naturalChangeRate("0")
-                        .trust("trusted").privacy("public").build();
-        DeviceTemplateDto.DeviceManifest manifest = DeviceTemplateDto.DeviceManifest.builder()
-                .name("Light")
-                .internalVariables(List.of(affectOnly, readable))
-                .impactedVariables(List.of("illuminance"))
-                .build();
-
-        // The capability-blind existence lookup still finds it, and must: its other callers ask whether
-        // a declaration exists at all (domain resolution, runtime overrides), where affect-only is a
-        // legitimate answer.
-        assertNotNull(ReflectionTestUtils.invokeMethod(
-                service, "internalVariable", manifest, "illuminance"));
-
-        // The condition-source resolver withholds it. The generator emits no read mirror for an
-        // affect-only value, so a stored condition on it would name something the device never
-        // observes. This is the persist-time gate every writer shares -- the REST board endpoints, the
-        // assistant's rule and specification tools, and scene import alike.
-        assertNull(ReflectionTestUtils.invokeMethod(
-                service, "conditionSourceVariable", manifest, "illuminance"));
-        assertNotNull(ReflectionTestUtils.invokeMethod(
-                service, "conditionSourceVariable", manifest, "temperature"));
-    }
-
-    @Test
     void deletionPreviewIncludesSpecificationAnchoredToDeviceReadingEnvironmentValue() {
         /*
          * An `environment` spec whose anchor device is deleted is correctly removed — the device supplies
@@ -3172,10 +2909,7 @@ class BoardStorageServiceImplBatchTest {
          * was undisclosed when no verdict row was selected. This test pins that the preview populates
          * `removedSpecifications` for both cases.
          */
-        BoardStorageServiceImpl service = new BoardStorageServiceImpl(
-                nodeRepo, environmentRepo, specRepo, ruleRepo, null, deviceTemplateRepo, null,
-                transactionTemplate, null, specificationMapper, ruleMapper, deviceNodeMapper,
-                null, new DeviceTemplateMapper(), null, userRepository, editJournal);
+        BoardStorageServiceImpl service = newServiceWithEnvironmentRepository();
 
         DeviceNodeDto device = boardNode("sensor1", "Temperature Sensor", "Hall");
         DeviceNodePo devicePo = new DeviceNodePo();

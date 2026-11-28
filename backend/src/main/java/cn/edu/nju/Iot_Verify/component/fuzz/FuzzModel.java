@@ -344,7 +344,7 @@ final class FuzzModel {
         }
         BooleanSupplier cancellation = cancelled == null ? () -> false : cancelled;
         for (PaperEvent event : seed.events()) {
-            validatePaperEvent(event, eventDomain, false);
+            validatePaperEvent(event, eventDomain);
         }
         for (PaperInitialValue override : seed.initialOverrides()) {
             validatePaperInitialValue(override, eventDomain);
@@ -368,8 +368,7 @@ final class FuzzModel {
         for (PaperEvent event : seed.events()) {
             if (event.position() == 1) {
                 applyPaperEvent(current, event);
-                inputEvents.add(toPaperInputEvent(
-                        event, eventDomain, FuzzInputEventSource.SEED_EVENT));
+                inputEvents.add(toPaperSeedInputEvent(event, eventDomain));
             }
         }
 
@@ -470,8 +469,7 @@ final class FuzzModel {
             } else {
                 applyPaperEvent(inputState, event);
             }
-            inputEvents.add(toPaperInputEvent(
-                    event, eventDomain, FuzzInputEventSource.SEED_EVENT));
+            inputEvents.add(toPaperSeedInputEvent(event, eventDomain));
         }
         return new PaperStep(
                 inputState,
@@ -480,8 +478,7 @@ final class FuzzModel {
 
     private void validatePaperEvent(
             PaperEvent event,
-            PaperEventDomainSnapshot eventDomain,
-            boolean randomInitialEvent) {
+            PaperEventDomainSnapshot eventDomain) {
         if (event == null || event.position() > eventDomain.traceLength()) {
             throw error("Paper-compatible event is outside the configured trace.");
         }
@@ -493,10 +490,7 @@ final class FuzzModel {
             return;
         }
         PaperEnvironmentDomain domain = eventDomain.environment(event.name());
-        boolean allowed = domain != null && (randomInitialEvent
-                ? domain.isValidInitialValue(event.value())
-                : domain.isValidEventValue(event.value()));
-        if (!allowed) {
+        if (domain == null || !domain.isValidEventValue(event.value())) {
             throw error("Paper-compatible environment event is outside its legal domain.");
         }
     }
@@ -530,10 +524,9 @@ final class FuzzModel {
                 source);
     }
 
-    private FuzzInputEvent toPaperInputEvent(
+    private FuzzInputEvent toPaperSeedInputEvent(
             PaperEvent event,
-            PaperEventDomainSnapshot eventDomain,
-            FuzzInputEventSource source) {
+            PaperEventDomainSnapshot eventDomain) {
         if (event.type() == PaperEvent.Type.DEVICE) {
             PaperDeviceDomain domain = eventDomain.device(event.name());
             return new FuzzInputEvent(
@@ -542,18 +535,16 @@ final class FuzzModel {
                     domain.targetId(),
                     domain.property(),
                     event.value(),
-                    source);
+                    FuzzInputEventSource.SEED_EVENT);
         }
         PaperEnvironmentDomain domain = eventDomain.environment(event.name());
         return new FuzzInputEvent(
                 event.position() - 1,
-                source == FuzzInputEventSource.RANDOM_INITIAL_STATE || !domain.hasRateDomain()
-                        ? FuzzInputEventKind.ENVIRONMENT_VALUE
-                        : FuzzInputEventKind.ENVIRONMENT_RATE,
+                domain.hasRateDomain() ? FuzzInputEventKind.ENVIRONMENT_RATE : FuzzInputEventKind.ENVIRONMENT_VALUE,
                 domain.targetId(),
                 domain.property(),
                 event.value(),
-                source);
+                FuzzInputEventSource.SEED_EVENT);
     }
 
     private static String paperWorkingStateName(DeviceManifest.WorkingState state) {
@@ -2474,36 +2465,11 @@ final class FuzzModel {
             String changeStartState,
             String changeEndState,
             int modeCount) {
-        List<String> signalStarts = normalizedStateParts(signalStartState, modeCount);
-        List<String> signalEnds = normalizedStateParts(signalEndState, modeCount);
-        List<String> changeStarts = normalizedStateParts(changeStartState, modeCount);
-        List<String> changeEnds = normalizedStateParts(changeEndState, modeCount);
-        boolean observedChangePossible = false;
-        for (int modeIndex = 0; modeIndex < modeCount; modeIndex++) {
-            String signalStart = signalStarts.get(modeIndex);
-            String changeStart = changeStarts.get(modeIndex);
-            if (!signalStart.isEmpty() && !changeStart.isEmpty() && !signalStart.equals(changeStart)) {
-                return false;
-            }
-
-            String signalEnd = signalEnds.get(modeIndex);
-            if (signalEnd.isEmpty()) {
-                continue;
-            }
-            String changeEnd = changeEnds.get(modeIndex);
-            String fixedStart = !signalStart.isEmpty() ? signalStart : changeStart;
-            if (!changeEnd.isEmpty()) {
-                if (!signalEnd.equals(changeEnd)) {
-                    return false;
-                }
-                if (fixedStart.isEmpty() || !fixedStart.equals(signalEnd)) {
-                    observedChangePossible = true;
-                }
-            } else if (!fixedStart.isEmpty() && !fixedStart.equals(signalEnd)) {
-                return false;
-            }
-        }
-        return observedChangePossible;
+        return ManifestConditionSemantics.signalMayObserveChange(
+                normalizedStateParts(signalStartState, modeCount),
+                normalizedStateParts(signalEndState, modeCount),
+                normalizedStateParts(changeStartState, modeCount),
+                normalizedStateParts(changeEndState, modeCount));
     }
 
     private static List<String> normalizedStateParts(String state, int modeCount) {

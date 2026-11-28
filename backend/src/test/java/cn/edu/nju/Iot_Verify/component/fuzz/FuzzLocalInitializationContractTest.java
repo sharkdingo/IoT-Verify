@@ -17,10 +17,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -76,7 +75,7 @@ class FuzzLocalInitializationContractTest {
     void paperSeedsStillRandomizeLegalLocalValuesInsteadOfUsingTheBoardDefault() {
         FuzzModel model = FuzzModel.from(snapshot("closed", null));
         var domain = model.paperEventDomain(1);
-        Set<String> values = new HashSet<>();
+        List<String> values = new ArrayList<>();
         for (long nonce = 0; nonce < 16; nonce++) {
             var initial = model.simulatePaperSeed(PaperSeed.empty(nonce), domain, 1, () -> false)
                     .traceStates().get(0).getDevices().get(0).getVariables();
@@ -85,7 +84,8 @@ class FuzzLocalInitializationContractTest {
             assertTrue(Integer.parseInt(steps) >= -2 && Integer.parseInt(steps) <= 3);
             values.add(steps);
         }
-        assertTrue(values.size() > 1);
+        assertEquals(List.of("-1", "0", "-2", "2", "1", "2", "3", "0",
+                        "0", "-1", "0", "1", "0", "2", "2", "-1"), values);
     }
 
     @Test

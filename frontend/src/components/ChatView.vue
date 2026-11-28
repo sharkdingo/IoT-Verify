@@ -43,6 +43,7 @@ import {
 import { useChatStore } from '@/stores/chat';
 import { useAuth } from '@/stores/auth';
 import { errorDetails, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage';
+import { captureSessionObservations, observeSessionChanges, waitForChatSessionIdle } from '@/utils/chatSessionObservations';
 import FailureDetails from '@/components/FailureDetails.vue';
 import HouseholdGoalComposer from '@/components/HouseholdGoalComposer.vue';
 import ChatWelcome from '@/components/ChatWelcome.vue';
@@ -51,6 +52,7 @@ import { REQUEST_LIMITS } from '@/constants/requestLimits';
 import { confirmDestructive, notifyBlocked, notifyError, notifyInfo, notifySuccess } from '@/utils/feedback'
 import HintTooltip from '@/components/common/HintTooltip.vue'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
+import { assistantRefreshEffects } from '@/views/board/assistantRefresh'
 
 type BoardChatContext = {
   deviceCount?: number;
@@ -260,7 +262,8 @@ const activeStreamRetryDraft = ref('');
 const isLoadingHistory = ref(false);
 const historyLoadFailed = ref(false);
 const historyLoadDiagnostics = ref<ApiErrorDetails | null>(null);
-const isLoadingOlderHistory = ref(false);
+const olderHistoryAbortController = ref<AbortController | null>(null);
+const isLoadingOlderHistory = computed(() => olderHistoryAbortController.value !== null);
 const historyHasMore = ref(false);
 const historyNextBeforeId = ref<number | null>(null);
 const hasAuthoritativeActiveSession = computed(() =>
@@ -1201,9 +1204,11 @@ const reconcileAuthoritativeState = async (
   return ownedReconciliation;
 };
 
-const executeStreamCommand = async (command: StreamCommand, ownsRequest: () => boolean): Promise<boolean> => {
+const executeStreamCommand = async (
+  command: StreamCommand, ownsRequest: () => boolean, alreadyReconciled: boolean
+): Promise<boolean> => {
   if (!ownsRequest()) return false;
-  const completed = await invokeSystemCommand(command, 'stream');
+  const completed = alreadyReconciled || await invokeSystemCommand(command, 'stream');
   if (!ownsRequest()) return false;
   if (completed) {
     if (command.payload.assistantSummary || command.payload.assistantAction) {
@@ -1250,26 +1255,43 @@ const updateSessionActivity = (sessionId: string, active: boolean) => {
 
 const isHttpNotFound = (error: any) => error?.response?.status === 404;
 
+const clearActiveStreamContext = () => {
+  activeStreamSessionId.value = '';
+  activeStreamTurnId.value = '';
+  activeStreamAuthToken.value = null;
+  historyReplacementWithoutTerminalAllowed.value = false;
+  explicitStopRegistrationPending.value = false;
+  activeStreamRetryDraft.value = '';
+};
+
+const retireOlderHistoryRead = () => {
+  const previous = olderHistoryAbortController.value;
+  olderHistoryAbortController.value = null;
+  previous?.abort();
+};
+
+const retireHistoryReads = () => {
+  const epoch = ++historyRequestEpoch;
+  const previous = historyAbortController.value;
+  historyAbortController.value = null;
+  isLoadingHistory.value = false;
+  previous?.abort();
+  retireOlderHistoryRead();
+  return epoch;
+};
+
 const clearAuthoritativelyDeletedSession = (sessionId: string) => {
   sessionListRequestEpoch += 1;
   sessions.value = sessions.value.filter(session => session.id !== sessionId);
 
   if (activeStreamSessionId.value === sessionId) {
     stopSessionActivityMonitor();
-    activeStreamSessionId.value = '';
-    activeStreamTurnId.value = '';
-    activeStreamAuthToken.value = null;
-    historyReplacementWithoutTerminalAllowed.value = false;
-    explicitStopRegistrationPending.value = false;
-    activeStreamRetryDraft.value = '';
+    clearActiveStreamContext();
   }
 
   if (currentSessionId.value !== sessionId) return;
-  historyRequestEpoch += 1;
-  historyAbortController.value?.abort();
-  historyAbortController.value = null;
+  retireHistoryReads();
   confirmationRequestEpoch += 1;
-  isLoadingHistory.value = false;
   historyLoadFailed.value = false;
   historyLoadDiagnostics.value = null;
   currentSessionId.value = '';
@@ -1330,6 +1352,15 @@ const stopSessionActivityMonitor = () => {
   remoteActivityCheckFailed.value = false;
 };
 
+const attachRemoteExecution = (sessionId: string) => {
+  activeStreamSessionId.value = sessionId;
+  activeStreamTurnId.value = '';
+  activeStreamAuthToken.value = scopedAuthToken.value;
+  historyReplacementWithoutTerminalAllowed.value = true;
+  activeStreamRetryDraft.value = '';
+  isMonitoringRemoteExecution.value = true;
+};
+
 const monitorSessionActivity = (sessionId: string, knownActive = false) => {
   if (!sessionId || (isStreaming.value && activeStreamSessionId.value === sessionId)) return;
   stopSessionActivityMonitor();
@@ -1337,12 +1368,7 @@ const monitorSessionActivity = (sessionId: string, knownActive = false) => {
   const controller = new AbortController();
   activityMonitorAbortController = controller;
   if (knownActive) {
-    activeStreamSessionId.value = sessionId;
-    activeStreamTurnId.value = '';
-    activeStreamAuthToken.value = scopedAuthToken.value;
-    historyReplacementWithoutTerminalAllowed.value = true;
-    activeStreamRetryDraft.value = '';
-    isMonitoringRemoteExecution.value = true;
+    attachRemoteExecution(sessionId);
     updateSessionActivity(sessionId, true);
   }
 
@@ -1362,12 +1388,7 @@ const monitorSessionActivity = (sessionId: string, knownActive = false) => {
         if (currentSessionId.value !== sessionId) return;
         consecutiveFailures = 0;
         remoteActivityCheckFailed.value = false;
-        activeStreamSessionId.value = sessionId;
-        activeStreamTurnId.value = '';
-        activeStreamAuthToken.value = scopedAuthToken.value;
-        historyReplacementWithoutTerminalAllowed.value = true;
-        activeStreamRetryDraft.value = '';
-        isMonitoringRemoteExecution.value = true;
+        attachRemoteExecution(sessionId);
       } catch (error: any) {
         if (controller.signal.aborted || monitorEpoch !== activityMonitorEpoch) return;
         if (error?.response?.status === 404) {
@@ -1400,52 +1421,25 @@ const scheduleActiveSessionsPoll = () => {
   }, hasAuthoritativeActiveSession.value ? 1000 : 5000);
 };
 
-type SessionCompletionObservation = Pick<ChatSession, 'active' | 'latestTerminalMessageId'>;
-
-const captureSessionCompletionObservations = (
-    availableSessions: ChatSessionObservationBaseline['sessions']
-) => new Map(
-    availableSessions.map(session => [session.id, {
-      active: session.active,
-      latestTerminalMessageId: session.latestTerminalMessageId
-    }]));
-
 const sessionCompletionBaseline = () => {
   const handoff = !sessionCompletionObservationsInitialized
       && props.initialSessionObservations?.userId === authenticatedUserId.value
       ? props.initialSessionObservations : null;
   return {
-    previous: captureSessionCompletionObservations(handoff?.sessions ?? sessions.value),
+    previous: captureSessionObservations(handoff?.sessions ?? sessions.value),
     compareTerminalMessages: sessionCompletionObservationsInitialized || handoff !== null,
     handoff
   };
 };
 
-const completedBackgroundSessions = (
-    previous: Map<string, SessionCompletionObservation>,
-    nextSessions: ChatSession[],
-    compareTerminalMessages: boolean
-) => nextSessions.filter(session => {
-  const prior = previous.get(session.id);
-  const observedNewTerminal = compareTerminalMessages
-      && session.latestTerminalMessageId !== null
-      && session.latestTerminalMessageId !== prior?.latestTerminalMessageId;
-  const observedActiveSettlement = prior?.active === true && !session.active;
-  return (observedNewTerminal || observedActiveSettlement)
-      && session.id !== activeStreamSessionId.value;
-});
-
-const observedRemovedActiveSession = (
-    previous: Map<string, SessionCompletionObservation>, nextSessions: ChatSession[]
-) => Array.from(previous).some(([id, observation]) => observation.active
-    && id !== activeStreamSessionId.value && !nextSessions.some(session => session.id === id));
-
 const reconcileCompletedBackgroundSessions = async (
-    completedSessions: ChatSession[],
-    authEpoch: number,
-    handoff: ChatSessionObservationBaseline | null = null,
-    removedActiveSession = false
+    baseline: ReturnType<typeof sessionCompletionBaseline>,
+    nextSessions: ChatSession[],
+    authEpoch: number
 ) => {
+  const { previous, compareTerminalMessages, handoff } = baseline;
+  const { completed, removed } = observeSessionChanges(
+      previous, nextSessions, compareTerminalMessages, activeStreamSessionId.value);
   if (handoff?.reconciliation) {
     try {
       await handoff.reconciliation;
@@ -1455,13 +1449,13 @@ const reconcileCompletedBackgroundSessions = async (
   }
   if (!chatViewMounted || authEpoch !== chatAuthEpoch) return;
   void refreshSelectedCompletedHistory();
-  if (completedSessions.length === 0) {
-    if (removedActiveSession || (handoff && reconciliationRequired.value)) await reconcileAuthoritativeState();
+  if (completed.length === 0) {
+    if (removed.length > 0 || (handoff && reconciliationRequired.value)) await reconcileAuthoritativeState();
     return;
   }
   const reconciled = await reconcileAuthoritativeState();
   if (!chatViewMounted || authEpoch !== chatAuthEpoch) return;
-  completedSessions.forEach(session => {
+  completed.forEach(session => {
     notifyInfo(t(reconciled
       ? 'app.chat.backgroundSessionCompleted'
       : 'app.chat.backgroundSessionCompletedSyncPending', {
@@ -1491,9 +1485,7 @@ const pollActiveSessions = async () => {
         : res.filter(session => session.userId === authenticatedUserId.value);
     sessions.value = ownedSessions;
     sessionCompletionObservationsInitialized = true;
-    await reconcileCompletedBackgroundSessions(
-        completedBackgroundSessions(baseline.previous, ownedSessions, baseline.compareTerminalMessages),
-        authEpoch, baseline.handoff, observedRemovedActiveSession(baseline.previous, ownedSessions));
+    await reconcileCompletedBackgroundSessions(baseline, ownedSessions, authEpoch);
   } catch (error) {
     if (authEpoch === chatAuthEpoch && pollEpoch === activeSessionsMonitorEpoch
         && sessionListEpoch === sessionListRequestEpoch) {
@@ -1543,9 +1535,7 @@ const initSessions = async (reattachActive = true): Promise<boolean> => {
       if (reattachActive && !isStreaming.value && !activeStreamSessionId.value) {
         reattachAuthoritativeActiveSession(ownedSessions);
       }
-      await reconcileCompletedBackgroundSessions(
-          completedBackgroundSessions(baseline.previous, ownedSessions, baseline.compareTerminalMessages),
-          authEpoch, baseline.handoff, observedRemovedActiveSession(baseline.previous, ownedSessions));
+      await reconcileCompletedBackgroundSessions(baseline, ownedSessions, authEpoch);
       return true;
     }
     return false;
@@ -1635,8 +1625,7 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
   // Navigation detaches the live transport only. The durable execution remains owned by its
   // session and is reflected by the sidebar activity indicator until the server settles it.
   detachCurrentExecutionForNavigation();
-  historyRequestEpoch += 1;
-  historyAbortController.value?.abort();
+  const requestEpoch = retireHistoryReads();
 
   currentSessionId.value = sessionId;
   messages.value = [];
@@ -1648,7 +1637,6 @@ const handleSelectSession = async (sessionId: string, knownActive = false) => {
   historyLoadDiagnostics.value = null;
   clearPerformanceCaches();
   isLoadingHistory.value = true;
-  const requestEpoch = ++historyRequestEpoch;
   const controller = new AbortController();
   historyAbortController.value = controller;
   if (knownActive) monitorSessionActivity(sessionId, true);
@@ -1717,6 +1705,7 @@ const applyHistoryPage = (page: ChatHistoryPage, prepend: boolean, retainedOlder
     const existingIds = new Set(messages.value.map(message => message.id).filter(id => id != null));
     messages.value = [...page.messages.filter(message => message.id == null || !existingIds.has(message.id)), ...messages.value];
   } else {
+    if (!retainedOlderMessages) retireOlderHistoryRead();
     // Optimistic turns append to the local collection, never to the authoritative response.
     messages.value = [...(retainedOlderMessages ?? []), ...page.messages];
     const sessionId = currentSessionId.value;
@@ -1766,23 +1755,24 @@ const loadOlderHistory = async () => {
   const sessionId = currentSessionId.value;
   const beforeId = historyNextBeforeId.value;
   if (!sessionId || beforeId == null || !historyHasMore.value || isLoadingOlderHistory.value) return;
-  isLoadingOlderHistory.value = true;
-  const ownsRead = () => currentSessionId.value === sessionId && historyNextBeforeId.value === beforeId;
+  const controller = new AbortController();
+  olderHistoryAbortController.value = controller;
+  const ownsRead = () => olderHistoryAbortController.value === controller;
   const viewport = scrollRef.value;
   try {
-    const page = await getSessionHistory(sessionId, { beforeId, limit: 50 });
+    const page = await getSessionHistory(sessionId, { beforeId, limit: 50, signal: controller.signal });
     if (!ownsRead()) return;
     const previousHeight = viewport?.scrollHeight ?? 0;
     const previousTop = viewport?.scrollTop ?? 0;
     applyHistoryPage(page, true);
     await nextTick();
-    if (viewport) viewport.scrollTop = viewport.scrollHeight - previousHeight + previousTop;
+    if (ownsRead() && viewport) viewport.scrollTop = viewport.scrollHeight - previousHeight + previousTop;
   } catch (error) {
     if (!ownsRead()) return;
     console.warn('[Chat] Failed to load older history:', error);
     notifyBlocked(t('app.chat.historyLoadOlderFailed'));
   } finally {
-    isLoadingOlderHistory.value = false;
+    if (ownsRead()) olderHistoryAbortController.value = null;
   }
 };
 
@@ -1852,12 +1842,7 @@ const detachCurrentExecutionForNavigation = () => {
   streamProgressEvents.value = [];
   streamElapsedSeconds.value = 0;
   if (detachedSessionId) updateSessionActivity(detachedSessionId, true);
-  activeStreamSessionId.value = '';
-  activeStreamTurnId.value = '';
-  activeStreamAuthToken.value = null;
-  historyReplacementWithoutTerminalAllowed.value = false;
-  explicitStopRegistrationPending.value = false;
-  activeStreamRetryDraft.value = '';
+  clearActiveStreamContext();
 };
 
 const requestOwnedSessionStop = (sessionId: string, turnId?: string): Promise<void> => {
@@ -1893,7 +1878,7 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   chatAuthEpoch += 1;
   streamRequestEpoch += 1;
   sessionListRequestEpoch += 1;
-  historyRequestEpoch += 1;
+  retireHistoryReads();
   confirmationRequestEpoch += 1;
   abortActiveTransport(false);
   stopSessionActivityMonitor();
@@ -1902,8 +1887,6 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   settlementAbortController = null;
   settlementPromise = null;
   reconciliationPromise = null;
-  historyAbortController.value?.abort();
-  historyAbortController.value = null;
 
   sessions.value = [];
   sessionCompletionObservationsInitialized = false;
@@ -1917,12 +1900,7 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   inputValue.value = '';
   pendingConfirmationActions.value = [];
   pendingConfirmationLoadFailed.value = false;
-  activeStreamSessionId.value = '';
-  activeStreamTurnId.value = '';
-  activeStreamAuthToken.value = null;
-  historyReplacementWithoutTerminalAllowed.value = false;
-  explicitStopRegistrationPending.value = false;
-  activeStreamRetryDraft.value = '';
+  clearActiveStreamContext();
   isStreaming.value = false;
   isSettlingStream.value = false;
   isMonitoringRemoteExecution.value = false;
@@ -1932,10 +1910,8 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   sessionListLoadFailed.value = false;
   isCreatingSession.value = false;
   isPreparingStreamSession.value = false;
-  isLoadingHistory.value = false;
   historyLoadFailed.value = false;
   historyLoadDiagnostics.value = null;
-  isLoadingOlderHistory.value = false;
   historyHasMore.value = false;
   historyNextBeforeId.value = null;
   streamProgress.value = null;
@@ -1946,27 +1922,10 @@ const resetChatForAuthSubjectChange = (previousAuthToken: string | null) => {
   chatStore.setStreaming(false);
 };
 
-const waitForSessionIdle = async (sessionId: string, signal?: AbortSignal): Promise<boolean> => {
+const waitForSessionIdle = (sessionId: string, signal?: AbortSignal): Promise<boolean> => {
   const requestAuthEpoch = chatAuthEpoch;
   const ownsSession = () => chatViewMounted && requestAuthEpoch === chatAuthEpoch;
-  const deadline = Date.now() + 10_000;
-  let consecutiveFailures = 0;
-  while (Date.now() < deadline) {
-    if (!ownsSession()) return false;
-    try {
-      const activity = await getSessionActivity(sessionId, { signal });
-      if (!ownsSession()) return false;
-      if (!activity.active) return true;
-      consecutiveFailures = 0;
-    } catch (error: any) {
-      if (!ownsSession()) return false;
-      if (error?.response?.status === 404) return true;
-      consecutiveFailures += 1;
-      if (consecutiveFailures >= 3) throw error;
-    }
-    await new Promise(resolve => window.setTimeout(resolve, 500));
-  }
-  return false;
+  return waitForChatSessionIdle(() => getSessionActivity(sessionId, { signal }), ownsSession, Date.now() + 10_000, 3);
 };
 
 const settleActiveRequest = (
@@ -2077,11 +2036,7 @@ const settleActiveRequest = (
 
       try {
         if (currentSessionId.value === sessionId) {
-          historyRequestEpoch += 1;
-          historyAbortController.value?.abort();
-          historyAbortController.value = null;
-          isLoadingHistory.value = false;
-          const settlementHistoryEpoch = historyRequestEpoch;
+          const settlementHistoryEpoch = retireHistoryReads();
           const history = await getSessionHistory(sessionId, controller.signal);
           if (!settlementContextIsCurrent()) return 'ready';
           if (settlementHistoryEpoch !== historyRequestEpoch
@@ -2131,12 +2086,7 @@ const settleActiveRequest = (
       const contextIsCurrent = settlementContextIsCurrent();
       if (ownsSettlement && contextIsCurrent) {
         if (!retainActiveSession && activeStreamSessionId.value === sessionId) {
-          activeStreamSessionId.value = '';
-          activeStreamTurnId.value = '';
-          activeStreamAuthToken.value = null;
-          historyReplacementWithoutTerminalAllowed.value = false;
-          explicitStopRegistrationPending.value = false;
-          activeStreamRetryDraft.value = '';
+          clearActiveStreamContext();
           updateSessionActivity(sessionId, false);
         }
         isSettlingStream.value = false;
@@ -2279,10 +2229,7 @@ onUnmounted(() => {
   chatStore.setStreaming(false);
   if (streamElapsedTimer) clearInterval(streamElapsedTimer);
   streamElapsedTimer = null;
-  historyRequestEpoch += 1;
-  historyAbortController.value?.abort();
-  historyAbortController.value = null;
-  isLoadingHistory.value = false;
+  retireHistoryReads();
   stopPanelInteraction();
   stopComposerResize();
   window.removeEventListener('resize', handleChatViewportResize);
@@ -2349,9 +2296,13 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
     streamElapsedSeconds.value = Math.floor((Date.now() - streamStartedAt) / 1000);
   }, 1000);
   let commandExecutionChain: Promise<void> = Promise.resolve();
+  let boardSnapshotReconciled = false;
   const queueCommandExecution = (command: StreamCommand) => {
     commandExecutionChain = commandExecutionChain.then(async () => {
-      await executeStreamCommand(command, requestContextIsCurrent);
+      const method = assistantRefreshEffects(command.payload.target).method;
+      const completed = await executeStreamCommand(command, requestContextIsCurrent,
+        method === 'refreshBoardSnapshot' && boardSnapshotReconciled);
+      if (completed && method !== 'refreshRunHistory') boardSnapshotReconciled = true;
     });
   };
 
@@ -2577,12 +2528,7 @@ const submitChatTurn = async (content: string, confirmation?: ChatConfirmationCo
         } finally {
           if (requestContextIsCurrent()
               && !retainActiveSession && activeStreamSessionId.value === completedSessionId) {
-            activeStreamSessionId.value = '';
-            activeStreamTurnId.value = '';
-            activeStreamAuthToken.value = null;
-            historyReplacementWithoutTerminalAllowed.value = false;
-            explicitStopRegistrationPending.value = false;
-            activeStreamRetryDraft.value = '';
+            clearActiveStreamContext();
             updateSessionActivity(completedSessionId, false);
           }
           if (requestContextIsCurrent()) isSettlingStream.value = false;

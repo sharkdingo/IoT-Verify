@@ -42,18 +42,6 @@ public record LlmChatResponse(String text,
         this(text, toolCalls, "");
     }
 
-    public static LlmChatResponse ofText(String text) {
-        return new LlmChatResponse(text, List.of());
-    }
-
-    public static LlmChatResponse ofToolCalls(List<LlmToolCall> toolCalls) {
-        return new LlmChatResponse("", toolCalls);
-    }
-
-    public static LlmChatResponse ofTextAndToolCalls(String text, List<LlmToolCall> toolCalls) {
-        return new LlmChatResponse(text, toolCalls);
-    }
-
     public static LlmChatResponse empty() {
         return new LlmChatResponse("", List.of());
     }

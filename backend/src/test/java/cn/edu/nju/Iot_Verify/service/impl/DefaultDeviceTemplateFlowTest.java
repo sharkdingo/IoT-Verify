@@ -1,21 +1,15 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport;
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.TemplateBackedModel;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerator;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvModelValidator;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvDeviceModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvMainModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWriter;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
-import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
-import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
-import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
@@ -27,7 +21,6 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,10 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class DefaultDeviceTemplateFlowTest {
 
@@ -48,7 +37,7 @@ class DefaultDeviceTemplateFlowTest {
     @TestFactory
     Stream<DynamicTest> everyDefaultTemplateCanBecomeOneBoardDevice() throws Exception {
         Map<String, DeviceManifest> templates = loadDefaultTemplates();
-        SmvGenerator generator = generatorFor(templates);
+        TemplateBackedModel fixture = modelFor(templates);
 
         return templates.keySet().stream()
                 .sorted()
@@ -58,11 +47,11 @@ class DefaultDeviceTemplateFlowTest {
                             "dev_" + DeviceSmvDataFactory.toVarName(templateName).toLowerCase(),
                             templateName,
                             initialState(manifest));
-                    Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, List.of(rawDevice));
+                    Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, List.of(rawDevice));
                     List<BoardEnvironmentVariableDto> environment =
                             NusmvEnvironmentPool.mergeWithDefaults(List.of(), rawMap);
 
-                    SmvGenerator.GenerateResult generated = generator.generateWithEnvironment(
+                    SmvGenerator.GenerateResult generated = fixture.generator().generateWithEnvironment(
                             USER_ID,
                             List.of(rawDevice),
                             environment,
@@ -93,11 +82,11 @@ class DefaultDeviceTemplateFlowTest {
     @Test
     void temperatureSensorAndAirConditionerShareOneEnvironmentPoolVariable() throws Exception {
         Map<String, DeviceManifest> templates = loadDefaultTemplates();
-        SmvGenerator generator = generatorFor(templates);
+        TemplateBackedModel fixture = modelFor(templates);
         List<DeviceVerificationDto> rawDevices = List.of(
                 device("temp_sensor_1", "Temperature Sensor", null),
                 device("ac_1", "Air Conditioner", "cool"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
         List<BoardEnvironmentVariableDto> environment = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("temperature", "30", "trusted", "public")),
                 rawMap);
@@ -105,7 +94,7 @@ class DefaultDeviceTemplateFlowTest {
                 condition("temp_sensor_1", "temperature", "variable", ">", "28"),
                 command("ac_1", "cool")));
 
-        String smv = generateSmv(generator, rawDevices, environment, rules);
+        String smv = generateSmv(fixture.generator(), rawDevices, environment, rules);
 
         assertTrue(smv.contains("a_temperature: 0..100;"), smv);
         assertTrue(smv.contains("init(a_temperature) := 30;"), smv);
@@ -120,17 +109,17 @@ class DefaultDeviceTemplateFlowTest {
     @Test
     void airQualityMonitorAndPurifierShareTwoEnvironmentPoolVariables() throws Exception {
         Map<String, DeviceManifest> templates = loadDefaultTemplates();
-        SmvGenerator generator = generatorFor(templates);
+        TemplateBackedModel fixture = modelFor(templates);
         List<DeviceVerificationDto> rawDevices = List.of(
                 device("aq_1", "Air Quality Monitor", null),
                 device("purifier_1", "Air Purifier", "on"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
         List<BoardEnvironmentVariableDto> environment = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("airQuality", "80", "trusted", "private"),
                         new BoardEnvironmentVariableDto("carbonDioxide", "70", "trusted", "private")),
                 rawMap);
 
-        String smv = generateSmv(generator, rawDevices, environment, List.of());
+        String smv = generateSmv(fixture.generator(), rawDevices, environment, List.of());
 
         assertTrue(smv.contains("a_airQuality: 0..100;"), smv);
         assertTrue(smv.contains("a_carbonDioxide: 0..100;"), smv);
@@ -144,16 +133,16 @@ class DefaultDeviceTemplateFlowTest {
     @Test
     void illuminanceSensorAndLightShowReadVsImpactSeparation() throws Exception {
         Map<String, DeviceManifest> templates = loadDefaultTemplates();
-        SmvGenerator generator = generatorFor(templates);
+        TemplateBackedModel fixture = modelFor(templates);
         List<DeviceVerificationDto> rawDevices = List.of(
                 device("lux_1", "Illuminance Sensor", null),
                 device("light_1", "Light", "on"));
-        Map<String, DeviceSmvData> rawMap = generator.buildDeviceSmvMap(USER_ID, rawDevices);
+        Map<String, DeviceSmvData> rawMap = fixture.factory().buildDeviceSmvMap(USER_ID, rawDevices);
         List<BoardEnvironmentVariableDto> environment = NusmvEnvironmentPool.mergeWithDefaults(
                 List.of(new BoardEnvironmentVariableDto("illuminance", "40", "trusted", "public")),
                 rawMap);
 
-        String smv = generateSmv(generator, rawDevices, environment, List.of());
+        String smv = generateSmv(fixture.generator(), rawDevices, environment, List.of());
 
         assertTrue(smv.contains("a_illuminance: 0..100;"), smv);
         // The sensor reads the shared value, so it gets a read mirror.
@@ -223,9 +212,9 @@ class DefaultDeviceTemplateFlowTest {
         // The generator's read-capability set is what a condition source may draw from, and it must
         // exclude this declaration exactly as the rule builder now does.
         Map<String, DeviceManifest> templates = loadDefaultTemplates();
-        SmvGenerator generator = generatorFor(templates);
+        TemplateBackedModel fixture = modelFor(templates);
         DeviceVerificationDto device = device("light_1", "Light", "on");
-        Map<String, DeviceSmvData> map = generator.buildDeviceSmvMap(USER_ID, List.of(device));
+        Map<String, DeviceSmvData> map = fixture.factory().buildDeviceSmvMap(USER_ID, List.of(device));
 
         assertFalse(map.get("light_1").getEnvVariables().containsKey("illuminance"),
                 "an affect-only declaration must not appear in the read-capability set");
@@ -266,32 +255,8 @@ class DefaultDeviceTemplateFlowTest {
         return result;
     }
 
-    private static SmvGenerator generatorFor(Map<String, DeviceManifest> templates) throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-        DeviceTemplateService templateService = mock(DeviceTemplateService.class);
-        when(templateService.findTemplateByName(anyLong(), anyString())).thenAnswer(invocation -> {
-            String name = invocation.getArgument(1, String.class);
-            DeviceManifest manifest = templates.get(name);
-            if (manifest == null) {
-                return Optional.empty();
-            }
-            return Optional.of(DeviceTemplatePo.builder()
-                    .id((long) name.hashCode())
-                    .userId(USER_ID)
-                    .name(name)
-                    .manifestJson(mapper.writeValueAsString(manifest))
-                    .defaultTemplate(true)
-                    .build());
-        });
-        SmvModelValidator validator = new SmvModelValidator();
-        return new SmvGenerator(
-                new DeviceSmvDataFactory(mapper, templateService, validator,
-                        new DeviceTemplateSchemaValidator(mapper)),
-                new SmvDeviceModuleBuilder(),
-                new SmvRuleCommentWriter(),
-                new SmvMainModuleBuilder(),
-                new SmvSpecificationBuilder(),
-                validator);
+    private static TemplateBackedModel modelFor(Map<String, DeviceManifest> templates) {
+        return FormalCheckTestSupport.buildTemplateBackedModel(USER_ID, templates, String::hashCode);
     }
 
     private static DeviceVerificationDto device(String varName, String templateName, String state) {

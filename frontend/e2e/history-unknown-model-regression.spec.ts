@@ -1,12 +1,6 @@
-import type { APIResponse, Route } from '@playwright/test'
+import type { Route } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import { apiBaseURL, createAuthenticatedUser, expect, test } from './support/auth'
-
-const unwrap = async (response: APIResponse) => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data
-}
 
 test('an unavailable current-model comparison withholds historical Fix and explains the unknown state', async ({ page, request }, testInfo) => {
   test.setTimeout(90_000)
@@ -138,8 +132,7 @@ test('an unavailable current-model comparison withholds historical Fix and expla
   let recoverComparisons = false
   let failedComparisons = 0
   let recoveredComparisons = 0
-  let comparisonStarted!: () => void
-  const olderStarted = new Promise<void>(resolve => { comparisonStarted = resolve })
+  let olderComparisonReady = false
   try {
     await publisher.goto('/#/board')
     await expect(publisher.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
@@ -165,7 +158,7 @@ test('an unavailable current-model comparison withholds historical Fix and expla
         expect(response.ok()).toBe(true)
         expect((await response.json()).data).toMatchObject(originalFingerprints)
         if (comparisonIndex === 1) {
-          comparisonStarted()
+          olderComparisonReady = true
           await olderGate
         } else {
           recoveredComparisons += 1
@@ -185,13 +178,17 @@ test('an unavailable current-model comparison withholds historical Fix and expla
         body: JSON.stringify({ code: 503, message: 'Unavailable', data: null }) })
     })
     const invalidateFromOtherWindow = () => publisher.evaluate(userId => {
-      // Exercise the real transport and subscriber; no UI edit or model change is fabricated.
       const channel = new BroadcastChannel('iot-verify-board-invalidation-v1')
       channel.postMessage({ type: 'BOARD_INVALIDATED', userId, reason: 'manual', issuedAt: Date.now() })
       channel.close()
     }, auth.userId)
+    // Change the snapshot while keeping the checked model identical. An identical snapshot reuses its comparison.
+    const requirement = originalScene.specifications[0]
+    await unwrap(await request.put(`${apiBaseURL}/api/board/specs/unknown_never`, {
+      headers, data: { expected: requirement, desired: { ...requirement, name: 'Renamed safety requirement' } }
+    }))
     await invalidateFromOtherWindow()
-    await olderStarted
+    await expect.poll(() => olderComparisonReady).toBe(true)
     expect(reads).toEqual({ fingerprints: 1, snapshots: 1, pendingFingerprints: 1 })
     const banner = dialog.getByTestId('verification-result-comparison-banner')
     await expect(banner).toContainText('Comparing the current board')
@@ -201,6 +198,8 @@ test('an unavailable current-model comparison withholds historical Fix and expla
     await invalidateFromOtherWindow()
     await failedSnapshot
     await expect(page.getByTestId('board-data-load-error')).toBeVisible()
+    const boardLight = page.locator('[data-node-id="unknown_light"]')
+    await expect(boardLight).toContainText('Historical comparison light')
     expect(reads).toEqual({ fingerprints: 1, snapshots: 2, pendingFingerprints: 1 })
     const settledOlder = page.waitForResponse(response =>
       new URL(response.url()).pathname === '/api/board/model-fingerprints' && response.status() === 200)
@@ -213,6 +212,12 @@ test('an unavailable current-model comparison withholds historical Fix and expla
     await expect(dialog.getByTestId('verification-trace-replay')).toBeEnabled()
 
     await page.getByTestId('close-verification-result').click()
+    await page.getByTestId('inspector-tab-rules').click()
+    await expect(page.getByTestId('inspector-section-rules')).toContainText('Turn on when off')
+    await page.getByTestId('inspector-tab-specs').click()
+    await expect(page.getByTestId('inspector-section-specs')).toContainText('Renamed safety requirement')
+    await expect(page.getByTestId('board-data-load-error').getByTestId('failure-cause')).toHaveText('Unavailable')
+    await expect(page.locator('.el-message--error')).toHaveCount(0)
     await page.getByTestId('open-history-panel').click()
     await expect(page.getByTestId('trace-history-panel')).toBeVisible()
     await page.getByTestId('history-layer-results').click()
@@ -250,6 +255,20 @@ test('an unavailable current-model comparison withholds historical Fix and expla
         unavailableReads, reads, failedComparisons, recoveredComparisons, lifecycle, runId
       }))
     })
+
+    await history.getByTestId('close-history-panel').click()
+    await unwrap(await request.patch(`${apiBaseURL}/api/board/nodes/label`, {
+      headers, params: { nodeId: 'unknown_light' },
+      data: { label: 'Recovered comparison light', expectedLabel: 'Historical comparison light' }
+    }))
+    await page.unroute('**/api/board/snapshot')
+    const snapshot = page.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === '/api/board/snapshot' && response.status() === 200)
+    const boardFailure = page.getByTestId('board-data-load-error')
+    await boardFailure.getByRole('button', { name: 'Retry', exact: true }).click()
+    await snapshot
+    await expect(boardFailure).toBeHidden()
+    await expect(boardLight).toContainText('Recovered comparison light')
   } finally {
     releaseOlder()
     await page.unrouteAll({ behavior: 'wait' })

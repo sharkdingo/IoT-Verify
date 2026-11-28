@@ -18,9 +18,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Optional;
 
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.awaitQueuedTask;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.occupyExecutorWorker;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.runCancellableRequest;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.singleWorkerExecutor;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.startInterruptibleRequest;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.unavailableRedisStore;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
@@ -37,17 +44,87 @@ class InteractiveFixExecutionServiceTest {
 
     @BeforeEach
     void setUp() {
-        executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(1);
-        executor.setMaxPoolSize(1);
-        executor.setQueueCapacity(1);
-        executor.initialize();
-        service = new InteractiveFixExecutionService(executor);
+        executor = singleWorkerExecutor();
+        service = new InteractiveFixExecutionService(executor, unavailableRedisStore());
     }
 
     @AfterEach
     void tearDown() {
         executor.shutdown();
+    }
+
+    @Test
+    void cancellingAFixKeepsTheSameRecommendationRequestRunning() throws Exception {
+        var store = mock(DistributedInteractiveExecutionStore.class);
+        var recommendationRunning = new CountDownLatch(1);
+        var releaseRecommendation = new CountDownLatch(1);
+        var fixAdmitted = new CountDownLatch(1);
+        when(store.acquire("fix", 1L, "request-123", false)).thenAnswer(invocation -> {
+            fixAdmitted.countDown();
+            return null;
+        });
+        var recommendations = new InteractiveAiExecutionService(executor, store);
+        var fixes = new InteractiveFixExecutionService(executor, store);
+
+        var recommendation = CompletableFuture.supplyAsync(() -> recommendations.execute(1L, "request-123", () -> {
+            recommendationRunning.countDown();
+            releaseRecommendation.await();
+            return "recommendation";
+        }));
+        try {
+            assertTrue(recommendationRunning.await(2, TimeUnit.SECONDS));
+            var fix = CompletableFuture.supplyAsync(() -> fixes.execute(1L, "request-123", () -> "fix"));
+            assertTrue(fixAdmitted.await(2, TimeUnit.SECONDS));
+            assertEquals("WAITING", fixes.getStatus(1L, "request-123").getState());
+            assertTrue(fixes.cancel(1L, "request-123"));
+            assertThrows(ExecutionException.class, () -> fix.get(2, TimeUnit.SECONDS));
+            assertEquals("RUNNING", recommendations.getStatus(1L, "request-123").getState());
+        } finally {
+            releaseRecommendation.countDown();
+        }
+        assertEquals("recommendation", recommendation.get(2, TimeUnit.SECONDS));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void acceptedCancellationDuringRunningStatusPublicationSkipsTheOperation(boolean recommendation) throws Exception {
+        var store = mock(DistributedInteractiveExecutionStore.class);
+        var lease = mock(DistributedInteractiveExecutionStore.Lease.class);
+        String kind = recommendation ? "recommendation" : "fix";
+        when(store.acquire(kind, 1L, "request-123", recommendation)).thenReturn(lease);
+        var publishingStatus = new CountDownLatch(1);
+        var releasePublication = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            publishingStatus.countDown();
+            while (true) {
+                try {
+                    assertTrue(releasePublication.await(3, TimeUnit.SECONDS));
+                    return null;
+                } catch (InterruptedException ignored) {
+                    // The status write can finish after the interrupt has been consumed.
+                }
+            }
+        }).when(store).update(lease, "RUNNING", InteractiveOperationStage.RUNNING);
+        InteractiveExecutionService instance = recommendation
+                ? new InteractiveAiExecutionService(executor, store) : new InteractiveFixExecutionService(executor, store);
+        var started = new AtomicBoolean();
+        var response = CompletableFuture.supplyAsync(() -> instance.execute(1L, "request-123", () -> {
+            started.set(true);
+            return "result";
+        }));
+        try {
+            assertTrue(publishingStatus.await(2, TimeUnit.SECONDS));
+            assertTrue(instance.cancel(1L, "request-123"));
+            var failure = assertThrows(ExecutionException.class, () -> response.get(2, TimeUnit.SECONDS));
+            assertInstanceOf(ServiceUnavailableException.class, failure.getCause());
+        } finally {
+            releasePublication.countDown();
+        }
+
+        executor.submit(() -> {}).get(2, TimeUnit.SECONDS);
+        assertFalse(started.get(), "The accepted cancellation must win before the operation starts");
+        assertEquals("FINISHED", instance.getStatus(1L, "request-123").getState());
+        verify(store).finish(lease, InteractiveOperationStage.CANCELLING);
     }
 
     @Test
@@ -118,8 +195,7 @@ class InteractiveFixExecutionServiceTest {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch releaseSearch = new CountDownLatch(1);
         CountDownLatch searchReturned = new CountDownLatch(1);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
+        CompletableFuture<Void> request = runCancellableRequest(() ->
                 service.execute(1L, "request-123", () -> {
                     started.countDown();
                     while (releaseSearch.getCount() > 0) {
@@ -131,11 +207,7 @@ class InteractiveFixExecutionServiceTest {
                     }
                     searchReturned.countDown();
                     return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // The waiting HTTP request is released as soon as cancellation is accepted.
-            }
-        });
+                }));
 
         try {
             assertTrue(started.await(2, TimeUnit.SECONDS));
@@ -160,30 +232,11 @@ class InteractiveFixExecutionServiceTest {
     void accountDeletionStopsLocalWorkAndPublishesDistributedCancellation() throws Exception {
         DistributedInteractiveExecutionStore store = mock(DistributedInteractiveExecutionStore.class);
         InteractiveFixExecutionService instance = new InteractiveFixExecutionService(executor, store);
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch interrupted = new CountDownLatch(1);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
-                instance.execute(1L, "request-123", () -> {
-                    started.countDown();
-                    try {
-                        Thread.sleep(30_000);
-                    } catch (InterruptedException e) {
-                        interrupted.countDown();
-                        Thread.currentThread().interrupt();
-                    }
-                    return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // Account deletion releases the waiting HTTP request.
-            }
-        });
+        var request = startInterruptibleRequest(operation -> instance.execute(1L, "request-123", operation));
 
-        assertTrue(started.await(2, TimeUnit.SECONDS));
+        request.awaitStarted();
         instance.requestUserExecutionStop(1L);
-        request.get(2, TimeUnit.SECONDS);
-
-        assertTrue(interrupted.await(2, TimeUnit.SECONDS));
+        request.awaitResponseAndInterrupt();
         verify(store).requestUserCancellation("fix", 1L);
     }
 
@@ -394,32 +447,17 @@ class InteractiveFixExecutionServiceTest {
 
     @Test
     void cancel_beforeStartRemovesQueuedWorkWithoutInvokingChecker() throws Exception {
-        CountDownLatch workerStarted = new CountDownLatch(1);
-        CountDownLatch releaseWorker = new CountDownLatch(1);
-        executor.execute(() -> {
-            workerStarted.countDown();
-            try {
-                releaseWorker.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        assertTrue(workerStarted.await(2, TimeUnit.SECONDS));
+        CountDownLatch releaseWorker = occupyExecutorWorker(executor);
 
         AtomicBoolean checkerCalled = new AtomicBoolean(false);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
+        CompletableFuture<Void> request = runCancellableRequest(() ->
                 service.execute(1L, "request-123", () -> {
                     checkerCalled.set(true);
                     return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // Cancellation releases the waiting HTTP request.
-            }
-        });
+                }));
 
         try {
-            awaitQueuedTask();
+            awaitQueuedTask(executor, "fix search");
             assertTrue(service.cancel(1L, "request-123"));
             request.get(2, TimeUnit.SECONDS);
             releaseWorker.countDown();
@@ -464,16 +502,6 @@ class InteractiveFixExecutionServiceTest {
                 .thenReturn(Optional.of(currentStatus));
 
         assertEquals(currentStatus, instance.getStatus(1L, "request-123"));
-    }
-
-    private void awaitQueuedTask() throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (executor.getThreadPoolExecutor().getQueue().isEmpty()) {
-            if (System.nanoTime() >= deadline) {
-                throw new AssertionError("Timed out waiting for queued fix search");
-            }
-            Thread.yield();
-        }
     }
 
     private void awaitBlockedOrTerminated(Thread thread) {

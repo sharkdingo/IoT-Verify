@@ -4,10 +4,11 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.ToIntFunction;
@@ -62,6 +63,34 @@ public final class RuleSemanticSignature {
                 && conditionMultiset(left, modeCountForDevice).equals(conditionMultiset(right, modeCountForDevice));
     }
 
+    public record Duplicate(int firstIndex, int duplicateIndex) {
+    }
+
+    /** Find the earliest duplicate in board order, using the same condition counts as exactlyMatches. */
+    public static Duplicate firstDuplicate(List<RuleDto> rules, ToIntFunction<String> modeCountForDevice) {
+        Map<String, Integer> firstByCommand = new HashMap<>();
+        Map<String, Map<Map<String, Long>, Integer>> conditionIndicesByCommand = new HashMap<>();
+        for (int index = 0; index < rules.size(); index++) {
+            RuleDto rule = rules.get(index);
+            String command = commandKey(rule == null ? null : rule.getCommand());
+            Integer first = firstByCommand.putIfAbsent(command, index);
+            if (first == null) {
+                continue;
+            }
+            // Delay normalizing condition lists until a second rule has the same command.
+            Map<Map<String, Long>, Integer> conditionIndices = conditionIndicesByCommand.computeIfAbsent(command, key -> {
+                Map<Map<String, Long>, Integer> indices = new HashMap<>();
+                indices.put(conditionMultiset(rules.get(first), modeCountForDevice), first);
+                return indices;
+            });
+            Integer previous = conditionIndices.putIfAbsent(conditionMultiset(rule, modeCountForDevice), index);
+            if (previous != null) {
+                return new Duplicate(previous, index);
+            }
+        }
+        return null;
+    }
+
     /** Canonical condition keys with their occurrence counts, so cardinality survives comparison. */
     private static Map<String, Long> conditionMultiset(RuleDto rule, ToIntFunction<String> modeCountForDevice) {
         if (rule == null) {
@@ -104,7 +133,8 @@ public final class RuleSemanticSignature {
                 continue;
             }
             String targetType = normalize(condition.getTargetType()).toLowerCase(Locale.ROOT);
-            String relation = "api".equals(targetType) ? "" : normalizeRelation(condition.getRelation());
+            String relation = "api".equals(targetType) ? ""
+                    : Objects.toString(SmvRelationUtils.normalizeRelation(condition.getRelation()), "");
             String device = normalize(condition.getDeviceName());
             String value = shapeOnly || "api".equals(targetType)
                     ? ""
@@ -126,37 +156,7 @@ public final class RuleSemanticSignature {
                     value, relation, targetType, modeCountForDevice.applyAsInt(device));
             if (membership != null) return membership;
         }
-        String normalized = normalize(value);
-        if (!"in".equals(relation) && !"not in".equals(relation)) {
-            return normalized;
-        }
-        String delimiter = "state".equals(targetType) ? "[,|]" : "[,;|]";
-        return Arrays.stream(normalized.split(delimiter))
-                .map(String::trim)
-                .filter(part -> !part.isBlank())
-                .sorted()
-                .reduce((left, right) -> left + "," + right)
-                .orElse("");
-    }
-
-    /**
-     * One owner for relation aliases: {@link SmvRelationUtils#normalizeRelation}.
-     *
-     * This was a private copy of that switch, and it had already drifted — its `NEQ` case omitted the `"!="`
-     * alias the canonical version carries. The two agreed only by accident, through the passthrough default, so
-     * adding an alias to the generator alone would have made a signature disagree with the model without any test
-     * noticing.
-     *
-     * That matters more here than in most places. This signature gates duplicate detection, delete-if-unchanged
-     * (`BoardStorageServiceImpl:1160`, `:4027`) and fix conflict detection (`FixStrategyUtils:152`) — so a
-     * mismatch lands a delete or an undo on a record the user never reviewed.
-     *
-     * The empty-string contract is kept: a signature is a string key, and a `null` inside one would compare
-     * unequal to an absent relation rather than equal to it.
-     */
-    private static String normalizeRelation(String relation) {
-        String canonical = SmvRelationUtils.normalizeRelation(relation);
-        return canonical == null ? "" : canonical;
+        return SmvRelationUtils.canonicalComparisonValue(value, relation, targetType);
     }
 
     private static String normalize(String value) {

@@ -211,15 +211,15 @@ class PaperSeedKernelTest {
         PaperSeedKernel kernel = new PaperSeedKernel(domain(), 101L);
         PaperSeed source = new PaperSeed(707L, List.of(new PaperEvent(
                 PaperEvent.Type.ENVIRONMENT, "temperature", "rate:1", 4)));
-        List<PaperEvent> initialBeforeDeletion = kernel.materializeInitialState(source);
+        List<PaperInitialValue> initialBeforeDeletion = kernel.materializeInitialValues(source);
 
         PaperSeed deleted = kernel.deleteEnvironmentEvent(source);
 
         assertTrue(deleted.events().isEmpty());
         assertEquals(707L, deleted.initializationNonce());
-        assertEquals(initialBeforeDeletion, kernel.materializeInitialState(deleted));
+        assertEquals(initialBeforeDeletion, kernel.materializeInitialValues(deleted));
         assertTrue(initialBeforeDeletion.stream()
-                .anyMatch(event -> event.type() == PaperEvent.Type.ENVIRONMENT));
+                .anyMatch(value -> value.type() == PaperInitialValue.Type.ENVIRONMENT_VALUE));
     }
 
     @Test

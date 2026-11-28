@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, readonly, ref } from 'vue'
 
 import boardApi from '@/api/board'
 import { isBoardEditHistoryRevision, type BoardUndoAvailability, type BoardUndoResult } from '@/types/boardEdit'
+import { readBoardWriteReceipt } from '@/utils/boardWriteReceipt'
 import { resolveBoardUndoIntent, targetOwnsNativeUndo } from './boardUndoShortcut'
 
 /**
@@ -32,20 +33,11 @@ export const useBoardUndo = (options: {
    * on `window`, so a disabled button cannot prevent this either.
    */
   submit: <T>(work: () => Promise<T>) => Promise<T>
-  /** Reconciles an unconfirmed or conflicted request through the same mutation queue. */
+  /** Fence queued writes and late receipts to the Board that requested them. */
+  captureOwner: () => () => boolean
+  /** Reconciles an unconfirmed or conflicted request inside its existing queue slot. */
   reconcile: () => Promise<boolean>
-  /**
-   * Follow-ups the applied result owes beyond the collections themselves.
-   *
-   * Undo is a semantic scene change, so recommendations built on the pre-undo scene are stale. The
-   * mutation queue's own scene-change hook cannot do this: undo passes `trackSemanticChange: false`
-   * because the commit path already owns verification staleness.
-   *
-   * Receives the result so the caller can say *what* was reversed. The server sends `entityType` and
-   * `originalOperation` on every applied undo and nothing read them, so a successful undo changed the
-   * board silently — fine when the affected object is on screen, and not fine when it is a rule or a
-   * specification the user cannot currently see.
-   */
+  /** Receives the applied receipt so the caller can announce which edit was reversed. */
   onApplied?: (result: BoardUndoResult) => void
   /**
    * True for a rejection that is a normal lifecycle outcome, not a failure to report — the board
@@ -57,7 +49,7 @@ export const useBoardUndo = (options: {
   isBlocked: () => boolean
   /** Called with a stable reason code so the caller owns all user-visible wording. */
   report: (
-    reasonCode: 'blocked' | 'nothing' | 'conflict' | 'failed',
+    reasonCode: 'blocked' | 'nothing' | 'conflict' | 'failed' | 'unconfirmed' | 'replay-blocked',
     direction: 'undo' | 'redo',
     error?: unknown,
     reconciled?: boolean
@@ -67,55 +59,76 @@ export const useBoardUndo = (options: {
   const canUndo = computed(() => observedHistory.value?.canUndo ?? false)
   const canRedo = computed(() => observedHistory.value?.canRedo ?? false)
   const isApplying = ref(false)
-  // A read started before an applied edit must not trigger a refresh based on an older observation.
-  let availabilityEpoch = 0
-  // Latest-started read wins among reads from the same mutation epoch.
-  let availabilityReadSequence = 0
+  const unconfirmedDirections = new Set<'undo' | 'redo'>()
+  let active = true
+  // A newer probe or mutation invalidates any earlier probe.
+  let availabilityGeneration = 0
 
   /** Adopt only the history paired with the visible Board or a committed user edit. */
   const syncAvailability = ({ canUndo, canRedo, editHistoryRevision }: Partial<BoardUndoAvailability>) => {
     if (typeof canUndo !== 'boolean' || typeof canRedo !== 'boolean') return
-    if (!isBoardEditHistoryRevision(editHistoryRevision)) {
-      // Scene replacement clears history even though its receipt needs no revision.
-      if (canUndo || canRedo) return
-      observedHistory.value = null
-    } else {
-      observedHistory.value = { canUndo, canRedo, editHistoryRevision }
-    }
-    availabilityEpoch += 1
+    // Scene replacement clears history even though its receipt needs no revision.
+    const hasRevision = isBoardEditHistoryRevision(editHistoryRevision)
+    if (!hasRevision && (canUndo || canRedo)) return
+    const previousRevision = observedHistory.value?.editHistoryRevision
+    observedHistory.value = hasRevision ? { canUndo, canRedo, editHistoryRevision } : null
+    if (observedHistory.value?.editHistoryRevision !== previousRevision) unconfirmedDirections.clear()
+    availabilityGeneration += 1
+  }
+
+  const captureRequestOwner = () => {
+    const ownsBoard = options.captureOwner()
+    return () => active && ownsBoard()
   }
 
   const apply = async (direction: 'undo' | 'redo') => {
-    if (isApplying.value) return
+    if (!active || isApplying.value) return
     if (options.isBlocked()) {
       options.report('blocked', direction)
       return
     }
     const observed = observedHistory.value
     if (!observed || !(direction === 'undo' ? observed.canUndo : observed.canRedo)) return
+    if (unconfirmedDirections.has(direction)) {
+      options.report('replay-blocked', direction)
+      return
+    }
 
+    const ownsRequest = captureRequestOwner()
+    const isConflict = (error: unknown) => (error as { response?: { status?: number } })?.response?.status === 409
     isApplying.value = true
     try {
-      await options.submit(async () => {
-        const result = await boardApi.applyBoardEditUndo(direction, observed.editHistoryRevision)
-        if (result.applied) options.applyResult(result)
-        syncAvailability(result)
-        if (result.applied) options.onApplied?.(result)
-        else options.report('nothing', direction)
+      const receipt = await options.submit(async () => {
+        let abandoned = false
+        const receipt = await readBoardWriteReceipt(
+          () => boardApi.applyBoardEditUndo(direction, observed.editHistoryRevision).catch(error => {
+            abandoned = options.isIgnorableError?.(error) ?? false
+            if (!abandoned && ownsRequest()) availabilityGeneration += 1
+            throw error
+          }),
+          () => !abandoned && ownsRequest(),
+          { refreshOnRejection: isConflict, reconcile: () => options.reconcile().catch(() => false) }
+        )
+        if (receipt?.status === 'confirmed') {
+          const { mutation } = receipt
+          if (mutation.applied) options.applyResult(mutation)
+          syncAvailability(mutation)
+        } else if (receipt?.status === 'unconfirmed'
+          && observedHistory.value?.editHistoryRevision === observed.editHistoryRevision) {
+          unconfirmedDirections.add(direction)
+        }
+        return receipt
       })
+      if (!receipt || !ownsRequest()) return
+      if (receipt.status === 'confirmed') {
+        if (receipt.mutation.applied) options.onApplied?.(receipt.mutation)
+        else options.report('nothing', direction)
+      } else {
+        const reason = receipt.status === 'unconfirmed' ? 'unconfirmed' : isConflict(receipt.error) ? 'conflict' : 'failed'
+        options.report(reason, direction, receipt.error, receipt.snapshotRefreshed)
+      }
     } catch (error) {
-      // A queued request can be rejected because the board went away, not because the undo failed.
-      if (options.isIgnorableError?.(error)) return
-      // The request may have committed despite the rejected response. Invalidate availability reads
-      // started before it just as a confirmed mutation would.
-      availabilityEpoch += 1
-      const status = (error as { response?: { status?: number } })?.response?.status
-      // A 409 proves this request made no write, but also proves the local board may be stale. Every
-      // other failure is less certain: the server may have committed before the response was lost or
-      // rejected by the client contract parser. Reconcile both through the mutation queue before
-      // describing the outcome, and never claim the board was unchanged when it is unknown.
-      const reconciled = await options.reconcile().catch(() => false)
-      options.report(status === 409 ? 'conflict' : 'failed', direction, error, reconciled)
+      if (ownsRequest() && !options.isIgnorableError?.(error)) options.report('failed', direction, error, false)
     } finally {
       isApplying.value = false
     }
@@ -123,12 +136,12 @@ export const useBoardUndo = (options: {
 
   /** A standalone read can detect drift. Only a Board refresh can adopt the newer revision. */
   const hasHistoryChanged = async (): Promise<boolean> => {
-    const epoch = availabilityEpoch
-    const readSequence = ++availabilityReadSequence
+    const ownsRequest = captureRequestOwner()
+    if (!ownsRequest()) return false
+    const generation = ++availabilityGeneration
     try {
       const availability = await boardApi.getBoardEditAvailability()
-      // A mutation landed while this was in flight, or a later refresh was already requested.
-      if (epoch !== availabilityEpoch || readSequence !== availabilityReadSequence) return false
+      if (!ownsRequest() || generation !== availabilityGeneration) return false
       return observedHistory.value === null
         ? availability.canUndo || availability.canRedo
         : availability.editHistoryRevision !== observedHistory.value.editHistoryRevision
@@ -148,7 +161,10 @@ export const useBoardUndo = (options: {
   }
 
   onMounted(() => window.addEventListener('keydown', handleKeydown))
-  onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
+  onBeforeUnmount(() => {
+    active = false
+    window.removeEventListener('keydown', handleKeydown)
+  })
 
   return {
     canUndo,

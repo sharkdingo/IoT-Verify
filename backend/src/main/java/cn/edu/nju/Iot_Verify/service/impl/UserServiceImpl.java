@@ -25,10 +25,10 @@ public class UserServiceImpl implements UserService {
     @Transactional
     public UserPo register(String phone, String username, String password) {
         String normalizedUsername = UsernameNormalizer.normalizeAndValidate(username);
-        if (existsByPhone(phone)) {
+        if (userRepository.existsByPhone(phone)) {
             throw ConflictException.duplicatePhone(phone);
         }
-        if (existsByUsername(normalizedUsername)) {
+        if (userRepository.existsByUsername(normalizedUsername)) {
             throw ConflictException.duplicateUsername(normalizedUsername);
         }
 
@@ -50,20 +50,5 @@ public class UserServiceImpl implements UserService {
     @Override
     public Optional<UserPo> findByUsername(String username) {
         return userRepository.findByUsername(username);
-    }
-
-    @Override
-    public Optional<UserPo> findById(Long id) {
-        return userRepository.findById(Objects.requireNonNull(id, "user id must not be null"));
-    }
-
-    @Override
-    public boolean existsByPhone(String phone) {
-        return userRepository.existsByPhone(phone);
-    }
-
-    @Override
-    public boolean existsByUsername(String username) {
-        return userRepository.existsByUsername(username);
     }
 }

@@ -51,12 +51,7 @@ public class GetFuzzRunTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("runId"));
             long runId = positiveLongArg(args, "runId");
 
@@ -81,7 +76,7 @@ public class GetFuzzRunTool extends AbstractAiTool {
             body.put("createdAt", run.getCreatedAt());
             body.put("completedAt", run.getCompletedAt());
             body.put("message", "Counterexample-search run loaded. Findings are heuristic candidate evidence, not formal counterexamples.");
-            return readOnlySuccessJson(body, "Counterexample-search run loaded.");
+            return readOnlySuccessJson(body);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

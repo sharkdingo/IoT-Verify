@@ -23,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.RecommendationToolFixtures.homeModeDevice;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -713,27 +714,6 @@ class RecommendSpecificationsToolTest {
                 List.of(),
                 List.of(),
                 List.of("normal", "safe"),
-                List.of()
-        );
-    }
-
-    private DeviceInfoHelper.DeviceInfo homeModeDevice() {
-        return new DeviceInfoHelper.DeviceInfo(
-                "node-home-mode",
-                "Home Mode",
-                "Home Mode",
-                "sleep;idle",
-                "trusted",
-                null,
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(
-                        new DeviceInfoHelper.ModeInfo("Mode", List.of("home", "away", "sleep")),
-                        new DeviceInfoHelper.ModeInfo("State", List.of("idle", "sendingAlertMessage", "sendingPhoto"))),
-                List.of("home;idle", "away;idle", "sleep;idle"),
                 List.of()
         );
     }

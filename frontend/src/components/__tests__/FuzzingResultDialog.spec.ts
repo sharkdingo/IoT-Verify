@@ -12,72 +12,10 @@ import actualI18n from '@/assets/i18n'
 const i18n = createI18n({
   legacy: false,
   locale: 'en',
+  fallbackLocale: 'en',
   messages: {
-    en: {
-      app: {
-        ...actualI18n.global.getLocaleMessage('en').app,
-        fuzzViolationFound: 'Candidate violation found',
-        fuzzViolationFoundDetail: 'Inspect and verify this candidate.',
-        fuzzBudgetExhausted: 'Search budget exhausted',
-        fuzzNoViolationWithinBudget: 'No violation was found within this budget. This is not a safety proof.',
-        fuzzInconclusive: 'Search inconclusive',
-        fuzzInconclusiveDetail: 'No usable conclusion.',
-        unknownSpecification: 'Unknown specification',
-        fuzzRunResult: 'Counterexample search result',
-        fuzzResultHeuristicNotice: 'This is not a formal safety proof.',
-        fuzzExplorationMode: 'Exploration initial state',
-        fuzzModeBoard: 'Board snapshot',
-        fuzzModePaper: 'Random state and events',
-        fuzzModeBoardDescription: 'Starts from the frozen Board initial state.',
-        fuzzModePaperDescription: 'Starts from a legal random state and searches reproducible inputs. It is not a proof and may not represent the authored initial state.',
-        close: 'Close',
-        loadingFuzzRun: 'Loading',
-        runSummary: 'Run summary',
-        fuzzIterations: 'Iterations',
-        fuzzGeneratedPaths: 'Generated paths',
-        fuzzElapsed: 'Elapsed',
-        fuzzElapsedSecond: '{count} second',
-        fuzzElapsedSeconds: '{count} seconds',
-        fuzzEffectiveSeed: 'Effective seed',
-        fuzzReproductionSettings: 'Reproduction settings',
-        fuzzReproductionHint: 'Same settings and Board snapshot required.',
-        fuzzReuseSettings: 'Use these settings',
-        fuzzMaxIterations: 'Iteration budget',
-        fuzzPathLength: 'Path length (states)',
-        fuzzPopulationSize: 'Candidate paths per iteration',
-        fuzzTargetSpecifications: 'Target specifications',
-        fuzzReproductionSelectedTargets: 'Explicit targets: {count}',
-        fuzzReproductionAllTargets: 'All frozen targets ({count})',
-        runScopeAndSnapshot: 'Run scope and snapshot',
-        modelRunSnapshotSummary: 'Captured {time}: {devices} devices, {rules} rules, {specs} specs, {variables} variables, {templates} templates',
-        fuzzBoardScopeChanged: 'Current Board scope changed.',
-        fuzzBoardScopeCurrent: 'Current Board model matches.',
-        fuzzIneligibleSpecifications: '{count} ineligible specifications',
-        fuzzEligibilityUnsupportedTemplate: 'This template is not supported by the explorer.',
-        fuzzEligibilityUnknown: 'The eligibility reason is not recognized.',
-        fuzzLimitations: 'Limitations',
-        fuzzPaperCapabilitiesAndBoundaries: 'Random-state mode capabilities and boundaries',
-        fuzzLimitationFiniteTraceTemplates: 'The search checks only states within the configured path length; it does not replace unbounded temporal verification.',
-        fuzzLimitationUnsupportedConcepts: 'Attack, trust, privacy, and content semantics are unsupported.',
-        fuzzLimitationFinalAntecedent: 'A final antecedent without a successor is inconclusive.',
-        fuzzLimitationPaperEventFsmDistanceEnabled: 'Candidate ranking considers the current specification state and remaining steps toward a violation.',
-        fuzzLimitationPaperRandomInitialStateEnabled: 'Each candidate uses a legal initial state derived from its random seed.',
-        fuzzLimitationPaperStructuredLtlOnly: 'Only Always, Never, and Immediate response structured specifications are supported.',
-        fuzzLimitationPaperIntegerNumericOnly: 'Numeric ranges use integers; decimals are not supported.',
-        fuzzLimitationPaperDiscreteEnvironmentExtension: 'Discrete environment variables may use direct-value inputs.',
-        fuzzLimitationNuSmvProofAuthority: 'Only formal verification can establish a safety conclusion.',
-        fuzzLimitationPaperPredecessorOutputsThreeLevels: 'Automation conditions are traced back by up to three levels.',
-        fuzzLimitationPaperMultiTargetExtension: 'Multiple targets keep separate candidate guidance.',
-        fuzzLimitationUnknown: 'An unrecognized limitation applies.',
-        fuzzFindings: 'Candidate violations',
-        fuzzTargetResultsSummary: '{found} of {total} targets have a candidate',
-        fuzzNoReplayableFindings: 'No replayable findings.',
-        fuzzFindingMeta: 'First violation: step {step}, seed {seed}',
-        replay: 'Replay',
-        verifyFormally: 'Verify formally',
-        fuzzFormalVerificationCurrentBoardNotice: 'Formal verification checks the complete current Board and does not import historical inputs.'
-      }
-    }
+    en: actualI18n.global.getLocaleMessage('en'),
+    'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
   }
 })
 
@@ -251,8 +189,9 @@ describe('FuzzingResultDialog', () => {
       await wrapper.setProps({ run: { ...run, outcome: 'BUDGET_EXHAUSTED',
         findings: [], findingCount: 0, limitations: ['TIME_BUDGET_EXHAUSTED'] } })
       expect(warning().attributes('role')).toBe('alert')
+      expect(wrapper.text()).toContain('Search time limit reached')
       expect(wrapper.text()).not.toContain('Search budget exhausted')
-      expect(wrapper.text()).toContain('not a safety proof')
+      expect(wrapper.text()).toContain('Specification satisfaction remains undetermined.')
     } finally { wrapper.unmount() }
   })
 
@@ -296,13 +235,13 @@ describe('FuzzingResultDialog', () => {
     await wrapper.setProps({ boardComparison: 'UNAVAILABLE' })
     expect(warning().attributes('data-state')).toBe('UNAVAILABLE')
     expect(warning().text()).toContain('could not be read')
-    expect(warning().text()).not.toContain('scope changed')
+    expect(warning().text()).not.toContain('differs from the current Board model')
     await wrapper.setProps({ boardComparison: 'SEMANTICS_CHANGED' })
     expect(warning().attributes('data-state')).toBe('SEMANTICS_CHANGED')
     expect(warning().text()).toContain('modeling version')
     await wrapper.setProps({ boardComparison: 'UNCHANGED' })
     expect(wrapper.find('[data-testid="fuzzing-board-drift-warning"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Current Board model matches.')
+    expect(wrapper.text()).toContain('The current board model matches this run.')
     wrapper.unmount()
   })
   it('distinguishes same-template targets with frozen conditions and localizes only bundled tokens', async () => {
@@ -319,25 +258,28 @@ describe('FuzzingResultDialog', () => {
       eligibility: { eligibleSpecIds: ['spec-1', 'spec-3'], eligibleSpecLabels: { 'spec-1': 'Never', 'spec-3': 'Never' },
         ineligibleSpecs: [], requestedSpecCount: 2, eligibleSpecCount: 2 },
       findings: [{ ...run.findings[0], violatedSpec: heating }] }
-    const previousLocale = actualI18n.global.locale.value
-    actualI18n.global.locale.value = 'zh-CN'
+    const previousLocale = i18n.global.locale.value
+    i18n.global.locale.value = 'zh-CN'
     const wrapper = mount(FuzzingResultDialog, {
-      props: { visible: true, run: frozenRun }, global: { plugins: [actualI18n] }
+      props: { visible: true, run: frozenRun }, global: { plugins: [i18n] }
     })
-    const targets = wrapper.get('[aria-labelledby="fuzz-target-results-title"]')
-    expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('要求永不成立：测试空调.空调模式 = "制热"')
-    expect(targets.text()).not.toContain('制热')
-    expect(targets.text()).toContain('要求永不成立：测试空调.空调模式 = "制冷"')
-    expect(wrapper.text()).not.toContain('HvacMode')
-    actualI18n.global.locale.value = 'en'
-    await nextTick()
-    expect(targets.text()).toContain('Must never hold: 测试空调.HVAC mode = "Cool"')
-    expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('HVAC mode = "Heat"')
-    await wrapper.setProps({ run: { ...frozenRun, modelTokenSourcesByDeviceId: { ac_1: 'CUSTOM' } } })
-    expect(targets.text()).toContain('测试空调.HvacMode = "cool"')
-    expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('HvacMode = "heat"')
-    wrapper.unmount()
-    actualI18n.global.locale.value = previousLocale
+    try {
+      const targets = wrapper.get('[aria-labelledby="fuzz-target-results-title"]')
+      expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('要求永不成立：测试空调.空调模式 = "制热"')
+      expect(targets.text()).not.toContain('制热')
+      expect(targets.text()).toContain('要求永不成立：测试空调.空调模式 = "制冷"')
+      expect(wrapper.text()).not.toContain('HvacMode')
+      i18n.global.locale.value = 'en'
+      await nextTick()
+      expect(targets.text()).toContain('Must never hold: 测试空调.HVAC mode = "Cool"')
+      expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('HVAC mode = "Heat"')
+      await wrapper.setProps({ run: { ...frozenRun, modelTokenSourcesByDeviceId: { ac_1: 'CUSTOM' } } })
+      expect(targets.text()).toContain('测试空调.HvacMode = "cool"')
+      expect(wrapper.get('[aria-labelledby="fuzz-findings-title"]').text()).toContain('HvacMode = "heat"')
+    } finally {
+      wrapper.unmount()
+      i18n.global.locale.value = previousLocale
+    }
   })
 
   it('offers replay and formal verification without exposing automatic fix', async () => {
@@ -346,7 +288,7 @@ describe('FuzzingResultDialog', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('Candidate violation found')
+    expect(wrapper.text()).toContain('Candidate counterexample found')
     expect(wrapper.text()).toContain('Less than 1 second')
     expect(wrapper.text()).not.toContain('1s')
     // The surface and its border come from the shared dialog layer's theme tokens. This used to pin
@@ -359,34 +301,36 @@ describe('FuzzingResultDialog', () => {
     expect(wrapper.get('[data-testid="fuzzing-result-mode"]').classes()).not.toContain('board-surface-warning')
     expect(wrapper.text()).toContain('7/14/2026')
     expect(wrapper.get('[data-testid="fuzzing-result-mode"]').text()).toContain('Random state and events')
-    expect(wrapper.getComponent(InfoTooltip).props('text')).toContain('legal random state')
-    expect(wrapper.getComponent(InfoTooltip).props('text')).toContain('not a proof')
-    expect(wrapper.text()).not.toContain('legal random state')
-    expect(wrapper.text()).toContain('This template is not supported by the explorer.')
+    const modeHelp = wrapper.getComponent(InfoTooltip).props('text')
+    expect(modeHelp).toContain('random legal state')
+    expect(modeHelp).toContain('rather than the Board’s initial state')
+    expect(wrapper.text()).not.toContain('random legal state')
+    expect(wrapper.text()).toContain('outside the finite-trace forms supported by the current explorer')
     expect(wrapper.text()).toContain('The search checks only states within the configured path length; it does not replace unbounded temporal verification.')
     expect(wrapper.text()).toContain('Random-state mode capabilities and boundaries')
-    expect(wrapper.text()).toContain('Candidate ranking considers the current specification state and remaining steps toward a violation.')
-    expect(wrapper.text()).toContain('Each candidate uses a legal initial state derived from its random seed.')
-    expect(wrapper.text()).toContain('Only Always, Never, and Immediate response structured specifications are supported.')
+    expect(wrapper.text()).toContain('Candidate ranking considers the current specification state')
+    expect(wrapper.text()).toContain('the remaining steps toward a violation, and how closely the next-step conditions are satisfied')
+    expect(wrapper.text()).toContain('Each candidate uses a legal initial state derived from its random seed')
+    expect(wrapper.text()).toContain('supports only the Always, Never, and Immediate response structured temporal specification forms')
     expect(wrapper.text()).not.toMatch(/paper subset|Event quadruple|monitor FSM|GetPrevConditions|BFS|NuSMV|HAFuzz/i)
-    expect(wrapper.text()).toContain('Numeric ranges use integers; decimals are not supported.')
-    expect(wrapper.text()).toContain('Discrete environment variables may use direct-value inputs.')
-    expect(wrapper.text()).toContain('Only formal verification can establish a safety conclusion.')
-    expect(wrapper.text()).toContain('Automation conditions are traced back by up to three levels.')
-    expect(wrapper.text()).toContain('An unrecognized limitation applies.')
-    expect(wrapper.text()).toContain('First violation: step 4, seed 42')
+    expect(wrapper.text()).toContain('Numeric ranges use integers; decimal values are not supported.')
+    expect(wrapper.text()).toContain('A discrete environment variable without a change-rate range may be set directly by a search input.')
+    expect(wrapper.text()).toContain('Formal verification provides a proof or formal counterexample within the model; exploration provides candidate paths.')
+    expect(wrapper.text()).toContain('Automation trigger conditions are traced back by up to three levels')
+    expect(wrapper.text()).toContain('an additional search limitation whose details are temporarily unavailable')
+    expect(wrapper.text()).toContain('First violation: step 4 · seed 42')
     expect(wrapper.text()).toContain('Reproduction settings')
     expect(wrapper.text()).toContain('Explicit targets: 2')
-    expect(wrapper.text()).toContain('Inspect and verify this candidate.')
+    expect(wrapper.text()).toContain('has not been formally verified. Replay it to investigate, or verify the current model.')
     expect(wrapper.get('[aria-labelledby="fuzz-target-results-title"]').text()).toContain('Window remains closed')
     expect(wrapper.find('[aria-labelledby="fuzz-findings-title"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('Formal verification checks the complete current Board')
-    expect(wrapper.text()).toContain('Captured')
-    expect(wrapper.get('[data-testid="fuzzing-board-drift-warning"]').text()).toContain('Current Board scope changed.')
+    expect(wrapper.text()).toContain('Formal verification checks every specification on the current board, without loading historical scenes or search inputs.')
+    expect(wrapper.text()).toContain('Submitted at')
+    expect(wrapper.get('[data-testid="fuzzing-board-drift-warning"]').text()).toContain('differs from the current Board model')
     expect(wrapper.text()).not.toContain('backend-only English diagnostic')
     expect(wrapper.find('[data-testid="fuzz-eligibility-technical-spec-2"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('FINITE_TRACE_TEMPLATES_1_3_4_ONLY')
-    expect(wrapper.findAll('button').some(button => button.text() === 'Fix')).toBe(false)
+    expect(wrapper.findAll('button').some(button => /fix rules|automatic fix|^fix$/i.test(button.text()))).toBe(false)
 
     await wrapper.get('[data-testid="replay-fuzzing-finding-11"]').trigger('click')
     const configureVerification = wrapper.get('[data-testid="verify-fuzzing-finding-11"]')
@@ -412,10 +356,10 @@ describe('FuzzingResultDialog', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('No violation was found within this budget. This is not a safety proof.')
+    expect(wrapper.text()).toContain('No candidate counterexample was found within this budget. Specification satisfaction remains undetermined.')
     expect(wrapper.find('[aria-labelledby="fuzz-findings-title"]').exists()).toBe(false)
     const formalNotice = wrapper.get('[data-testid="fuzz-formal-verification-current-board-notice"]')
-    expect(formalNotice.text()).toContain('Formal verification checks the complete current Board')
+    expect(formalNotice.text()).toContain('Formal verification checks every specification on the current board, without loading historical scenes or search inputs.')
     // Still must not read as success: this notice is not a safety result.
     expect(formalNotice.attributes('class')).not.toMatch(/emerald|green|board-surface-success/)
     const configureVerification = wrapper.get('[data-testid="verify-current-board-without-finding"]')
@@ -441,7 +385,7 @@ describe('FuzzingResultDialog', () => {
     })
 
     expect(wrapper.text()).toContain('Frozen door safety label')
-    expect(wrapper.text()).not.toContain('Unknown specification')
+    expect(wrapper.text()).not.toContain('Unidentified specification')
   })
 
   it('traps focus, closes with Escape, restores focus, and ignores backdrop clicks', async () => {

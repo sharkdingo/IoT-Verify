@@ -35,8 +35,4 @@ public class ValidationException extends BaseException {
                 .findFirst()
                 .orElse("Validation failed");
     }
-
-    public static ValidationException required(String field) {
-        return new ValidationException(field, field + " is required");
-    }
 }

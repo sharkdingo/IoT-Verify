@@ -17,6 +17,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import java.util.Map;
@@ -45,7 +46,7 @@ class TemplateToolsFallbackTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
+        destructiveActionGuard = inMemoryActionGuard(objectMapper);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("template-test-session");
     }

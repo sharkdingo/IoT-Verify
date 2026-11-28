@@ -1,4 +1,5 @@
-import { type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test'
+import { type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import {
   apiBaseURL,
   createAuthenticatedUser,
@@ -15,13 +16,6 @@ const PASSWORD = 'Pass1234!!'
 const NEW_PASSWORD = 'NewAccountPass2026!'
 const headers = (token: string) => ({ Authorization: `Bearer ${token}` })
 const uniqueName = () => createTestAccountCredentials({ usernamePrefix: 'renamed' }).username
-
-const unwrap = async <T>(response: APIResponse | Response): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data as T
-}
 
 const openWorkspace = async (page: Page, auth: AuthUser, target = '/#/board') => {
   await page.addInitScript(auth => {
@@ -199,11 +193,17 @@ test('rename preserves the Board and token, synchronizes tabs, and rejects incor
 
     expect((await submitUsername(page, uniqueName(), 'IncorrectPass2026!')).status()).toBe(400)
     await expect(page.getByTestId('account-username-error')).toContainText('current password is incorrect')
+    const currentPassword = page.getByTestId('account-confirm-username-dialog').getByLabel('Current password')
+    await expect(currentPassword).toHaveAttribute('aria-invalid', 'true')
+    await expect(currentPassword).toHaveAttribute('aria-describedby', 'account-username-error')
     expect((await storedSession(page)).token).toBe(auth.token)
     await page.getByTestId('account-cancel-username-confirmation').click()
     await expect(page.getByTestId('account-confirm-username-dialog')).toHaveCount(0)
     expect((await submitUsername(page, taken.username)).status()).toBe(409)
     await expect(page.getByTestId('account-username-error')).toContainText('already in use')
+    await expect(page.getByLabel('Username', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByLabel('Username', { exact: true })).toHaveAttribute('aria-describedby', 'account-username-error')
+    await expect(page.getByTestId('account-confirm-username-dialog')).toHaveCount(0)
 
     const renamed = uniqueName()
     await unwrap(await submitUsername(page, renamed))
@@ -342,16 +342,29 @@ test('a lost rename response reads the actual committed name instead of claiming
     await route.abort('failed')
   })
   const confirmation = await prepareUsername(page, renamed)
+  const successToast = await page.evaluateHandle(() => {
+    const result = { inserted: false }
+    new MutationObserver(records => {
+      result.inserted ||= records.some(record => Array.from(record.addedNodes).some(node =>
+        node instanceof Element && (node.matches('.el-message--success') || !!node.querySelector('.el-message--success'))))
+    }).observe(document.body, { childList: true, subtree: true })
+    return result
+  })
   await confirmation.getByTestId('account-confirm-username').click()
-  await expect(page.getByTestId('account-username-error')).toContainText('Current account details were reloaded from the server')
+  const notice = page.getByTestId('account-username-error')
+  await expect(notice).toContainText('Current account details were reloaded from the server')
+  await expect(notice).toHaveClass(/account-notice--warning/)
+  await expect(notice).not.toHaveClass(/account-notice--error/)
   expect(committedStatus).toBe(200)
   expect(writes).toBe(1)
   await expect(page.getByLabel('Username', { exact: true })).toHaveValue(renamed)
-  await expect(page.getByTestId('account-username-saved')).toHaveCount(0)
   expect((await storedSession(page)).token).toBe(auth.token)
   expect((await storedSession(page)).user.username).toBe(renamed)
   const actual = await unwrap<AccountProfile>(await request.get(`${apiBaseURL}/api/auth/account`, { headers: headers(auth.token) }))
   expect(actual.username).toBe(renamed)
+  await page.getByRole('button', { name: '切换到中文' }).click()
+  await expect(notice).toContainText('保存响应未能确认。已刷新为服务器当前资料，请核对用户名后再继续。')
+  expect(await successToast.evaluate(result => result.inserted)).toBe(false)
 })
 
 test('a lost password response clears the session and requests sign-in confirmation after the backend really committed', async ({ page, request }) => {

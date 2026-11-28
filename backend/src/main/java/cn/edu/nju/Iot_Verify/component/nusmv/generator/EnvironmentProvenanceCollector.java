@@ -2,7 +2,7 @@ package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest.InternalVariable;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.EnvironmentValueProvenanceDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelTokenSource;
@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * Collects per-value semantic provenance for environment variables at model generation time.
@@ -102,11 +103,8 @@ public class EnvironmentProvenanceCollector {
         return result;
     }
 
-    private static class EnvironmentDomain {
-        Integer lowerBound;
-        Integer upperBound;
-        String naturalChangeRate;
-        List<String> values;
+    private record EnvironmentDomain(Integer lowerBound, Integer upperBound,
+                                     String naturalChangeRate, List<String> values) {
 
         boolean isDiscrete() {
             return values != null && !values.isEmpty();
@@ -122,33 +120,21 @@ public class EnvironmentProvenanceCollector {
             List<DeviceVerificationDto> devices,
             Map<String, DeviceSmvData> deviceSmvMap) {
 
-        for (DeviceVerificationDto dev : devices) {
-            DeviceSmvData smv = deviceSmvMap.get(dev.getVarName());
-            if (smv == null || smv.getManifest() == null
-                    || smv.getManifest().getInternalVariables() == null) {
-                continue;
-            }
+        return devices.stream()
+                .flatMap(device -> sharedDeclarations(deviceSmvMap.get(device.getVarName()), varName))
+                .findFirst()
+                .map(variable -> new EnvironmentDomain(variable.getLowerBound(), variable.getUpperBound(),
+                        variable.getNaturalChangeRate(), variable.getValues()))
+                .orElse(null);
+    }
 
-            for (DeviceTemplateDto.DeviceManifest.InternalVariable internalVar
-                    : smv.getManifest().getInternalVariables()) {
-                if (!varName.equals(internalVar.getName())) {
-                    continue;
-                }
-                if (Boolean.TRUE.equals(internalVar.getIsInside())) {
-                    // Device-local variable, not the shared one
-                    continue;
-                }
-
-                EnvironmentDomain domain = new EnvironmentDomain();
-                domain.lowerBound = internalVar.getLowerBound();
-                domain.upperBound = internalVar.getUpperBound();
-                domain.naturalChangeRate = internalVar.getNaturalChangeRate();
-                domain.values = internalVar.getValues();
-                return domain;
-            }
+    private Stream<InternalVariable> sharedDeclarations(DeviceSmvData smv, String varName) {
+        if (smv == null || smv.getManifest() == null || smv.getManifest().getInternalVariables() == null) {
+            return Stream.empty();
         }
-
-        return null;
+        return smv.getManifest().getInternalVariables().stream()
+                .filter(variable -> varName.equals(variable.getName()))
+                .filter(variable -> !Boolean.TRUE.equals(variable.getIsInside()));
     }
 
     private List<EnvironmentValueProvenanceDto.DeviceWriter> collectWriters(
@@ -184,26 +170,11 @@ public class EnvironmentProvenanceCollector {
         List<EnvironmentValueProvenanceDto.DeviceReader> readers = new ArrayList<>();
 
         for (DeviceVerificationDto dev : devices) {
-            DeviceSmvData smv = deviceSmvMap.get(dev.getVarName());
-            if (smv == null || smv.getManifest() == null
-                    || smv.getManifest().getInternalVariables() == null) {
-                continue;
-            }
-
-            for (DeviceTemplateDto.DeviceManifest.InternalVariable internalVar
-                    : smv.getManifest().getInternalVariables()) {
-                if (!varName.equals(internalVar.getName())) {
-                    continue;
-                }
-                if (Boolean.TRUE.equals(internalVar.getIsInside())) {
-                    continue;
-                }
-                if (Boolean.TRUE.equals(internalVar.getReads())) {
-                    readers.add(EnvironmentValueProvenanceDto.DeviceReader.builder()
-                            .deviceVarName(dev.getVarName())
-                            .build());
-                    break;
-                }
+            if (sharedDeclarations(deviceSmvMap.get(dev.getVarName()), varName)
+                    .anyMatch(variable -> Boolean.TRUE.equals(variable.getReads()))) {
+                readers.add(EnvironmentValueProvenanceDto.DeviceReader.builder()
+                        .deviceVarName(dev.getVarName())
+                        .build());
             }
         }
 

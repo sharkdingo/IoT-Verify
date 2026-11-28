@@ -49,6 +49,18 @@ const mountLanding = async (path = '/?mode=login', stubHeader = true,
   return { router, wrapper }
 }
 
+const fillAuthForm = async (
+  wrapper: Awaited<ReturnType<typeof mountLanding>>['wrapper'],
+  mode: 'login' | 'register',
+  password = 'Password123'
+) => {
+  await wrapper.get('input[autocomplete="username"]').setValue('alice')
+  if (mode === 'register') {
+    await wrapper.get('input[autocomplete="tel"]').setValue('13800138000')
+    for (const input of wrapper.findAll('input[autocomplete="new-password"]')) await input.setValue(password)
+  } else await wrapper.get('input[autocomplete="current-password"]').setValue(password)
+}
+
 const observeDocumentReload = () => {
   const browserWindow = window
   const replace = vi.spyOn(browserWindow.history, 'replaceState').mockImplementation(() => undefined)
@@ -89,14 +101,7 @@ describe('Landing authentication usability', () => {
     authApi[mode].mockReturnValue(response.promise)
     const { wrapper } = await mountLanding(`/?mode=${mode}`)
     try {
-      if (mode === 'register') {
-        await wrapper.get('input[autocomplete="tel"]').setValue('13800138000')
-        await wrapper.get('input[autocomplete="username"]').setValue('alice')
-        for (const password of wrapper.findAll('input[autocomplete="new-password"]')) await password.setValue('valid-password')
-      } else {
-        await wrapper.get('input[autocomplete="username"]').setValue('alice')
-        await wrapper.get('input[autocomplete="current-password"]').setValue('valid-password')
-      }
+      await fillAuthForm(wrapper, mode, 'valid-password')
       const form = wrapper.get(`#${mode}-panel`)
       await form.trigger('submit')
       for (const language of ['en', 'zh-CN'] as const) {
@@ -126,11 +131,7 @@ describe('Landing authentication usability', () => {
     try {
       await router.push(`/?mode=${mode}&redirect=${encodeURIComponent('/board?run=verification:7&trace=15')}`)
       await flushPromises()
-      await wrapper.get('input[autocomplete="username"]').setValue('alice')
-      if (mode === 'register') {
-        await wrapper.get('input[autocomplete="tel"]').setValue('13800138000')
-        for (const input of wrapper.findAll('input[autocomplete="new-password"]')) await input.setValue('Password123')
-      } else await wrapper.get('input[autocomplete="current-password"]').setValue('Password123')
+      await fillAuthForm(wrapper, mode)
       await wrapper.get(`#${mode}-panel`).trigger('submit')
       await flushPromises()
       expect(authApi[mode]).toHaveBeenCalledOnce()
@@ -166,11 +167,7 @@ describe('Landing authentication usability', () => {
     authApi[mode].mockReturnValueOnce(current.promise)
     const { router, wrapper } = await mountLanding(`/?mode=${mode}`)
     const submit = async (mode: 'login' | 'register') => {
-      await wrapper.get('input[autocomplete="username"]').setValue('alice')
-      if (mode === 'register') {
-        await wrapper.get('input[autocomplete="tel"]').setValue('13800138000')
-        for (const input of wrapper.findAll('input[autocomplete="new-password"]')) await input.setValue('Password123')
-      } else await wrapper.get('input[autocomplete="current-password"]').setValue('Password123')
+      await fillAuthForm(wrapper, mode)
       await wrapper.get(`#${mode}-panel`).trigger('submit')
       await flushPromises()
     }
@@ -201,6 +198,29 @@ describe('Landing authentication usability', () => {
       }
     } finally { wrapper.unmount() }
   })
+
+  it.each(['login', 'register'] as const)(
+    'keeps a newer shared credential when an earlier %s succeeds', async mode => {
+      const response = deferred<unknown>()
+      authApi[mode].mockReturnValueOnce(response.promise)
+      const { router, wrapper } = await mountLanding(`/?mode=${mode}`)
+      try {
+        await fillAuthForm(wrapper, mode)
+        await wrapper.get(`#${mode}-panel`).trigger('submit')
+        expect(authApi[mode]).toHaveBeenCalledOnce()
+
+        // Another tab has written its session but this tab has not processed the event.
+        localStorage.setItem('iot_verify_token', 'newer-shared-credential')
+        response.resolve({ code: 200, data: {
+          token: 'earlier-credential', userId: 7, phone: '13800138000', username: 'alice'
+        } })
+        await flushPromises()
+        expect(localStorage.getItem('iot_verify_token')).toBe('newer-shared-credential')
+        expect(useAuth().getToken()).toBeNull()
+        expect(router.currentRoute.value.query).toEqual({ mode })
+      } finally { wrapper.unmount() }
+    }
+  )
 
   it.each(['login', 'register'] as const)('shows %s success through navigation without a duplicate toast', async mode => {
     const session = { token: 'accepted-token', userId: 7, phone: '13800138000', username: 'alice' }
@@ -486,11 +506,7 @@ describe('Landing authentication usability', () => {
     authApi[mode].mockReturnValueOnce(new Promise((done, fail) => { resolve = done; reject = fail }))
     const { router, wrapper } = await mountLanding(`/?mode=${mode}`)
     try {
-      await wrapper.get('input[autocomplete="username"]').setValue('alice')
-      if (mode === 'register') {
-        await wrapper.get('input[autocomplete="tel"]').setValue('13800138000')
-        for (const input of wrapper.findAll('input[autocomplete="new-password"]')) await input.setValue('Password123')
-      } else await wrapper.get('input[autocomplete="current-password"]').setValue('Password123')
+      await fillAuthForm(wrapper, mode)
       await wrapper.get(mode === 'register' ? '#register-panel' : '#login-panel').trigger('submit')
       await flushPromises()
       useAuth().login('bob-token', { userId: 8, phone: '13900139000', username: 'bob' })

@@ -1,7 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool.scenario;
 
 import cn.edu.nju.Iot_Verify.component.ai.state.AiSessionStateStore;
-import cn.edu.nju.Iot_Verify.component.ai.state.InMemoryAiSessionStateStore;
 import cn.edu.nju.Iot_Verify.dto.board.BoardReplacementPreviewDto;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -34,10 +33,6 @@ public class AiScenarioDraftStore {
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
-    public AiScenarioDraftStore() {
-        this(new InMemoryAiSessionStateStore(), new ObjectMapper(), Clock.systemUTC());
-    }
-
     @Autowired
     public AiScenarioDraftStore(AiSessionStateStore stateStore, ObjectMapper objectMapper) {
         this(stateStore, objectMapper, Clock.systemUTC());
@@ -65,11 +60,6 @@ public class AiScenarioDraftStore {
                 null,
                 0L));
         return new DraftSaveResult(true, false);
-    }
-
-    public void clearDraft(Long userId, String sessionId) {
-        SessionScope scope = scope(userId, sessionId);
-        stateStore.remove(scope.userId(), scope.sessionId(), AiSessionStateStore.Kind.SCENARIO_DRAFT);
     }
 
     public boolean clearPendingApplication(Long userId, String sessionId, String confirmationId) {

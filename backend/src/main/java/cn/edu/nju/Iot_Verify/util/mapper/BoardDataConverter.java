@@ -49,10 +49,10 @@ public class BoardDataConverter {
     public ModelInputSnapshot toModelInputSnapshot(BoardSemanticSnapshotDto snapshot) {
         List<DeviceNodeDto> nodes = snapshot != null ? snapshot.nodes() : List.of();
         List<DeviceTemplateDto> templates = snapshot != null ? snapshot.deviceTemplates() : List.of();
-        Map<String, DeviceManifest> manifestsByTemplate = manifestsByTemplate(templates);
-        Map<String, ModelTokenSource> tokenSourcesByTemplate = tokenSourcesByTemplate(templates);
+        TemplateAliases aliases = indexTemplateAliases(templates);
+        Map<String, DeviceManifest> manifestsByTemplate = aliases.manifests();
         List<DeviceVerificationDto> devices = devicesForVerification(
-                nodes, manifestsByTemplate, tokenSourcesByTemplate);
+                nodes, manifestsByTemplate, aliases.tokenSources());
         Map<String, Integer> modeCounts = new HashMap<>();
         for (DeviceVerificationDto device : devices) {
             DeviceManifest manifest = manifestForTemplate(device.getTemplateName(), manifestsByTemplate);
@@ -231,48 +231,45 @@ public class BoardDataConverter {
         return trimmed == null ? null : DeviceNameNormalizer.normalize(trimmed);
     }
 
-    private Map<String, DeviceManifest> manifestsByTemplate(List<DeviceTemplateDto> templates) {
-        if (templates == null || templates.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        Map<String, DeviceManifest> result = new HashMap<>();
+    private TemplateAliases indexTemplateAliases(List<DeviceTemplateDto> templates) {
+        TemplateAliases aliases = new TemplateAliases(new HashMap<>(), new HashMap<>());
         for (DeviceTemplateDto template : templates) {
-            if (template == null || template.getManifest() == null) {
-                continue;
+            DeviceManifest manifest = template.getManifest();
+            ModelTokenSource source = ModelTokenSource.fromDefaultTemplate(template.getDefaultTemplate());
+            putTemplateAlias(aliases, template.getName(), manifest, source);
+            if (manifest != null) {
+                putTemplateAlias(aliases, manifest.getName(), manifest, source);
             }
-            putManifestAlias(result, template.getName(), template.getManifest());
-            putManifestAlias(result, template.getManifest().getName(), template.getManifest());
         }
-        return result;
+        return aliases;
     }
 
-    private Map<String, ModelTokenSource> tokenSourcesByTemplate(List<DeviceTemplateDto> templates) {
-        if (templates == null || templates.isEmpty()) {
-            return Collections.emptyMap();
+    private void putTemplateAlias(
+            TemplateAliases aliases, String name, DeviceManifest manifest, ModelTokenSource source) {
+        String key = templateAliasKey(name);
+        if (key == null) return;
+        aliases.tokenSources().putIfAbsent(key, source);
+        if (manifest != null) {
+            aliases.manifests().putIfAbsent(key, manifest);
         }
-        Map<String, ModelTokenSource> result = new HashMap<>();
-        for (DeviceTemplateDto template : templates) {
-            if (template == null) {
-                continue;
-            }
-            ModelTokenSource source = ModelTokenSource.fromDefaultTemplate(template.getDefaultTemplate());
-            putModelTokenSourceAlias(result, template.getName(), source);
-            if (template.getManifest() != null) {
-                putModelTokenSourceAlias(result, template.getManifest().getName(), source);
-            }
-        }
-        return result;
     }
+
+    private String templateAliasKey(String name) {
+        String key = trimToNull(name);
+        return key == null ? null : key.toLowerCase(Locale.ROOT);
+    }
+
+    private record TemplateAliases(
+            Map<String, DeviceManifest> manifests, Map<String, ModelTokenSource> tokenSources) {}
 
     private ModelTokenSource modelTokenSourceForTemplate(
             String templateName,
             Map<String, ModelTokenSource> tokenSourcesByTemplate) {
-        String key = trimToNull(templateName);
+        String key = templateAliasKey(templateName);
         if (key == null || tokenSourcesByTemplate == null) {
             return ModelTokenSource.UNKNOWN;
         }
-        return tokenSourcesByTemplate.getOrDefault(
-                key.toLowerCase(Locale.ROOT), ModelTokenSource.UNKNOWN);
+        return tokenSourcesByTemplate.getOrDefault(key, ModelTokenSource.UNKNOWN);
     }
 
     private Map<String, DeviceManifest> referencedTemplateManifests(
@@ -292,23 +289,6 @@ public class BoardDataConverter {
         return result;
     }
 
-    private void putManifestAlias(Map<String, DeviceManifest> result, String rawName, DeviceManifest manifest) {
-        String name = trimToNull(rawName);
-        if (name != null) {
-            result.putIfAbsent(name.toLowerCase(Locale.ROOT), manifest);
-        }
-    }
-
-    private void putModelTokenSourceAlias(
-            Map<String, ModelTokenSource> result,
-            String rawName,
-            ModelTokenSource source) {
-        String name = trimToNull(rawName);
-        if (name != null) {
-            result.putIfAbsent(name.toLowerCase(Locale.ROOT), source);
-        }
-    }
-
     private boolean templateHasModes(String templateName, Map<String, DeviceManifest> manifestsByTemplate) {
         DeviceManifest manifest = manifestForTemplate(templateName, manifestsByTemplate);
         if (manifest == null) {
@@ -320,11 +300,11 @@ public class BoardDataConverter {
     }
 
     private DeviceManifest manifestForTemplate(String templateName, Map<String, DeviceManifest> manifestsByTemplate) {
-        String key = trimToNull(templateName);
+        String key = templateAliasKey(templateName);
         if (key == null || manifestsByTemplate == null) {
             return null;
         }
-        return manifestsByTemplate.get(key.toLowerCase(Locale.ROOT));
+        return manifestsByTemplate.get(key);
     }
 
     private List<VariableStateDto> localVariables(List<VariableStateDto> variables, DeviceManifest manifest) {

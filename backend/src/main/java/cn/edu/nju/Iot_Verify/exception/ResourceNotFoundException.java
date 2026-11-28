@@ -18,19 +18,7 @@ public class ResourceNotFoundException extends BaseException {
         return new ResourceNotFoundException("User", id);
     }
 
-    public static ResourceNotFoundException user(String phone) {
-        return new ResourceNotFoundException("User", phone);
-    }
-
     public static ResourceNotFoundException session(String sessionId) {
         return new ResourceNotFoundException("Chat session", sessionId);
-    }
-
-    public static ResourceNotFoundException template(String name) {
-        return new ResourceNotFoundException("Device template", name);
-    }
-
-    public static ResourceNotFoundException node(String nodeId) {
-        return new ResourceNotFoundException("Device node", nodeId);
     }
 }

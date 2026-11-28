@@ -85,10 +85,7 @@ public class ListVerificationRunsTool extends AbstractAiTool {
                     "message", runs.isEmpty()
                             ? "No completed formal-verification runs found."
                             : "Found " + runs.size() + " completed formal-verification run(s), newest first.",
-                    "count", runs.size(), "runs", runs, "interpretation", INTERPRETATION),
-                    "Verification runs loaded.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+                    "count", runs.size(), "runs", runs, "interpretation", INTERPRETATION));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

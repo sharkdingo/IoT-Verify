@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.simulation;
 
-import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTaskDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.SimulationService;
@@ -13,6 +12,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
+
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
@@ -32,7 +34,7 @@ class DismissSimulateTaskToolTest {
     void setUp() {
         objectMapper = new ObjectMapper().findAndRegisterModules();
         tool = new DismissSimulateTaskTool(
-                simulationService, objectMapper, new AiDestructiveActionGuard(objectMapper));
+                simulationService, objectMapper, inMemoryActionGuard(objectMapper));
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("simulation-cleanup-session");
     }
@@ -44,6 +46,10 @@ class DismissSimulateTaskToolTest {
 
     @Test
     void dismiss_previewThenConfirmRemovesCancelledTask() throws Exception {
+        var schema = tool.getDefinition().parameters();
+        assertEquals(List.of("taskId", "confirmed", "impactToken"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId", "confirmed"), schema.required);
+
         SimulationTaskDto task = SimulationTaskDto.builder()
                 .id(4L)
                 .status("CANCELLED")
@@ -52,6 +58,11 @@ class DismissSimulateTaskToolTest {
                 .errorMessage("Cancelled by user")
                 .build();
         when(simulationService.getTask(1L, 4L)).thenReturn(task);
+
+        JsonNode unexpected = objectMapper.readTree(tool.execute(
+                "{\"taskId\":4,\"confirmed\":false,\"force\":true}"));
+        assertEquals("arguments contains unsupported field(s): force.", unexpected.path("error").asText());
+        verify(simulationService, never()).getTask(1L, 4L);
 
         JsonNode preview = objectMapper.readTree(
                 tool.execute("{\"taskId\":4,\"confirmed\":false}"));

@@ -53,37 +53,23 @@ const requireNonBlankText = (value: unknown, field: string, context: string): st
   return value
 }
 
-const validateFilteredItems = (items: any[], context: string) => {
+const validateAuditItems = (items: unknown[], field: 'filteredItems' | 'adjustedItems', context: string) => {
+  const adjustment = field === 'adjustedItems'
   items.forEach((item, index) => {
-    const prefix = `filteredItems[${index}]`
+    const prefix = `${field}[${index}]`
     const row = requireRecord(item, context)
     requireNonBlankText(row.type, `${prefix}.type`, context)
-    if (!Number.isSafeInteger(row.index) || row.index < 1) {
-      throw new RecommendationResponseContractError(context, `${prefix}.index must be a positive integer`)
-    }
-    requireNonBlankText(row.reasonCode, `${prefix}.reasonCode`, context)
-    requireNonBlankText(row.reason, `${prefix}.reason`, context)
-    if (row.label !== undefined && row.label !== null && typeof row.label !== 'string') {
-      throw new RecommendationResponseContractError(context, `${prefix}.label must be text when present`)
-    }
-  })
-}
-
-const validateAdjustmentItems = (items: any[], context: string) => {
-  items.forEach((item, index) => {
-    const prefix = `adjustedItems[${index}]`
-    const row = requireRecord(item, context)
-    requireNonBlankText(row.type, `${prefix}.type`, context)
-    if (row.index !== undefined && row.index !== null
+    if ((!adjustment || (row.index !== undefined && row.index !== null))
       && (!Number.isSafeInteger(row.index) || row.index < 1)) {
-      throw new RecommendationResponseContractError(context, `${prefix}.index must be a positive integer when present`)
+      const suffix = adjustment ? ' when present' : ''
+      throw new RecommendationResponseContractError(context, `${prefix}.index must be a positive integer${suffix}`)
     }
     requireNonBlankText(row.reasonCode, `${prefix}.reasonCode`, context)
     requireNonBlankText(row.reason, `${prefix}.reason`, context)
     if (row.label !== undefined && row.label !== null && typeof row.label !== 'string') {
       throw new RecommendationResponseContractError(context, `${prefix}.label must be text when present`)
     }
-    if (!row.appliedValues || typeof row.appliedValues !== 'object' || Array.isArray(row.appliedValues)) {
+    if (adjustment && (!row.appliedValues || typeof row.appliedValues !== 'object' || Array.isArray(row.appliedValues))) {
       throw new RecommendationResponseContractError(context, `${prefix}.appliedValues must be an object`)
     }
   })
@@ -117,7 +103,7 @@ const validateAccounting = (
   if (filteredCount !== filteredItems.length) {
     throw new RecommendationResponseContractError(context, 'filteredCount must match filteredItems')
   }
-  validateFilteredItems(filteredItems, context)
+  validateAuditItems(filteredItems, 'filteredItems', context)
   if (inspectedCount !== validatedCount + filteredCount) {
     throw new RecommendationResponseContractError(context, 'inspectedCount must equal kept plus rejected candidates')
   }
@@ -133,7 +119,7 @@ const validateAccounting = (
     if (adjustedCount !== adjustedItems.length) {
       throw new RecommendationResponseContractError(context, 'adjustedCount must match adjustedItems')
     }
-    validateAdjustmentItems(adjustedItems, context)
+    validateAuditItems(adjustedItems, 'adjustedItems', context)
   }
 }
 

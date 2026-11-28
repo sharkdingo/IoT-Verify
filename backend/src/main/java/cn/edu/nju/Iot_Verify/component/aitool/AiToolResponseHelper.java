@@ -1,10 +1,19 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
+import cn.edu.nju.Iot_Verify.configure.ChatExecutionConfig;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
+import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 public final class AiToolResponseHelper {
 
@@ -51,15 +60,11 @@ public final class AiToolResponseHelper {
         }
     }
 
-    public static String success(ObjectMapper objectMapper,
-                                 Map<String, Object> body,
-                                 String fallbackMessage) {
-        return success(objectMapper, body, fallbackMessage, true);
+    public static String success(ObjectMapper objectMapper, Map<String, Object> body) {
+        return success(objectMapper, body, true);
     }
 
-    public static String success(ObjectMapper objectMapper,
-                                 Map<String, Object> body,
-                                 String fallbackMessage,
+    public static String success(ObjectMapper objectMapper, Map<String, Object> body,
                                  boolean mutationMayHaveCommitted) {
         try {
             return objectMapper.writeValueAsString(body);
@@ -73,8 +78,74 @@ public final class AiToolResponseHelper {
         }
     }
 
-    public static String success(ObjectMapper objectMapper, String fallbackMessage) {
-        return success(objectMapper, Map.of("message", defaultSuccessMessage(fallbackMessage)), fallbackMessage);
+    public record TracePagePresentation(
+            String emptyMessage, String rowKind, String detailsHint,
+            List<String> identityFields, String oversizedMessage) {
+    }
+
+    public static FunctionParameterSchema traceSummaryPageSchema(String offsetDescription) {
+        return new FunctionParameterSchema("object", Map.of(
+                "offset", Map.of("type", "integer", "minimum", 0, "description", offsetDescription),
+                "limit", Map.of("type", "integer", "minimum", 1, "maximum", 100,
+                        "description", "Maximum summaries to return (default 20). Continue from nextOffset while hasMore is true.")),
+                List.of());
+    }
+
+    public static <T> String traceSummaryPage(
+            AbstractAiTool tool, String argsJson, ChatExecutionConfig config, Supplier<List<T>> load,
+            Function<T, Map<String, Object>> project, TracePagePresentation presentation)
+            throws AbstractAiTool.ArgValidationException {
+        JsonNode args = tool.parseArgs(argsJson);
+        tool.requireOnlyFields(args, "arguments", Set.of("offset", "limit"));
+        int offset = tool.intArgInRange(args, "offset", 0, 0, Integer.MAX_VALUE);
+        int limit = tool.intArgInRange(args, "limit", 20, 1, 100);
+        List<T> loaded = load.get();
+        List<T> rows = loaded == null ? List.of() : loaded;
+        int totalCount = rows.size();
+        int start = Math.min(offset, totalCount);
+        int end = (int) Math.min(totalCount, (long) start + limit);
+        List<Map<String, Object>> summaries = new ArrayList<>(rows.subList(start, end).stream().map(project).toList());
+        while (true) {
+            int returned = summaries.size();
+            long unavailable = summaries.stream()
+                    .filter(trace -> !Boolean.TRUE.equals(trace.get("dataAvailable"))).count();
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("message", totalCount == 0
+                    ? presentation.emptyMessage()
+                    : "Found " + totalCount + " saved " + presentation.rowKind() + "; showing " + returned
+                            + " summary row(s)." + presentation.detailsHint());
+            body.put("count", returned);
+            body.put("totalCount", totalCount);
+            body.put("availableCount", returned - unavailable);
+            body.put("unavailableCount", unavailable);
+            body.put("offset", offset);
+            body.put("hasMore", (long) start + returned < totalCount);
+            if ((long) start + returned < totalCount) body.put("nextOffset", start + returned);
+            body.put("traces", List.copyOf(summaries));
+            body.put("resultAvailable", true);
+            body.put("resultStatus", "SUCCESS");
+            String response = tool.readOnlySuccessJson(body);
+            if (response.getBytes(StandardCharsets.UTF_8).length <= config.getMaxToolResultBytes()) {
+                return response;
+            }
+            if (summaries.size() <= 1) {
+                Map<String, Object> unavailableResult = new LinkedHashMap<>();
+                unavailableResult.put("resultStatus", "RESULT_UNAVAILABLE");
+                unavailableResult.put("resultAvailable", false);
+                unavailableResult.put("mutationMayHaveCommitted", false);
+                unavailableResult.put("errorCode", "TOOL_RESULT_TOO_LARGE");
+                unavailableResult.put("message", presentation.oversizedMessage());
+                for (String field : presentation.identityFields()) {
+                    unavailableResult.put(field, summaries.get(0).get(field));
+                }
+                unavailableResult.put("totalCount", totalCount);
+                unavailableResult.put("offset", offset);
+                unavailableResult.put("nextOffset", start + 1);
+                unavailableResult.put("hasMore", (long) start + 1 < totalCount);
+                return tool.readOnlySuccessJson(unavailableResult);
+            }
+            summaries.remove(summaries.size() - 1);
+        }
     }
 
     public static String acceptedAsyncTask(ObjectMapper objectMapper,
@@ -144,13 +215,6 @@ public final class AiToolResponseHelper {
                     + "\"message\":\"" + escapeJson(message) + "\","
                     + "\"warning\":\"" + escapeJson(DISPATCH_UNKNOWN_WARNING) + "\"}";
         }
-    }
-
-    private static String defaultSuccessMessage(String fallbackMessage) {
-        if (fallbackMessage == null || fallbackMessage.isBlank()) {
-            return "Operation completed successfully.";
-        }
-        return fallbackMessage;
     }
 
     private static String escapeJson(String value) {

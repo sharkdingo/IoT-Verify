@@ -7,8 +7,6 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -65,12 +63,7 @@ public class ListTemplatesTool extends AbstractAiTool {
 
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("keyword", "detail", "names", "deviceIds"));
             String keyword = optionalTextArg(args, "keyword", "", 100);
             boolean detail = booleanArg(args, "detail", false);
@@ -180,15 +173,9 @@ public class ListTemplatesTool extends AbstractAiTool {
             return objectMapper.writeValueAsString(Map.of("count", summaries.size(), "templates", summaries));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("list_templates busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("list_templates business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("list_templates failed", e);
-            return errorJson("Failed to list templates.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "list_templates", e,
+                    "Failed to list templates.");
         }
     }
 

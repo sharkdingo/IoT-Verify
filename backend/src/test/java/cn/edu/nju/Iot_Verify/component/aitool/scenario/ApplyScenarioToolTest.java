@@ -20,6 +20,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 import java.util.Map;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryScenarioDraftStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,7 +45,7 @@ class ApplyScenarioToolTest {
 
     @BeforeEach
     void setUp() throws Exception {
-        draftStore = new AiScenarioDraftStore();
+        draftStore = inMemoryScenarioDraftStore();
         tool = new ApplyScenarioTool(draftStore, batchMapper, boardStorageService, objectMapper);
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("session-1");

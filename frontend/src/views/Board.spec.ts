@@ -3,15 +3,12 @@ import {
   BoardMutationAdmissionCancelledError,
   collectBundledEnvironmentNames,
   clampFloatingMenuPosition,
-  confirmHistoryDeletion,
   continueAfterDeviceDialogApproval,
   getConfirmedBoardItemStatus,
-  createLatestBoardRequestGuard,
   createScopedBoardInvalidationBinding,
   focusCollapsedNarrowPanelToggle,
   formalRunReadinessIssue,
   handleRecommendationApplySceneChange,
-  hasRecommendationSceneChanged,
   hasFrozenBundledTokenSource,
   invalidateFuzzingResultRequests,
   isPersistedHistoryDataInvalid,
@@ -30,11 +27,8 @@ import {
   shouldReportUnusableHistoryDeepLink,
   shouldLoadVerificationEvidence,
   shouldResolveLiveTemplateForPresentation,
-  shouldClearUnusableHistoryDeepLink,
   shouldRedirectNarrowPanelFocus,
-  verificationTraceBelongsToRun,
-  fuzzingFindingBelongsToRun,
-  verificationRunContainsTrace
+  fuzzingFindingBelongsToRun
 } from './Board.vue'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
 import {
@@ -78,27 +72,6 @@ describe('Board formal-run readiness', () => {
       .toBeNull()
     expect(formalRunReadinessIssue('simulation', { ...ready, simulationStepsValid: false }))
       .toBe('INVALID_SIMULATION_STEPS')
-  })
-})
-
-describe('Board history deletion confirmation', () => {
-  it('keeps an in-flight detail request current when deletion is cancelled', async () => {
-    const invalidate = vi.fn()
-
-    // Cancelling is an ordinary outcome reported as `false`, not a thrown rejection.
-    await expect(confirmHistoryDeletion(() => Promise.resolve(false), invalidate))
-      .resolves.toBe(false)
-
-    expect(invalidate).not.toHaveBeenCalled()
-  })
-
-  it('invalidates in-flight detail requests only after deletion is confirmed', async () => {
-    const invalidate = vi.fn()
-
-    await expect(confirmHistoryDeletion(() => Promise.resolve(true), invalidate))
-      .resolves.toBe(true)
-
-    expect(invalidate).toHaveBeenCalledOnce()
   })
 })
 
@@ -161,9 +134,7 @@ describe('Board persisted history availability', () => {
       }
     }
 
-    expect(shouldClearUnusableHistoryDeepLink(true, persistedDataError)).toBe(true)
-    expect(shouldClearUnusableHistoryDeepLink(false, persistedDataError)).toBe(false)
-    expect(shouldClearUnusableHistoryDeepLink(true, new Error('network timeout'))).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink(persistedDataError)).toBe(true)
   })
 
   it('keeps confirmed unavailable history items unavailable after a summary refresh', () => {
@@ -183,24 +154,14 @@ describe('Board persisted history availability', () => {
   })
 
   it('keeps a history link retryable for transient reads but clears confirmed dead targets', () => {
-    expect(shouldReportUnusableHistoryDeepLink(true, new Error('network timeout'))).toBe(false)
-    expect(shouldReportUnusableHistoryDeepLink(true, { response: { status: 400 } })).toBe(false)
-    expect(shouldReportUnusableHistoryDeepLink(true, { response: { status: 503 } })).toBe(false)
-    expect(shouldReportUnusableHistoryDeepLink(true, { response: { status: 429 } })).toBe(false)
-    expect(shouldReportUnusableHistoryDeepLink(true, { response: { status: 404 } })).toBe(true)
-    expect(shouldReportUnusableHistoryDeepLink(false, { response: { status: 404 } })).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink(new Error('network timeout'))).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink({ response: { status: 400 } })).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink({ response: { status: 503 } })).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink({ response: { status: 429 } })).toBe(false)
+    expect(shouldReportUnusableHistoryDeepLink({ response: { status: 404 } })).toBe(true)
   })
 
-  it('rejects a trace URL whose child evidence is not in the named verification run', () => {
-    expect(verificationRunContainsTrace({ traces: [{ id: 71 }] }, 71)).toBe(true)
-    expect(verificationRunContainsTrace({ traces: [{ id: 71 }] }, 72)).toBe(false)
-    expect(verificationRunContainsTrace({ traces: [{}] }, 71)).toBe(false)
-    expect(verificationRunContainsTrace(undefined, 71)).toBe(false)
-  })
-
-  it('keeps leaf replay scoped to the run encoded in the history URL', () => {
-    expect(verificationTraceBelongsToRun({ verificationTaskId: 71 }, 71)).toBe(true)
-    expect(verificationTraceBelongsToRun({ verificationTaskId: 72 }, 71)).toBe(false)
+  it('keeps exploration replay scoped to the run encoded in the history URL', () => {
     expect(fuzzingFindingBelongsToRun({ fuzzTaskId: 81 }, 81)).toBe(true)
     expect(fuzzingFindingBelongsToRun({ fuzzTaskId: 82 }, 81)).toBe(false)
   })
@@ -315,33 +276,23 @@ describe('Board historical playback presentation', () => {
 
 describe('Board chat interaction preparation', () => {
   it('closes read-only playback before admitting a new assistant turn', () => {
-    const closeTracePlayback = vi.fn()
-    const closeSimulationPlayback = vi.fn()
+    const dismissPlayback = vi.fn()
 
     expect(prepareBoardChatInteraction({
       sceneReplacementInProgress: false,
-      tracePlaybackVisible: true,
-      simulationPlaybackVisible: true,
-      closeTracePlayback,
-      closeSimulationPlayback
+      dismissPlayback
     })).toBe(true)
-    expect(closeTracePlayback).toHaveBeenCalledOnce()
-    expect(closeSimulationPlayback).toHaveBeenCalledOnce()
+    expect(dismissPlayback).toHaveBeenCalledOnce()
   })
 
   it('keeps the assistant blocked during an atomic scene replacement', () => {
-    const closeTracePlayback = vi.fn()
-    const closeSimulationPlayback = vi.fn()
+    const dismissPlayback = vi.fn()
 
     expect(prepareBoardChatInteraction({
       sceneReplacementInProgress: true,
-      tracePlaybackVisible: true,
-      simulationPlaybackVisible: true,
-      closeTracePlayback,
-      closeSimulationPlayback
+      dismissPlayback
     })).toBe(false)
-    expect(closeTracePlayback).not.toHaveBeenCalled()
-    expect(closeSimulationPlayback).not.toHaveBeenCalled()
+    expect(dismissPlayback).not.toHaveBeenCalled()
   })
 })
 
@@ -395,45 +346,47 @@ describe('Board recommendation scene ownership', () => {
       specifications: [...scene.specifications].reverse()
     }
 
-    expect(hasRecommendationSceneChanged(scene, reordered)).toBe(false)
+    expect(recommendationSceneFingerprint(reordered)).toBe(recommendationSceneFingerprint(scene))
   })
 
-  it('fences an old recommendation after a changed authoritative refresh', () => {
-    const requestGuard = createLatestBoardRequestGuard()
-    const requestEpoch = requestGuard.begin()
+  it('signals a changed authoritative snapshot to the recommendation owner', async () => {
+    const invalidate = vi.fn()
     const refreshed = {
       ...scene,
       nodes: scene.nodes.map(node => ({ ...node, state: 'on' }))
     }
 
-    if (hasRecommendationSceneChanged(scene, refreshed)) requestGuard.invalidate()
+    await runTrackedBoardMutation(async () => undefined, recommendationSceneFingerprint(scene),
+      () => recommendationSceneFingerprint(refreshed), invalidate)
 
-    expect(requestGuard.isCurrent(requestEpoch)).toBe(false)
+    expect(invalidate).toHaveBeenCalledOnce()
   })
 
   it('preserves the checked model for requirement renames but detects condition edits', () => {
     const named = { ...scene, specifications: scene.specifications.map(spec => ({ ...spec, name: 'Door safety' })) }
     const renamed = { ...named, specifications: named.specifications.map(spec => ({ ...spec, name: 'Prevent unexpected unlock' })) }
-    expect(hasRecommendationSceneChanged(named, renamed)).toBe(false)
+    expect(recommendationSceneFingerprint(renamed)).toBe(recommendationSceneFingerprint(named))
     const condition = { id: 'editor-only', side: 'a', deviceId: 'door', targetType: 'state', key: 'state', relation: '=', value: 'locked' }
     const saved = { ...named, specifications: [{ ...named.specifications[0], aConditions: [condition] }] }
-    expect(hasRecommendationSceneChanged(saved, { ...saved, specifications: [{ ...saved.specifications[0],
+    expect(recommendationSceneFingerprint({ ...saved, specifications: [{ ...saved.specifications[0],
       aConditions: [{ ...condition, id: null }]
-    }] })).toBe(false)
-    expect(hasRecommendationSceneChanged(named, { ...renamed, specifications: [
+    }] })).toBe(recommendationSceneFingerprint(saved))
+    expect(recommendationSceneFingerprint({ ...renamed, specifications: [
       { ...renamed.specifications[0], aConditions: [{ key: 'state', value: 'unlocked' }] }
-    ] })).toBe(true)
+    ] })).not.toBe(recommendationSceneFingerprint(named))
   })
 
   it('treats rule execution-order changes as semantic changes', () => {
-    expect(hasRecommendationSceneChanged(scene, {
+    expect(recommendationSceneFingerprint({
       ...scene,
       rules: [...scene.rules].reverse()
-    })).toBe(true)
+    })).not.toBe(recommendationSceneFingerprint(scene))
   })
 
-  it('does not invalidate on the initial authoritative hydration', () => {
-    expect(hasRecommendationSceneChanged(null, scene)).toBe(false)
+  it('does not invalidate on the initial authoritative hydration', async () => {
+    const invalidate = vi.fn()
+    await runTrackedBoardMutation(async () => undefined, null, () => recommendationSceneFingerprint(scene), invalidate)
+    expect(invalidate).not.toHaveBeenCalled()
   })
 
   it('does not start a queued mutation after its recommendation generation expires', async () => {
@@ -609,10 +562,11 @@ describe('Board recommendation request recovery', () => {
     expect(requestIdAfterTerminalSettlement('old-request', 'old-request')).toBeNull()
   })
 
-  it('never releases recommendation ownership because status reads keep failing', () => {
+  it('backs off and reports an unknown outcome when status reads keep failing', () => {
     let consecutiveFailures = 0
     let lastPlan = planRecommendationRecoveryAfterStatusFailure(consecutiveFailures)
     const firstRetryDelay = lastPlan.retryDelayMs
+    expect(lastPlan.outcomeUnknown).toBe(false)
 
     for (let attempt = 1; attempt < 100; attempt += 1) {
       consecutiveFailures = lastPlan.consecutiveFailures
@@ -621,10 +575,10 @@ describe('Board recommendation request recovery', () => {
 
     expect(lastPlan).toMatchObject({
       consecutiveFailures: 100,
-      releaseTracking: false
+      outcomeUnknown: true
     })
     expect(lastPlan.retryDelayMs).toBeGreaterThan(firstRetryDelay)
-    expect(isRecommendationRequestActive(true, 'still-owned-request')).toBe(true)
+    expect(isRecommendationRequestActive(false, 'still-owned-request')).toBe(true)
   })
 })
 
@@ -1014,29 +968,6 @@ describe('Board completed-result recovery', () => {
 
     expect(load).toHaveBeenCalledTimes(3)
     expect(waitBeforeRetry).toHaveBeenCalledTimes(2)
-  })
-})
-
-describe('Board model-fingerprint request ordering', () => {
-  it('rejects older responses and invalidates in-flight requests on a model change', () => {
-    const guard = createLatestBoardRequestGuard()
-    const older = guard.begin()
-    const newer = guard.begin()
-
-    expect(guard.isCurrent(older)).toBe(false)
-    expect(guard.isCurrent(newer)).toBe(true)
-
-    guard.invalidate()
-    expect(guard.isCurrent(newer)).toBe(false)
-  })
-
-  it('keeps a newer deep-link navigation current when an older one settles', () => {
-    const guard = createLatestBoardRequestGuard()
-    const firstDeepLink = guard.begin()
-    const secondDeepLink = guard.begin()
-
-    expect(guard.isCurrent(firstDeepLink)).toBe(false)
-    expect(guard.isCurrent(secondDeepLink)).toBe(true)
   })
 })
 

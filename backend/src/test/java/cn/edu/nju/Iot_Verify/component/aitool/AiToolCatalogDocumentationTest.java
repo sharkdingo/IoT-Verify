@@ -1,6 +1,8 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
+import org.springframework.core.type.filter.AssignableTypeFilter;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -11,7 +13,6 @@ import java.util.Set;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -19,24 +20,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** Checks that tool argument schemas agree with their accepted top-level fields. */
 class AiToolCatalogDocumentationTest {
 
-    private static final Path TOOL_ROOT =
-            Path.of("src/main/java/cn/edu/nju/Iot_Verify/component/aitool");
+    private static final Path JAVA_ROOT = Path.of("src/main/java");
 
-    private static List<Path> concreteTools() throws IOException {
-        try (Stream<Path> paths = Files.walk(TOOL_ROOT)) {
-            List<Path> tools = new ArrayList<>();
-            for (Path path : paths.filter(p -> p.toString().endsWith(".java")).toList()) {
-                String source = Files.readString(path);
-                // A registered tool is a concrete Spring bean implementing AiTool. AbstractAiTool
-                // itself implements the interface but is abstract, so it is not a catalog entry.
-                boolean isTool = source.contains("extends AbstractAiTool")
-                        || source.matches("(?s).*\\bimplements\\s+AiTool\\b.*");
-                if (isTool && !source.contains("abstract class")) {
-                    tools.add(path);
-                }
-            }
-            return tools;
-        }
+    private static List<Path> concreteTools() {
+        var scan = new ClassPathScanningCandidateComponentProvider(false);
+        scan.addIncludeFilter(new AssignableTypeFilter(AiTool.class));
+        return scan.findCandidateComponents(AiTool.class.getPackageName()).stream()
+                .map(bean -> JAVA_ROOT.resolve(bean.getBeanClassName().replace('.', '/') + ".java"))
+                .toList();
     }
 
     @Test

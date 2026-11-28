@@ -27,11 +27,8 @@ describe('historical playback scene', () => {
       expect.objectContaining({
         from: 'old_sensor',
         to: 'old_alarm',
-        fromLabel: 'Old sensor',
-        toLabel: 'Old alarm',
         ruleId: '17',
-        ruleIndex: 0,
-        sourceIndex: 0
+        ruleIndex: 0
       })
     ])
   })

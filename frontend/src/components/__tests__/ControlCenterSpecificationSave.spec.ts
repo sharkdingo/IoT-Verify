@@ -157,7 +157,7 @@ describe('ControlCenter specification save', () => {
     }
   })
 
-  it('locks the editor and detaches the submitted draft until completion', async () => {
+  it('locks the editor and leaves a changed draft intact when the detached submission completes', async () => {
     const wrapper = mount(ControlCenter, {
       attachTo: document.body,
       // The condition below references `device-1`, so the board must actually contain it: a
@@ -199,7 +199,8 @@ describe('ControlCenter specification save', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="spec-editor-fieldset"]').attributes('disabled')).toBeUndefined()
-    expect(wrapper.get<HTMLSelectElement>('[data-testid="spec-template-select"]').element.value).toBe('')
+    expect(wrapper.get<HTMLSelectElement>('[data-testid="spec-template-select"]').element.value).toBe('1')
+    expect(vm.specForm.aConditions[0].value).toBe('off')
     wrapper.unmount()
   })
 

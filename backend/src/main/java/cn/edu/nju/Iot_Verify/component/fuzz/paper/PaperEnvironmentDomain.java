@@ -228,32 +228,10 @@ public record PaperEnvironmentDomain(
                     ? entries.get(random.nextInt(entries.size()))
                     : PaperRandomChoice.different(random, entries, excluded);
         }
-        long size = (long) upper - lower + 1L;
-        long excludedOffset = numericOffset(excluded, lower, upper, rate);
-        long available = excludedOffset >= 0 ? size - 1L : size;
-        if (available <= 0L) {
-            return encodeNumeric(lower, rate);
-        }
-        long offset = random.nextLong(available);
-        if (excludedOffset >= 0 && offset >= excludedOffset) offset++;
-        return encodeNumeric((long) lower + offset, rate);
-    }
-
-    private static long numericOffset(
-            String value, int lower, int upper, boolean rate) {
-        if (value == null) return -1L;
-        String literal = rate && value.startsWith(RATE_PREFIX)
-                ? value.substring(RATE_PREFIX.length())
-                : value;
-        try {
-            long numeric = Long.parseLong(literal);
-            return numeric < lower || numeric > upper ? -1L : numeric - lower;
-        } catch (NumberFormatException exception) {
-            return -1L;
-        }
-    }
-
-    private static String encodeNumeric(long value, boolean rate) {
+        String excludedLiteral = rate && excluded != null && excluded.startsWith(RATE_PREFIX)
+                ? excluded.substring(RATE_PREFIX.length())
+                : excluded;
+        long value = PaperRandomChoice.numeric(random, lower, upper, excludedLiteral);
         return rate ? RATE_PREFIX + value : Long.toString(value);
     }
 }

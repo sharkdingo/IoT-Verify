@@ -211,8 +211,9 @@ Canvas coordinates and dimensions do not invalidate a semantic preview.
     16 MiB, then locks the task row, stamps findings with the microsecond database clock,
     and writes all findings before atomically transitioning `RUNNING -> COMPLETED` in one
     transaction. The transition and every progress update require the current worker id and
-    unexpired lease. A concurrent cancellation rolls that transaction back. Worker cleanup
-    releases its lease even when initial progress or failure persistence throws.
+    unexpired lease. If the preparation progress update loses ownership, the worker exits
+    before starting the search engine. A concurrent cancellation rolls that transaction back.
+    Worker cleanup releases its lease even when initial progress or failure persistence throws.
 
 Replay evidence preserves both input meaning and provenance. Device state Events,
 device-local variable choices, environment direct values, and environment rates use

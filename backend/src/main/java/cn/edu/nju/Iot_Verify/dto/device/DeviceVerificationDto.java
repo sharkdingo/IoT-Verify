@@ -24,7 +24,7 @@ import java.util.List;
  * - privacies: device-local variable sensitivity overrides
  *
  * <p>Both collections are device-local only. A shared variable (IsInside=false) is rejected here by
- * {@code NusmvRequestValidator.validateDeviceVariables} and supplied through the top-level
+ * {@code NusmvRequestValidator} and supplied through the top-level
  * environmentVariables pool instead, whose labels are scenario-wide; reading this list as "any
  * variable" suggests a per-device label for a shared value, which no writer accepts.
  */

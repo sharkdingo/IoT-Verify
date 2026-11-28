@@ -5,8 +5,6 @@ import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.VerificationService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -60,12 +58,7 @@ public class GetTraceTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
 
             requireOnlyFields(args, "arguments", Set.of("traceId", "stateOffset", "stateLimit", "includePropertyLabels"));
             long traceId = positiveLongArg(args, "traceId");
@@ -99,18 +92,12 @@ public class GetTraceTool extends AbstractAiTool {
                     ? "Counterexample trace loaded, but its source verification used an incomplete generated model."
                     : "Counterexample trace loaded from its saved model snapshot.";
             body.put("message", message);
-            return readOnlySuccessJson(body, message);
+            return readOnlySuccessJson(body);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("get_trace busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("get_trace business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("get_trace failed", e);
-            return errorJson("Failed to get trace.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "get_trace", e,
+                    "Failed to get trace.");
         }
     }
 }

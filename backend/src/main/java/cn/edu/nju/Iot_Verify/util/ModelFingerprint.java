@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.util;
 
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter.ModelInputSnapshot;
 import cn.edu.nju.Iot_Verify.dto.board.BoardModelFingerprintsDto;
+import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsVersion;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -58,6 +59,15 @@ public final class ModelFingerprint {
         return new BoardModelFingerprintsDto(verification, hash(canonical), ModelSemanticsVersion.CURRENT);
     }
 
+    /** Compares the template part of a model using the same projection as the run fingerprint. */
+    public boolean sameTemplateSemantics(Map<String, DeviceManifest> expected, Map<String, DeviceManifest> current) {
+        JsonNode expectedModel = mapper.valueToTree(expected);
+        JsonNode currentModel = mapper.valueToTree(current);
+        removeTemplatePresentationFields(expectedModel);
+        removeTemplatePresentationFields(currentModel);
+        return expectedModel.equals(currentModel);
+    }
+
     public String paperDomainFingerprint(ModelInputSnapshot snapshot, int pathLength) {
         if (pathLength < 1 || pathLength > 50) {
             throw new IllegalArgumentException("pathLength must be between 1 and 50");
@@ -87,8 +97,7 @@ public final class ModelFingerprint {
         ObjectNode canonicalModel = mapper.valueToTree(semanticModel);
         canonicalModel.fields().forEachRemaining(field -> {
             if ("templateManifests".equals(field.getKey())) {
-                // Map keys are template identities, even when they match presentation field names.
-                field.getValue().elements().forEachRemaining(this::removePresentationFields);
+                removeTemplatePresentationFields(field.getValue());
             } else {
                 removePresentationFields(field.getValue());
             }
@@ -115,6 +124,11 @@ public final class ModelFingerprint {
                         ? ""
                         : Objects.toString(identity.apply(value), "")))
                 .toList();
+    }
+
+    private void removeTemplatePresentationFields(JsonNode templates) {
+        // Map keys are template identities, even when they match presentation field names.
+        templates.elements().forEachRemaining(this::removePresentationFields);
     }
 
     private void removePresentationFields(JsonNode node) {

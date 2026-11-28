@@ -53,12 +53,7 @@ public class ListFuzzRunsTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("page", "size"));
             int page = intArgInRange(args, "page", 0, 0, 10_000);
             int size = intArgInRange(args, "size", DEFAULT_SIZE, 1, MAX_SIZE);
@@ -90,7 +85,7 @@ public class ListFuzzRunsTool extends AbstractAiTool {
                         "message", "No counterexample-search runs found. Start one with fuzz_model_async.",
                         "count", 0,
                         "runs", list
-                ), "No counterexample-search runs found.");
+                ));
             }
             long unavailable = list.stream()
                     .filter(run -> !Boolean.TRUE.equals(run.get("dataAvailable")))
@@ -102,7 +97,7 @@ public class ListFuzzRunsTool extends AbstractAiTool {
                     "availableCount", list.size() - unavailable,
                     "unavailableCount", unavailable,
                     "runs", list
-            ), "Counterexample-search runs loaded.");
+            ));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

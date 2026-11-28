@@ -130,37 +130,21 @@ type ConfirmOptions = {
  */
 const BASE_BOX = { appendTo: 'body', lockScroll: false } as const
 
-/**
- * A decision that removes or overwrites something. Red confirm button.
- *
- * Not every question is one of these, which is why `confirmChoice` exists beside it. This was the only
- * confirm helper, so seventeen call sites shared a danger button — including "apply this AI suggestion
- * anyway", "save a duplicate rule", and logging out with an unknown chat outcome. None of those destroys
- * anything, and a red button on all of them is how a real deletion stops standing out from a question.
- *
- * Resolves `true` on confirm and `false` on cancel/dismiss — cancelling is a normal
- * outcome, never an exception the caller has to catch.
- */
-export const confirmDestructive = async (options: ConfirmOptions): Promise<boolean> => {
-  dismissCompletionNotifications()
-  // Counts as an open modal for the duration. A MessageBox is modal to the user but takes no scroll
-  // lock, so without this a `window`-level accelerator (the board's Ctrl+Z) still reached the surface
-  // behind the confirmation and mutated it.
+const confirm = async (options: ConfirmOptions, destructive: boolean): Promise<boolean> => {
+  if (destructive) dismissCompletionNotifications()
+  // MessageBox takes no scroll lock; register it explicitly to block Board undo shortcuts.
   const releaseModalSurface = trackModalSurface()
   try {
     await ElMessageBox.confirm(options.message, options.title, {
       ...BASE_BOX,
-      type: 'warning',
-      autofocus: false,
+      type: destructive ? 'warning' : 'info',
       confirmButtonText: options.confirmText ?? t('app.confirm'),
       cancelButtonText: options.cancelText ?? t('app.cancel'),
-      confirmButtonClass: 'el-button--danger',
+      ...(destructive ? { autofocus: false, confirmButtonClass: 'el-button--danger' } : {}),
       ...(options.customClass ? { customClass: options.customClass } : {})
     })
     return true
   } catch (error) {
-    // A dismissal rejects with 'cancel'/'close'. Anything else is a real failure, and treating it as
-    // a deliberate cancel silently is safe for the user but hides the cause from the next debugger.
     if (error !== 'cancel' && error !== 'close') {
       console.error('Confirmation dialog failed:', error)
     }
@@ -170,34 +154,11 @@ export const confirmDestructive = async (options: ConfirmOptions): Promise<boole
   }
 }
 
-/**
- * A decision that proceeds with something rather than destroying it: continue past a warning, apply a
- * suggestion, leave with work in an unknown state. Accent confirm button, same shape and behaviour as
- * `confirmDestructive` otherwise.
- *
- * Name the action in `confirmText` — "Apply anyway" tells the user what the button does; "Confirm" makes
- * them re-read the message to find out.
- */
-export const confirmChoice = async (options: ConfirmOptions): Promise<boolean> => {
-  const releaseModalSurface = trackModalSurface()
-  try {
-    await ElMessageBox.confirm(options.message, options.title, {
-      ...BASE_BOX,
-      type: 'info',
-      confirmButtonText: options.confirmText ?? t('app.confirm'),
-      cancelButtonText: options.cancelText ?? t('app.cancel'),
-      ...(options.customClass ? { customClass: options.customClass } : {})
-    })
-    return true
-  } catch (error) {
-    if (error !== 'cancel' && error !== 'close') {
-      console.error('Confirmation dialog failed:', error)
-    }
-    return false
-  } finally {
-    releaseModalSurface()
-  }
-}
+/** Confirms a destructive action. Cancelling or dismissing resolves to false. */
+export const confirmDestructive = (options: ConfirmOptions): Promise<boolean> => confirm(options, true)
+
+/** Confirms a choice such as continuing past a warning. Name the action in confirmText. */
+export const confirmChoice = (options: ConfirmOptions): Promise<boolean> => confirm(options, false)
 
 /**
  * Releases still held by confirmations that have not settled.

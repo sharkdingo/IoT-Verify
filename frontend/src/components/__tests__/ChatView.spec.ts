@@ -49,7 +49,7 @@ vi.mock('@/api/chat', async importOriginal => {
   }
 })
 
-import { ChatStreamError } from '@/api/chat'
+import { ChatStreamError, type sendStreamChat } from '@/api/chat'
 import ChatView from '../ChatView.vue'
 import * as feedback from '@/utils/feedback'
 
@@ -125,6 +125,50 @@ const mountChat = (props: Record<string, unknown> = {}) => {
     }
   })
   mountedChats.push(wrapper)
+  return wrapper
+}
+
+const selectSessionAndReopenChat = async (wrapper: ReturnType<typeof mountChat>, sessionId: string) => {
+  await flushPromises()
+  await wrapper.get(`[data-testid="chat-session-${sessionId}"]`).trigger('click')
+  await flushPromises()
+
+  chatStore.closeChat()
+  await flushPromises()
+  chatStore.openChat()
+  await flushPromises()
+}
+
+const mockSettlingRemoteSession = () => {
+  chatApi.getSessionList
+    .mockResolvedValueOnce([{ ...session, active: true }])
+    .mockResolvedValue([{ ...session, active: false }])
+  chatApi.getSessionActivity
+    .mockResolvedValueOnce({ sessionId: session.id, active: true })
+    .mockResolvedValue({ sessionId: session.id, active: false })
+}
+
+const mockAcceptedStreamUntilAbort = () => {
+  const execution: { turnId: string | undefined; signal?: AbortSignal } = { turnId: '' }
+  chatApi.sendStreamChat.mockImplementation((...args: Parameters<typeof sendStreamChat>) => {
+    const [, , callbacks, controller, turnId] = args
+    execution.turnId = turnId
+    execution.signal = controller?.signal
+    callbacks.onAccepted?.()
+    return new Promise<void>(resolve => {
+      execution.signal?.addEventListener('abort', () => resolve(), { once: true })
+    })
+  })
+  return execution
+}
+
+const openChatAndSend = async (message: string) => {
+  chatStore.openChat()
+  const wrapper = mountChat()
+  await flushPromises()
+  await wrapper.get('[data-testid="chat-input"]').setValue(message)
+  await wrapper.get('[data-testid="chat-send"]').trigger('click')
+  await flushPromises()
   return wrapper
 }
 
@@ -1524,14 +1568,7 @@ describe('ChatView', () => {
     chatStore.openChat()
 
     const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-session-session-b"]').trigger('click')
-    await flushPromises()
-
-    chatStore.closeChat()
-    await flushPromises()
-    chatStore.openChat()
-    await flushPromises()
+    await selectSessionAndReopenChat(wrapper, sessionB.id)
 
     expect(chatApi.getSessionActivity.mock.calls.at(-1)?.[0]).toBe('session-b')
     expect(wrapper.get('[data-testid="chat-session-session-b"]')
@@ -1733,14 +1770,7 @@ describe('ChatView', () => {
     chatStore.openChat()
 
     const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-session-session-b"]').trigger('click')
-    await flushPromises()
-
-    chatStore.closeChat()
-    await flushPromises()
-    chatStore.openChat()
-    await flushPromises()
+    await selectSessionAndReopenChat(wrapper, sessionB.id)
 
     expect(chatApi.getSessionActivity.mock.calls.at(-1)?.[0]).toBe('session-b')
     expect(wrapper.get('[data-testid="chat-session-session-b"]')
@@ -1779,14 +1809,7 @@ describe('ChatView', () => {
 
     const wrapper = mountChat({ executeCommand })
     try {
-      await flushPromises()
-      await wrapper.get('[data-testid="chat-session-session-b"]').trigger('click')
-      await flushPromises()
-
-      chatStore.closeChat()
-      await flushPromises()
-      chatStore.openChat()
-      await flushPromises()
+      await selectSessionAndReopenChat(wrapper, sessionB.id)
       expect(wrapper.find('[data-testid="chat-session-active"]').exists()).toBe(true)
 
       await vi.advanceTimersByTimeAsync(1000)
@@ -1833,14 +1856,7 @@ describe('ChatView', () => {
 
     const wrapper = mountChat({ executeCommand })
     try {
-      await flushPromises()
-      await wrapper.get('[data-testid="chat-session-session-b"]').trigger('click')
-      await flushPromises()
-
-      chatStore.closeChat()
-      await flushPromises()
-      chatStore.openChat()
-      await flushPromises()
+      await selectSessionAndReopenChat(wrapper, sessionB.id)
 
       expect(executeCommand).toHaveBeenCalledWith({
         type: 'REFRESH_DATA',
@@ -2006,6 +2022,49 @@ describe('ChatView', () => {
     }
   })
 
+  it('stops a detached conversation at session scope when another turn is active before logout', async () => {
+    const ownerToken = validToken('detached-logout')
+    authStore.login(ownerToken, { userId: session.userId, phone: '13800138000', username: 'alice' })
+    const nextSession = { ...session, id: 'new-session', title: '新对话' }
+    const execution = mockAcceptedStreamUntilAbort()
+    let activeTurnId: string | undefined
+    chatApi.getSessionList.mockResolvedValue([session])
+    chatApi.createSession.mockResolvedValue(nextSession)
+    chatApi.getSessionHistory.mockImplementation(async (id: string) => historyPage([], id))
+    chatApi.getSessionActivity.mockImplementation(async (id: string) => ({
+      sessionId: id, active: id === session.id && Boolean(activeTurnId)
+    }))
+    chatApi.requestSessionStop.mockImplementation(async (id: string, turnId?: string) => {
+      if (id === session.id && (!turnId || turnId === activeTurnId)) activeTurnId = undefined
+    })
+    chatStore.openChat()
+
+    const wrapper = mountChat({ executeCommand: vi.fn().mockResolvedValue(true) })
+    try {
+      await flushPromises()
+      await wrapper.get(`[data-testid="chat-session-${session.id}"]`).trigger('click')
+      await flushPromises()
+      await wrapper.get('[data-testid="chat-input"]').setValue('检查场景')
+      await wrapper.get('[data-testid="chat-send"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('.new-chat-btn').trigger('click')
+      await flushPromises()
+      expect(execution.signal?.aborted).toBe(true)
+      expect(chatApi.requestSessionStop).not.toHaveBeenCalled()
+
+      activeTurnId = 'turn-started-elsewhere'
+      chatApi.getSessionList.mockImplementation(async () => [{ ...session, active: Boolean(activeTurnId) }, nextSession])
+      const preparation = (wrapper.vm as any).prepareForLogout()
+      await flushPromises()
+
+      expect(chatApi.requestSessionStop).toHaveBeenCalledExactlyOnceWith(session.id, undefined, ownerToken)
+      expect(activeTurnId).toBeUndefined()
+      await expect(preparation).resolves.toBe('ready')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('keeps a known active session locked when history loading fails', async () => {
     chatApi.getSessionList.mockResolvedValue([{ ...session, active: true }])
     chatApi.getSessionHistory.mockRejectedValue(new Error('history unavailable'))
@@ -2032,12 +2091,7 @@ describe('ChatView', () => {
         executionStatus: 'STOPPED'
       }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory
       .mockResolvedValueOnce(historyPage())
       .mockResolvedValue(terminalHistory)
@@ -2084,12 +2138,7 @@ describe('ChatView', () => {
         ]
       }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory
       .mockResolvedValueOnce(historyPage())
       .mockResolvedValue(terminalHistory)
@@ -2122,12 +2171,7 @@ describe('ChatView', () => {
     const userOnlyHistory = historyPage([
       { role: 'user', content: '检查后台状态', turnId: 'remote-turn' }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory.mockResolvedValue(userOnlyHistory)
     const executeCommand = vi.fn().mockResolvedValue(true)
     chatStore.openChat()
@@ -2170,12 +2214,7 @@ describe('ChatView', () => {
         executionStatus: 'PARTIAL'
       }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory
       .mockImplementationOnce(() => initialHistory)
       .mockResolvedValue(terminalHistory)
@@ -2214,12 +2253,7 @@ describe('ChatView', () => {
         executionStatus: 'PARTIAL'
       }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory
       .mockRejectedValueOnce(new Error('initial history unavailable'))
       .mockResolvedValue(terminalHistory)
@@ -2258,12 +2292,7 @@ describe('ChatView', () => {
         ]
       }
     ])
-    chatApi.getSessionList
-      .mockResolvedValueOnce([{ ...session, active: true }])
-      .mockResolvedValue([{ ...session, active: false }])
-    chatApi.getSessionActivity
-      .mockResolvedValueOnce({ sessionId: 'session-1', active: true })
-      .mockResolvedValue({ sessionId: 'session-1', active: false })
+    mockSettlingRemoteSession()
     chatApi.getSessionHistory
       .mockResolvedValueOnce(historyPage())
       .mockResolvedValue(terminalHistory)
@@ -3230,7 +3259,40 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  const pagedHistory = (content: string, sessionId = session.id, beforeId = 10): ChatHistoryPage => ({
+    ...historyPage([{ id: beforeId, role: 'user', content }], sessionId),
+    nextBeforeId: beforeId,
+    hasMore: true
+  })
+
+  const startPendingOlderHistory = async () => {
+    const otherSession = { ...session, id: 'session-2', title: '另一会话' }
+    let finishOlder!: (page: ChatHistoryPage) => void
+    let failOlder!: (error: Error) => void
+    const older = new Promise<ChatHistoryPage>((resolve, reject) => {
+      finishOlder = resolve
+      failOlder = reject
+    })
+    chatApi.getSessionList.mockResolvedValue([session, otherSession])
+    chatApi.getSessionHistory
+      .mockResolvedValueOnce(pagedHistory('初次访问的消息'))
+      .mockReturnValueOnce(older)
+    chatStore.openChat()
+    const wrapper = mountChat()
+    await flushPromises()
+    const select = async (id: string) => {
+      await wrapper.get(`[data-testid="chat-session-${id}"]`).trigger('click')
+      await flushPromises()
+    }
+    const olderButton = () => wrapper.get<HTMLButtonElement>('[data-testid="chat-load-older"]')
+    await select(session.id)
+    await olderButton().trigger('click')
+    const signal = chatApi.getSessionHistory.mock.lastCall?.[1]?.signal as AbortSignal | undefined
+    return { wrapper, select, olderButton, otherSession, finishOlder, failOlder, signal }
+  }
+
   it('loads older history through the server cursor without replacing recent messages', async () => {
+    const notify = vi.spyOn(feedback, 'notifyBlocked').mockImplementation(() => undefined)
     chatApi.getSessionList.mockResolvedValue([session])
     chatApi.getSessionHistory
       .mockResolvedValueOnce({
@@ -3241,6 +3303,7 @@ describe('ChatView', () => {
         nextBeforeId: 2,
         hasMore: true
       })
+      .mockRejectedValueOnce(new Error('could not load older page'))
       .mockResolvedValueOnce(historyPage([{ id: 1, role: 'user', content: '最早的问题' }]))
     chatStore.openChat()
 
@@ -3248,15 +3311,108 @@ describe('ChatView', () => {
     await flushPromises()
     await wrapper.get('[data-testid="chat-session-session-1"]').trigger('click')
     await flushPromises()
-    await wrapper.get('[data-testid="chat-load-older"]').trigger('click')
+    const older = wrapper.get<HTMLButtonElement>('[data-testid="chat-load-older"]')
+    await older.trigger('click')
     await flushPromises()
+    expect(notify).toHaveBeenCalledWith(i18n.global.t('app.chat.historyLoadOlderFailed'))
+    expect(older.element.disabled).toBe(false)
 
-    expect(chatApi.getSessionHistory).toHaveBeenLastCalledWith('session-1', { beforeId: 2, limit: 50 })
+    await older.trigger('click')
+    await flushPromises()
+    expect(chatApi.getSessionHistory).toHaveBeenLastCalledWith('session-1', {
+      beforeId: 2, limit: 50, signal: expect.any(AbortSignal)
+    })
     expect(wrapper.text().indexOf('最早的问题')).toBeLessThan(wrapper.text().indexOf('较新的问题'))
     expect(wrapper.find('[data-testid="chat-load-older"]').exists()).toBe(false)
 
     wrapper.unmount()
   })
+
+  it('lets another session page while a retired older read settles', async () => {
+    const first = await startPendingOlderHistory()
+    let finishCurrent!: (page: ChatHistoryPage) => void
+    chatApi.getSessionHistory.mockResolvedValueOnce(pagedHistory('另一会话的新消息', first.otherSession.id))
+      .mockReturnValueOnce(new Promise<ChatHistoryPage>(resolve => { finishCurrent = resolve }))
+    await first.select(first.otherSession.id)
+    expect(first.olderButton().element.disabled).toBe(false)
+    await first.olderButton().trigger('click')
+    expect(first.olderButton().element.disabled).toBe(true)
+
+    first.finishOlder(historyPage([{ id: 1, role: 'user', content: '旧会话的旧页' }]))
+    await flushPromises()
+    expect(first.olderButton().element.disabled).toBe(true)
+    expect(first.signal?.aborted).toBe(true)
+    finishCurrent(historyPage([{ id: 3, role: 'user', content: '另一会话的旧页' }], first.otherSession.id))
+    await flushPromises()
+    expect(first.wrapper.text()).toContain('另一会话的旧页')
+    expect(first.wrapper.text()).not.toContain('旧会话的旧页')
+  })
+
+  it('ignores an older page from a previous visit to the same session', async () => {
+    const first = await startPendingOlderHistory()
+    chatApi.getSessionHistory.mockResolvedValueOnce(historyPage([], first.otherSession.id))
+      .mockResolvedValueOnce(pagedHistory('重新进入时的新消息', session.id, 12))
+    await first.select(first.otherSession.id)
+    await first.select(session.id)
+    first.finishOlder(historyPage([{ id: 1, role: 'user', content: '上次访问的旧页' }]))
+    await flushPromises()
+
+    expect(first.wrapper.text()).not.toContain('上次访问的旧页')
+    expect(first.wrapper.text()).toContain('重新进入时的新消息')
+    expect(first.olderButton().element.disabled).toBe(false)
+  })
+
+  it('retires an older page when the same session installs authoritative stream history', async () => {
+    const first = await startPendingOlderHistory()
+    let turnId = ''
+    chatApi.sendStreamChat.mockImplementation(async (...args: Parameters<typeof sendStreamChat>) => {
+      turnId = args[4]!
+      acceptAndFinishStream(args, 'COMPLETED')
+    })
+    chatApi.getSessionHistory.mockImplementationOnce(async () => ({
+      ...historyPage([
+        { id: 30, role: 'user', content: '当前请求', turnId },
+        { id: 31, role: 'assistant', content: '服务器的完成记录', turnId, executionStatus: 'COMPLETED' }
+      ]),
+      nextBeforeId: 30,
+      hasMore: true
+    }))
+    await first.wrapper.get('[data-testid="chat-input"]').setValue('当前请求')
+    await first.wrapper.get('[data-testid="chat-send"]').trigger('click')
+    await flushPromises()
+    expect(first.wrapper.text()).toContain('服务器的完成记录')
+    expect(chatApi.markSessionTerminalSeen).toHaveBeenCalledWith(session.id, 31)
+
+    first.finishOlder(historyPage([{ id: 1, role: 'user', content: '旧游标的消息' }]))
+    await flushPromises()
+    expect(first.wrapper.text()).not.toContain('旧游标的消息')
+    expect(first.signal?.aborted).toBe(true)
+    chatApi.getSessionHistory.mockResolvedValueOnce(historyPage())
+    await first.olderButton().trigger('click')
+    await flushPromises()
+    expect(chatApi.getSessionHistory).toHaveBeenLastCalledWith(session.id, expect.objectContaining({ beforeId: 30 }))
+  })
+
+  it.each(['another session', 'another account', 'unmount'] as const)(
+    'does not report a late older-page failure after %s', async boundary => {
+      authStore.login(validToken('alice-older-page'), { userId: 1, phone: '13800138000', username: 'alice' })
+      const notify = vi.spyOn(feedback, 'notifyBlocked').mockImplementation(() => undefined)
+      const first = await startPendingOlderHistory()
+      if (boundary === 'another session') {
+        await first.select(first.otherSession.id)
+      } else if (boundary === 'another account') {
+        authStore.login(validToken('bob-older-page'), { userId: 2, phone: '13900139000', username: 'bob' })
+        await flushPromises()
+      } else {
+        first.wrapper.unmount()
+      }
+      first.failOlder(new Error('late history page failure'))
+      await flushPromises()
+
+      expect(notify).not.toHaveBeenCalledWith(i18n.global.t('app.chat.historyLoadOlderFailed'))
+      expect(first.signal?.aborted).toBe(true)
+    }
+  )
 
   it('keeps phase and elapsed feedback visible through a slow stream and clears the wait hint on updates', async () => {
     vi.useFakeTimers()
@@ -3688,6 +3844,42 @@ describe('ChatView', () => {
     wrapper.unmount()
   })
 
+  it('shares a confirmed snapshot across collection commands and still reports each action receipt', async () => {
+    let confirmSnapshot!: (refreshed: boolean) => void
+    const executeCommand = vi.fn().mockImplementationOnce(() => new Promise<boolean>(resolve => {
+      confirmSnapshot = resolve
+    })).mockResolvedValue(true)
+    const notifyInfo = vi.spyOn(feedback, 'notifyInfo').mockImplementation(() => undefined)
+    const environment = { type: 'REFRESH_DATA', payload: { target: 'environment_list' } } as const
+    const device = { type: 'REFRESH_DATA', payload: { target: 'device_list', assistantSummary: '设备已添加。' } } as const
+    const history = { type: 'REFRESH_DATA', payload: { target: 'run_history' } } as const
+    chatApi.createSession.mockResolvedValue(session)
+    chatApi.sendStreamChat.mockImplementation(async (...args: any[]) => {
+      const callbacks = args[2]
+      callbacks.onAccepted?.()
+      callbacks.onCommand(environment)
+      callbacks.onCommand(device)
+      callbacks.onCommand(history)
+      callbacks.onMessage('完成')
+      callbacks.onFinish?.({ turnId: args[4], executionStatus: 'COMPLETED' })
+    })
+    chatStore.openChat()
+    const wrapper = mountChat({ executeCommand })
+    await flushPromises()
+    await wrapper.get('[data-testid="chat-input"]').setValue('添加设备')
+    await wrapper.get('[data-testid="chat-send"]').trigger('click')
+    await flushPromises()
+
+    expect(executeCommand).toHaveBeenCalledExactlyOnceWith(environment, 'stream')
+    expect(notifyInfo).not.toHaveBeenCalledWith(device.payload.assistantSummary)
+    confirmSnapshot(true)
+    await flushPromises()
+
+    expect(executeCommand.mock.calls).toEqual([[environment, 'stream'], [history, 'stream']])
+    expect(notifyInfo).toHaveBeenCalledExactlyOnceWith(device.payload.assistantSummary)
+    wrapper.unmount()
+  })
+
   it('announces an assistant action only after its authoritative refresh succeeds', async () => {
     const executeCommand = vi.fn().mockResolvedValue(true)
     const notifyInfo = vi.spyOn(feedback, 'notifyInfo').mockImplementation(() => undefined)
@@ -3892,6 +4084,7 @@ describe('ChatView', () => {
     const sessionA = { ...session, id: 'session-a', title: '场景生成', active: true }
     const sessionB = { ...session, id: 'session-b', title: '形式化验证', active: true }
     const stoppedSessions = new Set<string>()
+    let backgroundActivityFailures = 2
     const executeCommand = vi.fn().mockResolvedValue(true)
     chatApi.getSessionList.mockImplementation(async () => [
         { ...sessionA, active: false },
@@ -3905,27 +4098,36 @@ describe('ChatView', () => {
     chatApi.requestSessionStop.mockImplementation(async (sessionId: string) => {
       stoppedSessions.add(sessionId)
     })
-    chatApi.getSessionActivity.mockImplementation(async (sessionId: string) => ({
-      sessionId,
-      active: !stoppedSessions.has(sessionId)
-    }))
+    chatApi.getSessionActivity.mockImplementation(async (sessionId: string) => {
+      if (sessionId === sessionB.id && stoppedSessions.has(sessionId) && backgroundActivityFailures > 0) {
+        backgroundActivityFailures -= 1
+        throw new Error('Temporary background activity read failure')
+      }
+      return { sessionId, active: !stoppedSessions.has(sessionId) }
+    })
     chatStore.openChat()
 
     const wrapper = mountChat({ executeCommand })
     await flushPromises()
 
-    const result = await (wrapper.vm as any).prepareForLogout()
-    await flushPromises()
-
-    expect(result).toBe('ready')
-    expect(chatApi.requestSessionStop).toHaveBeenCalledWith('session-b')
-    expect(chatApi.requestSessionStop).toHaveBeenCalledWith('session-a', undefined)
-    expect(stoppedSessions).toEqual(new Set(['session-a', 'session-b']))
-    expect(executeCommand).toHaveBeenCalledWith({
-      type: 'REFRESH_DATA',
-      payload: { target: 'board_state' }
-    })
-    wrapper.unmount()
+    vi.useFakeTimers()
+    try {
+      const preparation = (wrapper.vm as any).prepareForLogout()
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(1000)
+      await expect(preparation).resolves.toBe('ready')
+      expect(chatApi.getSessionActivity.mock.calls.filter(([id]) => id === sessionB.id)).toHaveLength(3)
+      expect(chatApi.requestSessionStop).toHaveBeenCalledWith('session-b')
+      expect(chatApi.requestSessionStop).toHaveBeenCalledWith('session-a', undefined)
+      expect(stoppedSessions).toEqual(new Set(['session-a', 'session-b']))
+      expect(executeCommand).toHaveBeenCalledWith({
+        type: 'REFRESH_DATA',
+        payload: { target: 'board_state' }
+      })
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it.each(['session list', 'stop', 'activity'] as const)(
@@ -3987,31 +4189,17 @@ describe('ChatView', () => {
   it('stops an active stream with its owner token when another account takes over', async () => {
     const aliceToken = validToken('alice-chat-owner')
     const bobToken = validToken('bob-current')
-    let activeTurnId = ''
-    let streamSignal: AbortSignal | undefined
     authStore.login(aliceToken, { userId: 1, phone: '13800138000', username: 'alice' })
     chatApi.createSession.mockResolvedValue(session)
-    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
-      activeTurnId = args[4]
-      streamSignal = args[3]?.signal
-      args[2].onAccepted?.()
-      return new Promise<void>(resolve => {
-        streamSignal?.addEventListener('abort', () => resolve(), { once: true })
-      })
-    })
-    chatStore.openChat()
-    const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-input"]').setValue('运行工具')
-    await wrapper.get('[data-testid="chat-send"]').trigger('click')
-    await flushPromises()
+    const execution = mockAcceptedStreamUntilAbort()
+    const wrapper = await openChatAndSend('运行工具')
 
     authStore.login(bobToken, { userId: 2, phone: '13900139000', username: 'bob' })
     await flushPromises()
 
     expect(chatApi.requestSessionStop)
-      .toHaveBeenCalledWith('session-1', activeTurnId, aliceToken)
-    expect(streamSignal?.aborted).toBe(true)
+      .toHaveBeenCalledWith('session-1', execution.turnId, aliceToken)
+    expect(execution.signal?.aborted).toBe(true)
     expect(authStore.getToken()).toBe(bobToken)
     wrapper.unmount()
   })
@@ -4020,25 +4208,11 @@ describe('ChatView', () => {
     const originalToken = validToken('alice-original')
     const renewedToken = validToken('alice-renewed')
     const bobToken = validToken('bob-after-renewal')
-    let activeTurnId = ''
-    let streamSignal: AbortSignal | undefined
     const alice = { userId: 1, phone: '13800138000', username: 'alice' }
     authStore.login(originalToken, alice)
     chatApi.createSession.mockResolvedValue(session)
-    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
-      activeTurnId = args[4]
-      streamSignal = args[3]?.signal
-      args[2].onAccepted?.()
-      return new Promise<void>(resolve => {
-        streamSignal?.addEventListener('abort', () => resolve(), { once: true })
-      })
-    })
-    chatStore.openChat()
-    const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-input"]').setValue('运行工具')
-    await wrapper.get('[data-testid="chat-send"]').trigger('click')
-    await flushPromises()
+    const execution = mockAcceptedStreamUntilAbort()
+    const wrapper = await openChatAndSend('运行工具')
 
     authStore.login(renewedToken, alice)
     await flushPromises()
@@ -4046,8 +4220,8 @@ describe('ChatView', () => {
     await flushPromises()
 
     expect(chatApi.requestSessionStop)
-      .toHaveBeenCalledWith('session-1', activeTurnId, renewedToken)
-    expect(streamSignal?.aborted).toBe(true)
+      .toHaveBeenCalledWith('session-1', execution.turnId, renewedToken)
+    expect(execution.signal?.aborted).toBe(true)
     wrapper.unmount()
   })
 
@@ -4056,25 +4230,11 @@ describe('ChatView', () => {
     const renewedToken = validToken('alice-after-create')
     const bobToken = validToken('bob-after-create')
     let resolveSession!: (value: typeof session) => void
-    let activeTurnId = ''
-    let streamSignal: AbortSignal | undefined
     const alice = { userId: 1, phone: '13800138000', username: 'alice' }
     authStore.login(originalToken, alice)
     chatApi.createSession.mockReturnValue(new Promise(resolve => { resolveSession = resolve }))
-    chatApi.sendStreamChat.mockImplementation((...args: any[]) => {
-      activeTurnId = args[4]
-      streamSignal = args[3]?.signal
-      args[2].onAccepted?.()
-      return new Promise<void>(resolve => {
-        streamSignal?.addEventListener('abort', () => resolve(), { once: true })
-      })
-    })
-    chatStore.openChat()
-    const wrapper = mountChat()
-    await flushPromises()
-    await wrapper.get('[data-testid="chat-input"]').setValue('等待会话创建')
-    await wrapper.get('[data-testid="chat-send"]').trigger('click')
-    await flushPromises()
+    const execution = mockAcceptedStreamUntilAbort()
+    const wrapper = await openChatAndSend('等待会话创建')
 
     authStore.login(renewedToken, alice)
     await flushPromises()
@@ -4084,8 +4244,8 @@ describe('ChatView', () => {
     await flushPromises()
 
     expect(chatApi.requestSessionStop)
-      .toHaveBeenCalledWith('session-1', activeTurnId, renewedToken)
-    expect(streamSignal?.aborted).toBe(true)
+      .toHaveBeenCalledWith('session-1', execution.turnId, renewedToken)
+    expect(execution.signal?.aborted).toBe(true)
     wrapper.unmount()
   })
 })

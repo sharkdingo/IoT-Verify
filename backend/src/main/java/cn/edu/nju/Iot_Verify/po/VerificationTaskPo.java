@@ -158,18 +158,6 @@ public class VerificationTaskPo implements TaskView, VerificationResultView {
     }
 
     @Override
-    public boolean isTerminalStatus() {
-        return status == TaskStatus.COMPLETED
-                || status == TaskStatus.FAILED
-                || status == TaskStatus.CANCELLED;
-    }
-
-    @Override
-    public boolean isCancelledStatus() {
-        return status == TaskStatus.CANCELLED;
-    }
-
-    @Override
     public String getTaskStatusName() {
         return status == null ? "UNKNOWN" : status.name();
     }

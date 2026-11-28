@@ -29,6 +29,7 @@ import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantic
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findConditionVariable;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findDeclaredVariable;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasContent;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasSignalApi;
 
 /**
@@ -919,23 +920,6 @@ public final class BoardSemanticValidator {
             }
         }
         return null;
-    }
-
-    private static boolean hasApi(DeviceTemplateDto.DeviceManifest manifest, String apiName) {
-        return findApi(manifest, apiName) != null;
-    }
-
-    private static boolean hasContent(DeviceTemplateDto.DeviceManifest manifest, String contentName) {
-        if (manifest == null || manifest.getContents() == null || !hasText(contentName)) {
-            return false;
-        }
-        String target = contentName.trim();
-        for (DeviceTemplateDto.DeviceManifest.Content content : manifest.getContents()) {
-            if (content != null && target.equals(content.getName())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private static String validatePropertyReference(String prefix,

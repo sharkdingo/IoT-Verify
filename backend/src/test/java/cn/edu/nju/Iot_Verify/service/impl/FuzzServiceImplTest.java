@@ -99,6 +99,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -494,19 +495,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void submitRejectsGlobalCapacityBeforeReadingAnotherBoard() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(41L);
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubTaskSaves(task -> task.setId(41L));
 
         assertEquals(41L, service.submit(7L, validRequest()));
         ServiceUnavailableException error = assertThrows(
@@ -521,20 +512,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void executorRejectionDeletesUndispatchedSnapshotAndReleasesCapacity() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubSequentialTaskIds();
         when(taskRepository.deleteUndispatchedTask(
                 eq(41L), eq(7L), anyString(), eq(FuzzTaskPo.TaskStatus.PENDING)))
                 .thenReturn(1);
@@ -557,22 +537,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void executorRejectionWithUnconfirmedCleanupPreservesTaskIdAndReleasesCapacity() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        when(boardDataConverter.getModelInputSnapshot(7L))
-                .thenReturn(snapshot(List.of(specification("spec-1"))));
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        Map<Long, FuzzTaskPo> savedTasks = new LinkedHashMap<>();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            savedTasks.put(task.getId(), task);
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        Map<Long, FuzzTaskPo> savedTasks = recordSavedTasks();
         when(taskRepository.deleteUndispatchedTask(
                 eq(41L), eq(7L), anyString(), eq(FuzzTaskPo.TaskStatus.PENDING)))
                 .thenReturn(0);
@@ -597,17 +564,8 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void executorRejectionWhenCleanupQueryFailsPreservesTaskIdAndCleanupCause() {
-        when(boardDataConverter.getModelInputSnapshot(7L))
-                .thenReturn(snapshot(List.of(specification("spec-1"))));
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(41L);
-            return task;
-        });
+        stubValidSubmission();
+        stubTaskSaves(task -> task.setId(41L));
         DataAccessResourceFailureException cleanupFailure =
                 new DataAccessResourceFailureException("cleanup database unavailable");
         when(taskRepository.deleteUndispatchedTask(
@@ -628,20 +586,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void statusRecheckFailureDeletesUndispatchedSnapshotAndReleasesCapacity() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubSequentialTaskIds();
         when(taskRepository.findStatusById(anyLong()))
                 .thenThrow(new DataAccessResourceFailureException("temporary read failure"))
                 .thenReturn(Optional.of(FuzzTaskPo.TaskStatus.PENDING));
@@ -661,22 +608,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void cancellingQueuedTaskReleasesGlobalCapacityExactlyOnce() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        Map<Long, FuzzTaskPo> savedTasks = new LinkedHashMap<>();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            savedTasks.put(task.getId(), task);
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        Map<Long, FuzzTaskPo> savedTasks = recordSavedTasks();
         when(taskRepository.findByIdAndUserIdForUpdate(anyLong(), eq(7L))).thenAnswer(invocation ->
                 Optional.ofNullable(savedTasks.get(invocation.getArgument(0, Long.class))));
         when(taskRepository.cancelTaskIfStillActive(
@@ -685,11 +619,7 @@ class FuzzServiceImplTest {
                     savedTasks.get(41L).setStatus(FuzzTaskPo.TaskStatus.CANCELLED);
                     return 1;
                 });
-        List<Runnable> submittedWorkers = new ArrayList<>();
-        doAnswer(invocation -> {
-            submittedWorkers.add(invocation.getArgument(0));
-            return null;
-        }).when(fuzzTaskExecutor).execute(any(Runnable.class));
+        List<Runnable> submittedWorkers = recordSubmittedWorkers();
 
         assertEquals(41L, service.submit(7L, validRequest()));
         TaskCancellationResultDto cancellation = service.cancelTask(7L, 41L);
@@ -708,22 +638,34 @@ class FuzzServiceImplTest {
     }
 
     @Test
+    void duplicateLocalRegistrationLeavesTheOriginalWorkerOwned() {
+        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 1, 60));
+        rebuildService();
+        stubValidSubmission();
+        stubTaskSaves(task -> task.setId(41L));
+        List<Runnable> submittedWorkers = recordSubmittedWorkers();
+
+        assertEquals(41L, service.submit(7L, validRequest()));
+        IllegalStateException duplicate = assertThrows(IllegalStateException.class,
+                () -> service.submit(7L, validRequest()));
+        assertEquals("Duplicate local fuzz task execution 41", duplicate.getMessage());
+        assertEquals(1, submittedWorkers.size());
+
+        FuzzServiceImpl owner = service;
+        rebuildService();
+        assertFalse(service.requestLocalExecutionStop(41L),
+                "A separate service instance must not own the queued worker");
+        assertTrue(owner.requestLocalExecutionStop(41L),
+                "Retiring the rejected duplicate must preserve the registered worker");
+        assertTrue(((Future<?>) submittedWorkers.get(0)).isCancelled());
+    }
+
+    @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void cancellationCommittedBeforeLocalRegistrationSkipsDispatchAndReleasesCapacity() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubSequentialTaskIds();
         when(taskRepository.findStatusById(anyLong())).thenAnswer(invocation ->
                 invocation.getArgument(0, Long.class).equals(41L)
                         ? Optional.of(FuzzTaskPo.TaskStatus.CANCELLED)
@@ -738,25 +680,10 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void leaseReconciliationStopsRemotelyCancelledQueuedTaskAndReleasesCapacity() {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            return task;
-        });
-        List<Runnable> submittedWorkers = new ArrayList<>();
-        doAnswer(invocation -> {
-            submittedWorkers.add(invocation.getArgument(0));
-            return null;
-        }).when(fuzzTaskExecutor).execute(any(Runnable.class));
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubSequentialTaskIds();
+        List<Runnable> submittedWorkers = recordSubmittedWorkers();
         when(taskRepository.findByIdForUpdate(41L)).thenReturn(Optional.empty());
 
         assertEquals(41L, service.submit(7L, validRequest()));
@@ -769,24 +696,10 @@ class FuzzServiceImplTest {
 
     @Test
     void leaseMaintenanceStopsQueuedTaskAfterRenewalCannotBeConfirmedForFullTtl() throws Exception {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        when(boardDataConverter.getModelInputSnapshot(7L))
-                .thenReturn(snapshot(List.of(specification("spec-1"))));
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(43L);
-            return task;
-        });
-        List<Runnable> submittedWorkers = new ArrayList<>();
-        doAnswer(invocation -> {
-            submittedWorkers.add(invocation.getArgument(0));
-            return null;
-        }).when(fuzzTaskExecutor).execute(any(Runnable.class));
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        stubTaskSaves(task -> task.setId(43L));
+        List<Runnable> submittedWorkers = recordSubmittedWorkers();
         when(taskRepository.findByIdForUpdate(43L))
                 .thenThrow(new RuntimeException("database unavailable"));
 
@@ -849,22 +762,9 @@ class FuzzServiceImplTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void cancellingRunningTaskKeepsCapacityUntilWorkerActuallyStops() throws Exception {
-        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
-        rebuildService();
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
-        when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000")
-                        .username("alice").password("encoded").build()));
-        runTransactionsInline();
-        AtomicLong nextTaskId = new AtomicLong(40L);
-        Map<Long, FuzzTaskPo> savedTasks = new LinkedHashMap<>();
-        when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
-            FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(nextTaskId.incrementAndGet());
-            savedTasks.put(task.getId(), task);
-            return task;
-        });
+        useSingleTaskCapacity();
+        stubValidSubmission();
+        Map<Long, FuzzTaskPo> savedTasks = recordSavedTasks();
         when(taskRepository.findStatusById(anyLong())).thenAnswer(invocation ->
                 Optional.ofNullable(savedTasks.get(invocation.getArgument(0, Long.class)))
                         .map(FuzzTaskPo::getStatus));
@@ -1516,6 +1416,7 @@ class FuzzServiceImplTest {
 
     @Test
     void findingLookupDoesNotRevealAnotherUsersFinding() {
+        runReadTransactionsInline();
         when(findingRepository.findByIdAndUserId(81L, 7L)).thenReturn(Optional.empty());
 
         assertThrows(ResourceNotFoundException.class, () -> service.getFinding(7L, 81L));
@@ -1526,6 +1427,7 @@ class FuzzServiceImplTest {
 
     @Test
     void findingLookupPassesTheActualOwnedRunFindingCountToTheMapper() {
+        runReadTransactionsInline();
         FuzzFindingPo finding = FuzzFindingPo.builder()
                 .id(81L)
                 .userId(7L)
@@ -1551,6 +1453,7 @@ class FuzzServiceImplTest {
 
     @Test
     void findingReplayLookupUsesOnlyTheSelectedFindingAndItsValidatedRunContext() {
+        runReadTransactionsInline();
         FuzzFindingPo finding = FuzzFindingPo.builder()
                 .id(81L)
                 .userId(7L)
@@ -1816,8 +1719,9 @@ class FuzzServiceImplTest {
                         List.of("FINITE_TRACE_ONLY", "FINITE_TRACE_ONLY"), FuzzExplorationMode.BOARD_SNAPSHOT));
         assertThrows(IllegalStateException.class,
                 () -> service.normalizeLimitations(
-                        FuzzLimitationContract.baseCodes(), FuzzExplorationMode.PAPER_COMPATIBLE));
-        List<String> complete = new java.util.ArrayList<>(FuzzLimitationContract.baseCodes());
+                        FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT), FuzzExplorationMode.PAPER_COMPATIBLE));
+        List<String> complete = new java.util.ArrayList<>(
+                FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT));
         complete.add("FUTURE_DISCLOSURE_CODE");
         assertEquals(complete,
                 service.normalizeLimitations(complete, FuzzExplorationMode.BOARD_SNAPSHOT));
@@ -1888,20 +1792,32 @@ class FuzzServiceImplTest {
     }
 
     @Test
+    void workerSkipsEngineWhenPreparationProgressLosesLease() throws Exception {
+        Runnable worker = captureWorkerWithSuccessfulStart();
+        when(taskRepository.updateProgressIfActive(eq(41L), eq(0), eq(TaskProgressStage.STARTING),
+                anyString(), any(LocalDateTime.class))).thenReturn(1);
+        when(taskRepository.updateProgressIfActive(eq(41L), eq(1), eq(TaskProgressStage.PREPARING_EXPLORATION),
+                anyString(), any(LocalDateTime.class))).thenReturn(0);
+
+        Thread thread = new Thread(worker, "fuzz-preparation-lease-loss-test");
+        thread.start();
+        thread.join(2000);
+
+        assertFalse(thread.isAlive());
+        assertTrue(((Future<?>) worker).isCancelled());
+        verify(fuzzEngine, never()).run(any(FuzzEngineInput.class), any(FuzzProgressListener.class),
+                any(BooleanSupplier.class), any(BooleanSupplier.class));
+        verify(taskRepository, never()).cancelTaskIfStillActive(anyLong(), any(), any(), anyList());
+        verify(taskRepository, never()).failTaskIfActive(anyLong(), any(), any(), any(), anyString(),
+                anyString(), any(), anyString(), any(LocalDateTime.class));
+        verify(taskRepository).releaseOwnedActiveLease(eq(41L), anyString(), any(), any());
+    }
+
+    @Test
     void workerStopReleasesLeaseWithoutPersistingUserCancellation() {
-        Runnable worker = captureSubmittedWorker();
-        ArgumentCaptor<FuzzTaskPo> admitted = ArgumentCaptor.forClass(FuzzTaskPo.class);
-        verify(taskRepository).save(admitted.capture());
-        FuzzTaskPo task = admitted.getValue();
+        Runnable worker = captureWorkerWithSuccessfulStart();
         when(taskRepository.updateProgressIfActive(eq(41L), anyInt(), any(TaskProgressStage.class),
                 anyString(), any(LocalDateTime.class))).thenReturn(1);
-        when(taskRepository.startTaskIfStillPending(
-                eq(41L), eq(FuzzTaskPo.TaskStatus.RUNNING), any(), anyString(), any(), any(),
-                anyString(), eq(FuzzTaskPo.TaskStatus.PENDING))).thenAnswer(invocation -> {
-                    task.setStatus(FuzzTaskPo.TaskStatus.RUNNING);
-                    return 1;
-                });
-        when(taskRepository.findById(41L)).thenReturn(Optional.of(task));
         org.mockito.Mockito.lenient().when(taskRepository.findStatusById(41L))
                 .thenReturn(Optional.of(FuzzTaskPo.TaskStatus.RUNNING));
         AtomicReference<Boolean> stopDetectedAfterInterrupt = new AtomicReference<>();
@@ -2230,22 +2146,70 @@ class FuzzServiceImplTest {
         when(transactionTemplate.getTransactionManager()).thenReturn(manager);
     }
 
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private Runnable captureSubmittedWorker() {
-        ModelInputSnapshot snapshot = snapshot(List.of(specification("spec-1")));
-        when(boardDataConverter.getModelInputSnapshot(7L)).thenReturn(snapshot);
+    private void useSingleTaskCapacity() {
+        threadPoolConfig.setFuzzTask(new ThreadPoolConfig.Pool(1, 1, 0, 60));
+        rebuildService();
+    }
+
+    private void stubValidSubmission() {
+        when(boardDataConverter.getModelInputSnapshot(7L))
+                .thenReturn(snapshot(List.of(specification("spec-1"))));
         when(userRepository.findByIdForUpdate(7L)).thenReturn(Optional.of(
-                UserPo.builder().id(7L).phone("13900000000").username("alice").password("encoded").build()));
-        TransactionStatus transactionStatus = mock(TransactionStatus.class);
-        doAnswer(invocation -> {
-            TransactionCallback callback = invocation.getArgument(0);
-            return callback.doInTransaction(transactionStatus);
-        }).when(transactionTemplate).execute(any(TransactionCallback.class));
+                UserPo.builder().id(7L).phone("13900000000")
+                        .username("alice").password("encoded").build()));
+        runTransactionsInline();
+    }
+
+    private void stubTaskSaves(Consumer<FuzzTaskPo> onSave) {
         when(taskRepository.save(any(FuzzTaskPo.class))).thenAnswer(invocation -> {
             FuzzTaskPo task = invocation.getArgument(0);
-            task.setId(41L);
+            onSave.accept(task);
             return task;
         });
+    }
+
+    private void stubSequentialTaskIds() {
+        AtomicLong nextTaskId = new AtomicLong(40L);
+        stubTaskSaves(task -> task.setId(nextTaskId.incrementAndGet()));
+    }
+
+    private Map<Long, FuzzTaskPo> recordSavedTasks() {
+        AtomicLong nextTaskId = new AtomicLong(40L);
+        Map<Long, FuzzTaskPo> savedTasks = new LinkedHashMap<>();
+        stubTaskSaves(task -> {
+            task.setId(nextTaskId.incrementAndGet());
+            savedTasks.put(task.getId(), task);
+        });
+        return savedTasks;
+    }
+
+    private List<Runnable> recordSubmittedWorkers() {
+        List<Runnable> submittedWorkers = new ArrayList<>();
+        doAnswer(invocation -> {
+            submittedWorkers.add(invocation.getArgument(0));
+            return null;
+        }).when(fuzzTaskExecutor).execute(any(Runnable.class));
+        return submittedWorkers;
+    }
+
+    private Runnable captureWorkerWithSuccessfulStart() {
+        Runnable worker = captureSubmittedWorker();
+        ArgumentCaptor<FuzzTaskPo> admitted = ArgumentCaptor.forClass(FuzzTaskPo.class);
+        verify(taskRepository).save(admitted.capture());
+        FuzzTaskPo task = admitted.getValue();
+        when(taskRepository.startTaskIfStillPending(
+                eq(41L), eq(FuzzTaskPo.TaskStatus.RUNNING), any(), anyString(), any(), any(),
+                anyString(), eq(FuzzTaskPo.TaskStatus.PENDING))).thenAnswer(invocation -> {
+                    task.setStatus(FuzzTaskPo.TaskStatus.RUNNING);
+                    return 1;
+                });
+        when(taskRepository.findById(41L)).thenReturn(Optional.of(task));
+        return worker;
+    }
+
+    private Runnable captureSubmittedWorker() {
+        stubValidSubmission();
+        stubTaskSaves(task -> task.setId(41L));
         ArgumentCaptor<Runnable> workerCaptor = ArgumentCaptor.forClass(Runnable.class);
 
         assertEquals(41L, service.submit(7L, validRequest()));

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import PlaybackStateDetails from '../PlaybackStateDetails.vue'
 import { i18n } from '@/assets/i18n'
 import type { TraceDevice } from '@/types/verify'
+import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
 
 describe('playback state evidence', () => {
   afterEach(() => { i18n.global.locale.value = 'en' })
@@ -41,27 +42,39 @@ describe('playback state evidence', () => {
       expect(rules[0].text()).toContain('Recorded removed rule')
     } finally { wrapper.unmount() }
   })
-  it('separates reported readings, stable actual values and security without inventing unobserved readings', () => {
+  it('separates reported readings, stable actual values and security without inventing unobserved readings', async () => {
+    i18n.global.locale.value = 'zh-CN'
     const device: TraceDevice = { deviceId: 'sensor', deviceLabel: 'Historical hall sensor', templateName: 'Sensor',
-      modelTokenSource: 'CUSTOM', state: 'on', compromised: true,
-      variables: [{ name: 'temperature', value: '40', trust: 'untrusted', modelTokenSource: 'CUSTOM' },
-        { name: 'affectOnly', value: '', observed: false, modelTokenSource: 'CUSTOM' }],
-      privacies: [{ name: 'temperature', propertyScope: 'variable', privacy: 'private' }] }
+      modelTokenSource: 'BUNDLED', mode: 'MachineState', state: 'on', compromised: true,
+      variables: [
+        { name: 'weather', value: 'sunny', trust: 'untrusted', modelTokenSource: 'BUNDLED' },
+        { name: 'humidity', value: '', observed: true, modelTokenSource: 'BUNDLED' },
+        { name: 'affectOnly', value: '', observed: false, modelTokenSource: 'BUNDLED' }
+      ],
+      privacies: [{ name: 'weather', propertyScope: 'variable', privacy: 'private' }] }
     const input = structuredClone(device)
     const wrapper = mount(PlaybackStateDetails, { props: { devices: [device],
-      environmentVariables: [{ name: 'temperature', value: '20', modelTokenSource: 'CUSTOM' }],
+      environmentVariables: [{ name: 'weather', value: 'cloudy', modelTokenSource: 'BUNDLED' }],
       compromisedAutomationLinks: [{ ruleId: 'old_rule', ruleIndex: 0, ruleLabel: 'Historical rule' }],
-      currentDeviceIds: [], currentRuleIds: [], formatDeviceToken: (_device, value) => String(value),
-      formatEnvironmentToken: (_name, value) => String(value) }, global: { plugins: [i18n] } })
-    const readings = wrapper.get('[data-testid="playback-state-devices"]')
-    expect(readings.text()).toContain('40')
-    expect(readings.text()).not.toContain('20')
-    expect(readings.text()).not.toContain('affectOnly')
-    expect(wrapper.get('[data-testid="playback-state-environment"]').text()).toContain('20')
-    expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('temperature')
-    expect(wrapper.get('[data-testid="playback-state-compromised-links"]').text()).toContain('Historical rule')
-    expect(device).toEqual(input)
-    wrapper.unmount()
+      currentDeviceIds: [], currentRuleIds: [],
+      formatDeviceToken: (traceDevice, value) => formatModelTokenBySource(traceDevice.modelTokenSource, value, i18n.global.t),
+      formatEnvironmentToken: (_name, value) => formatModelTokenBySource('BUNDLED', value, i18n.global.t)
+    }, global: { plugins: [i18n] } })
+    try {
+      const readings = wrapper.get('[data-testid="playback-state-devices"] dl')
+      expect(readings.findAll('dt, dd').map(row => row.text()))
+        .toEqual(['设备状态', '开启', '天气', '晴', '湿度', '不可用'])
+      expect(wrapper.get('[data-testid="playback-state-environment"] dd').text()).toBe('多云')
+      const security = wrapper.get('[data-testid="playback-state-security"]')
+      expect(security.text()).toContain('天气')
+      expect(security.get('.playback-terminal__badge').text()).toBe(i18n.global.t('app.traceVisualization.compromised'))
+      expect(wrapper.get('[data-testid="playback-state-compromised-links"]').text()).toContain('Historical rule')
+      expect(device).toEqual(input)
+      await wrapper.setProps({ devices: [{ ...device, compromised: false }] })
+      expect(security.find('.playback-terminal__badge').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('pairs each state-machine name with its value instead of showing two semicolon lists', () => {

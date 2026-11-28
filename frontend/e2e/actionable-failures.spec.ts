@@ -1,16 +1,10 @@
 import { expandCreation } from './support/controlCenter'
 import { openRecommendation, collapseRecommendation } from './support/recommendations'
-import type { APIRequestContext, APIResponse, Locator, Page } from '@playwright/test'
+import type { APIRequestContext, Locator, Page } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
-
-const unwrap = async (response: APIResponse) => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code).toBe(200)
-  return body.data
-}
 
 const headersFor = (auth: AuthUser) => ({ Authorization: `Bearer ${auth.token}` })
 const persistedState = async (request: APIRequestContext, auth: AuthUser) => {
@@ -222,6 +216,52 @@ test('confirmed template import distinguishes a failed catalog refresh from a re
   } finally {
     await page.unrouteAll({ behavior: 'wait' })
   }
+})
+
+test('recovers a saved template after losing its import receipt and blocks a same-name submission', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request, { usernamePrefix: 'templateReceipt' })
+  const { manifest } = await prepareBoard(request, auth)
+  const before = await persistedState(request, auth)
+  await openChineseBoard(page, auth)
+  await page.getByTestId('control-tab-templates').click()
+  await expandCreation(page, 'templates')
+  const name = 'RecoveredTemplate'
+  const input = page.getByTestId('template-import-file')
+  const selectFile = (source: string) => input.setInputFiles({
+    name: 'import.json', mimeType: 'application/json', buffer: Buffer.from(source)
+  })
+  let postCount = 0
+  let recoveryReads = 0
+  await page.route('**/api/board/templates', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    postCount += 1
+    const actual = await route.fetch()
+    expect(actual.status(), await actual.text()).toBe(200)
+    await route.abort('connectionreset')
+  })
+  await page.route('**/api/board/snapshot', route => {
+    if (postCount > 0) recoveryReads += 1
+    return route.continue()
+  })
+
+  await selectFile(JSON.stringify({ ...manifest, Name: name }))
+  const feedback = page.getByTestId('template-import-feedback')
+  await expect(feedback).toContainText('模板导入未确认')
+  await expect(feedback).toContainText(`刷新后模板列表中已有“${name}”`)
+  await expect(page.getByTestId('control-template-repository')).toContainText(name)
+  await expect(page.getByText('模板导入成功', { exact: true })).not.toBeVisible()
+
+  await selectFile('{')
+  await expect(feedback).toContainText('JSON 语法错误')
+  await selectFile(JSON.stringify({ ...manifest, Name: name.toLowerCase() }))
+  await expect(feedback).toContainText('模板导入未确认')
+  expect(postCount).toBe(1)
+  expect(recoveryReads).toBe(1)
+  const after = await persistedState(request, auth)
+  const newTemplates = after.snapshot.deviceTemplates.filter((template: { name: string }) => template.name === name)
+  expect(newTemplates).toHaveLength(1)
+  expect(after.snapshot.deviceTemplates).toHaveLength(before.snapshot.deviceTemplates.length + 1)
+  expect(after).toEqual({ ...before, snapshot: { ...before.snapshot, deviceTemplates: after.snapshot.deviceTemplates } })
 })
 
 // These faults exercise presentation of terminal failures; they make no external AI or NuSMV call.

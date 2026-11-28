@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -29,6 +30,38 @@ public class RecommendationResultParser {
 
     public RecommendationResultParser(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+    }
+
+    <T> RecommendationResponseDto<T> standaloneResponse(
+            Class<T> candidateType, String context, String message, int requestedCount,
+            List<?> recommendations, List<?> filteredItems, List<?> adjustedItems,
+            int rawCandidateCount, int inspectedCount) {
+        int count = recommendations.size();
+        Map<String, Object> result = auditFields(message, count, requestedCount, count,
+                filteredItems, adjustedItems, rawCandidateCount, inspectedCount);
+        result.put("recommendations", recommendations);
+        return parseRecommendationResponse(result, candidateType, adjustedItems != null, context);
+    }
+
+    static Map<String, Object> auditFields(
+            String message, int count, int requestedCount, int validatedCount,
+            List<?> filteredItems, List<?> adjustedItems, int rawCandidateCount, int inspectedCount) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("message", message);
+        result.put("count", count);
+        result.put("requestedCount", requestedCount);
+        result.put("validatedCount", validatedCount);
+        result.put("filteredCount", filteredItems.size());
+        result.put("filteredItems", filteredItems);
+        // Specifications omit adjustment metadata; other producers supply it even when empty.
+        if (adjustedItems != null) {
+            result.put("adjustedCount", adjustedItems.size());
+            result.put("adjustedItems", adjustedItems);
+        }
+        result.put("rawCandidateCount", rawCandidateCount);
+        result.put("inspectedCount", inspectedCount);
+        result.put("truncatedCount", Math.max(0, rawCandidateCount - inspectedCount));
+        return result;
     }
 
     public <T> RecommendationResponseDto<T> parseRecommendationResponse(

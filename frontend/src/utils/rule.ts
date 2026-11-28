@@ -1,5 +1,4 @@
 // src/utils/rule.ts
-import type { DeviceEdge } from '../types/edge'
 import type { DeviceNode } from '../types/node'
 import type {
     DuplicateRuleReasonCode,
@@ -31,6 +30,7 @@ const duplicateReasonKeys: Record<DuplicateRuleReasonCode, RuleCheckReasonKey> =
 
 const similarityReasonKeys: Record<RuleSimilarityReasonCode, RuleCheckReasonKey> = {
     NO_EXISTING_RULES: 'app.ruleCheckNoExistingRules',
+    EXACT_MATCH: 'app.ruleCheckExactMatch',
     AI_DUPLICATE: 'app.ruleSimilarityDuplicate',
     AI_SIMILAR: 'app.ruleSimilaritySimilar',
     AI_HIGH_SCORE_REVIEW: 'app.ruleSimilarityHighScoreReview',
@@ -70,31 +70,6 @@ export const assertRuleHasTrigger = (rule: RuleForm, index = 0): void => {
             }
         }
     })
-}
-
-/**
- * 节点重命名时：更新所有相关规则（边）上的 fromLabel / toLabel
- * @returns 是否发生了修改
- */
-export const updateRulesForNodeRename = (
-    rules: DeviceEdge[],
-    nodeId: string,
-    newLabel: string
-): boolean => {
-    let changed = false
-
-    rules.forEach(edge => {
-        if (edge.from === nodeId && edge.fromLabel !== newLabel) {
-            edge.fromLabel = newLabel
-            changed = true
-        }
-        if (edge.to === nodeId && edge.toLabel !== newLabel) {
-            edge.toLabel = newLabel
-            changed = true
-        }
-    })
-
-    return changed
 }
 
 /**

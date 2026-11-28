@@ -1,7 +1,6 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { i18n } from '@/assets/i18n'
 import { smvUnavailableReasonKey } from './smvUnavailableReason'
 
 /**
@@ -39,21 +38,16 @@ describe('SMV unavailable reason', () => {
   })
 
   it('every key it can return is defined in both locales', () => {
-    /*
-     * A reason key that resolves to nothing renders as the raw `app.…` literal — the exact failure the
-     * user reported for the verification result panel. Asserting over the i18n source rather than
-     * importing it, because these are nested object literals and both locales must be checked
-     * separately; a missing key in one language only shows up when the interface is in that language.
-     */
-    const i18n = readFileSync(join(process.cwd(), 'src/assets/i18n.ts'), 'utf8')
     const keys = [
-      'smvModelNotAvailable',
-      'smvModelNotPersisted',
-      'smvModelPersistenceUnknown'
+      'app.smvModelNotAvailable',
+      'app.smvModelNotPersisted',
+      'app.smvModelPersistenceUnknown'
     ]
     for (const key of keys) {
-      const occurrences = i18n.split(`${key}:`).length - 1
-      expect(occurrences, `${key} should be declared in zh-CN and en`).toBe(2)
+      expect(i18n.global.te(key, 'en')).toBe(true)
+      expect(i18n.global.te(key, 'zh-CN')).toBe(true)
     }
+    expect(i18n.global.t(smvUnavailableReasonKey({ status: 'SAVED' }), {}, { locale: 'zh-CN' }))
+      .toMatch(/删除.*未留下模型.*运行历史/)
   })
 })

@@ -1,6 +1,7 @@
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 import { i18n } from '@/assets/i18n'
+import type { SpecCondition } from '@/types/spec'
 import ControlCenter from '../ControlCenter.vue'
 
 const createEditor = () => mount(ControlCenter, { attachTo: document.body,
@@ -27,6 +28,37 @@ const expectLabel = (id: string, key: string) => {
 }
 
 describe('specification condition editor accessibility', () => {
+  it('edits and removes the consequent without changing the antecedent', async () => {
+    wrapper = createEditor()
+    const condition = (side: 'if' | 'then', value: string): SpecCondition => ({
+      id: side, side, deviceId: 'ac', deviceLabel: 'AC', targetType: 'state', key: 'state', relation: '=', value
+    })
+    await wrapper.setProps({ editSpecification: {
+      id: 'response', name: 'React to automatic mode', templateId: '5', templateLabel: '',
+      aConditions: [], ifConditions: [condition('if', 'auto')], thenConditions: [condition('then', 'heat')]
+    } })
+
+    const editLabel = i18n.global.t('app.editConditionNumbered', { number: 1 })
+    const removeLabel = i18n.global.t('app.removeConditionNumbered', { number: 1 })
+    const editButtons = wrapper.findAll(`button[aria-label="${editLabel}"]`)
+    expect(editButtons).toHaveLength(2)
+    await editButtons[1]!.trigger('click')
+    const dialog = new DOMWrapper(document.querySelector('[data-testid="spec-condition-dialog"]')!)
+    expect(dialog.get<HTMLSelectElement>('[data-testid="spec-condition-value"]').element.value).toBe('heat')
+    await dialog.get('[data-testid="spec-condition-relation"]').setValue('!=')
+    await dialog.get('[data-testid="spec-condition-save"]').trigger('click')
+    expect(wrapper.get('[data-testid="spec-editor-fieldset"]').text()).toContain('≠')
+
+    const removeButtons = wrapper.findAll(`button[aria-label="${removeLabel}"]`)
+    expect(removeButtons).toHaveLength(2)
+    await removeButtons[1]!.trigger('click')
+    expect(wrapper.get('[data-testid="spec-create"]').attributes('disabled')).toBeDefined()
+    await wrapper.get(`button[aria-label="${editLabel}"]`).trigger('click')
+    const remaining = new DOMWrapper(document.querySelector('[data-testid="spec-condition-dialog"]')!)
+    expect(remaining.get<HTMLSelectElement>('[data-testid="spec-condition-value"]').element.value).toBe('auto')
+    expect(remaining.get<HTMLSelectElement>('[data-testid="spec-condition-relation"]').element.value).toBe('=')
+  })
+
   it.each([
     ['=', 'FALSE'], ['IN', ' false | true ']
   ])('preserves an existing API condition %s %s when editing it', async (relation, value) => {

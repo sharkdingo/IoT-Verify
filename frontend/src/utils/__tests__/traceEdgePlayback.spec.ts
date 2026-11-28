@@ -1,12 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { DeviceEdge } from '@/types/edge'
 import {
-  formatRuleApiSignalName,
-  getTraceValueForEdge,
   buildTraceEdgePlaybackStates,
   buildTraceDevicePlaybackIndex,
-  findTraceVariableAtOrBefore,
-  isEdgeConditionSatisfied,
   type TracePlaybackLike
 } from '../traceEdgePlayback'
 
@@ -17,8 +13,6 @@ const apiEdge = (overrides: Partial<DeviceEdge> = {}): DeviceEdge => ({
   id: 'edge-1',
   from: 'button-1',
   to: 'alarm-1',
-  fromLabel: 'Button',
-  toLabel: 'Alarm',
   fromPos: { x: 0, y: 0 },
   toPos: { x: 1, y: 1 },
   fromApi: 'press',
@@ -28,38 +22,42 @@ const apiEdge = (overrides: Partial<DeviceEdge> = {}): DeviceEdge => ({
   value: '',
   ruleId: 'rule-1',
   ruleIndex: 0,
-  sourceIndex: 0,
   ...overrides
 })
 
 describe('trace device playback index', () => {
   it('preserves sparse variable lookup, alias order, unobserved readings and first device matches', () => {
+    const initial = [
+      { name: 'air-temperature', value: '10', modelTokenSource: 'BUNDLED' },
+      { name: 'battery', value: '90' },
+      { name: ' 1 sensor ', value: 'spaced' }
+    ]
+    const updated = [
+      { name: 'air_temperature', value: '20', modelTokenSource: 'CUSTOM' },
+      { name: 'air-temperature', value: 'duplicate alias' },
+      { name: 'battery', value: '', observed: false },
+      { name: '1 sensor', value: 'first raw candidate' }
+    ]
+    const newestAlias = { name: '_1_sensor_', value: 'newest alias' }
     const history = [
-      { devices: [{ deviceId: 'SENSOR_1', variables: [
-        { name: 'air-temperature', value: '10', modelTokenSource: 'BUNDLED' },
-        { name: 'battery', value: '90' },
-        { name: ' 1 sensor ', value: 'spaced' }
-      ] }] },
-      { devices: [{ deviceId: 'sensor_1', variables: [
-        { name: 'air_temperature', value: '20', modelTokenSource: 'CUSTOM' },
-        { name: 'air-temperature', value: 'duplicate alias' },
-        { name: 'battery', value: '', observed: false },
-        { name: '1 sensor', value: 'first raw candidate' }
-      ] }, { deviceId: 'sensor_1', variables: [{ name: 'duplicate-device-only', value: 'ignored' }] }] },
-      { devices: [{ deviceId: 'sensor_1', variables: [{ name: '_1_sensor_', value: 'newest alias' }] }] },
+      { devices: [{ deviceId: 'SENSOR_1', variables: initial }] },
+      { devices: [{ deviceId: 'sensor_1', variables: updated },
+        { deviceId: 'sensor_1', variables: [{ name: 'duplicate-device-only', value: 'ignored' }] }] },
+      { devices: [{ deviceId: 'sensor_1', variables: [newestAlias] }] },
       {}
     ]
     const names = ['air-temperature', 'AIR_TEMPERATURE', 'battery', ' 1 sensor ', 'duplicate-device-only', 'missing']
-    for (const selected of [undefined, -1, 0, 1, 2, 3, 20]) {
+    const first = [initial[0], initial[0], initial[1], initial[2], null, null]
+    const second = [updated[0], updated[0], updated[2], updated[3], null, null]
+    const latest = [updated[0], updated[0], updated[2], newestAlias, null, null]
+    const noPrevious = names.map(() => null)
+    for (const [selected, current, previous] of [
+      [undefined, first, noPrevious], [-1, first, noPrevious], [0, first, noPrevious],
+      [1, second, first], [2, latest, second], [3, latest, latest], [20, latest, latest]
+    ] as const) {
       const indexed = buildTraceDevicePlaybackIndex(history, selected)
-      for (const name of names) {
-        expect(indexed.getCurrentVariable('sensor-1', name)).toBe(
-          findTraceVariableAtOrBefore({ states: history }, 'sensor-1', name, selected || 0))
-        expect(indexed.getPreviousVariable('sensor-1', name)).toBe(
-          selected !== undefined && selected > 0
-            ? findTraceVariableAtOrBefore({ states: history }, 'sensor-1', name, selected - 1)
-            : null)
-      }
+      expect(names.map(name => indexed.getCurrentVariable('sensor-1', name))).toEqual(current)
+      expect(names.map(name => indexed.getPreviousVariable('sensor-1', name))).toEqual(previous)
     }
     expect(buildTraceDevicePlaybackIndex(undefined, 0).getCurrentVariable('sensor-1', 'battery')).toBeNull()
   })
@@ -106,7 +104,7 @@ describe('trace device playback index', () => {
 describe('trace edge playback', () => {
   it('lights all sources of one rule but rejects a malformed sibling index', () => {
     const first = apiEdge()
-    const second = apiEdge({ id: 'edge-2', sourceIndex: 1 })
+    const second = apiEdge({ id: 'edge-2' })
     const trace = { selectedStateIndex: 0, states: [{
       triggeredRules: [{ ruleIndex: 5, ruleId: 'rule-1' }],
       compromisedAutomationLinks: [{ ruleIndex: 5, ruleId: 'rule-1' }]
@@ -141,55 +139,6 @@ describe('trace edge playback', () => {
     expect(identityReads).toBeLessThanOrEqual(count * 6)
   })
 
-  it('uses NuSMV API signal variables when highlighting rule edges', () => {
-    const edge = apiEdge()
-    const trace = {
-      selectedStateIndex: 1,
-      states: [
-        {
-          triggeredRules: [],
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'press_a', value: 'FALSE' }] }
-          ]
-        },
-        {
-          triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Press starts alarm' }],
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'press_a', value: 'TRUE' }] }
-          ]
-        }
-      ]
-    }
-
-    expect(getTraceValueForEdge(edge, trace, 1)).toBe('TRUE')
-    expect(isEdgeConditionSatisfied(edge, trace, 1)).toBe(true)
-    expect(edgeState(edge, [edge], trace).traceActive).toBe(true)
-  })
-
-  it('does not treat an API signal as active when the trace signal is false', () => {
-    const edge = apiEdge()
-    const trace = {
-      selectedStateIndex: 1,
-      states: [
-        {
-          triggeredRules: [],
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'press_a', value: 'FALSE' }] }
-          ]
-        },
-        {
-          triggeredRules: [],
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'press_a', value: 'FALSE' }] }
-          ]
-        }
-      ]
-    }
-
-    expect(isEdgeConditionSatisfied(edge, trace, 1)).toBe(false)
-    expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
-  })
-
   it('does not infer a rule firing when the backend explicitly reports no triggered rules', () => {
     const edge = apiEdge({ itemType: 'state', fromApi: 'state', relation: '=', value: 'pressed' })
     const trace = {
@@ -200,7 +149,6 @@ describe('trace edge playback', () => {
       ]
     }
 
-    expect(isEdgeConditionSatisfied(edge, trace, 0)).toBe(true)
     expect(edgeState(edge, [edge], trace).traceActive).toBe(false)
   })
 
@@ -309,91 +257,5 @@ describe('trace edge playback', () => {
       selectedStateIndex: 0,
       states: [{ triggeredRules: [], compromisedAutomationLinks: [], devices: [] }]
     }).shouldAnimate).toBe(false)
-  })
-
-  it('reads environment-pool variables for variable rule edges', () => {
-    const edge = apiEdge({
-      itemType: 'variable',
-      fromApi: 'temperature',
-      relation: '>',
-      value: '28'
-    })
-    const trace = {
-      selectedStateIndex: 0,
-      states: [
-        {
-          devices: [{ deviceId: 'button_1', variables: [] }],
-          envVariables: [{ name: 'temperature', value: '31' }]
-        }
-      ]
-    }
-
-    expect(getTraceValueForEdge(edge, trace, 0)).toBe('31')
-    expect(isEdgeConditionSatisfied(edge, trace, 0)).toBe(true)
-  })
-
-  it('treats a_ as part of literal environment variable names during trace playback', () => {
-    const edge = apiEdge({
-      itemType: 'variable',
-      fromApi: 'a_temperature',
-      relation: '>',
-      value: '28'
-    })
-
-    expect(getTraceValueForEdge(edge, {
-      selectedStateIndex: 0,
-      states: [
-        {
-          devices: [{ deviceId: 'button_1', variables: [] }],
-          envVariables: [{ name: 'a_temperature', value: '31' }]
-        }
-      ]
-    }, 0)).toBe('31')
-
-    expect(getTraceValueForEdge(edge, {
-      selectedStateIndex: 0,
-      states: [
-        {
-          devices: [{ deviceId: 'button_1', variables: [] }],
-          envVariables: [{ name: 'temperature', value: '31' }]
-        }
-      ]
-    }, 0)).toBeNull()
-  })
-
-  it('does not let variable edges match API signal names implicitly', () => {
-    const edge = apiEdge({
-      itemType: 'variable',
-      fromApi: 'press',
-      relation: '=',
-      value: 'TRUE'
-    })
-    const trace = {
-      selectedStateIndex: 0,
-      states: [
-        {
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'press_a', value: 'TRUE' }] }
-          ]
-        }
-      ]
-    }
-
-    expect(getTraceValueForEdge(edge, trace, 0)).toBeNull()
-    expect(isEdgeConditionSatisfied(edge, trace, 0)).toBe(false)
-  })
-
-  it('keeps API signal naming aligned with the SMV generator', () => {
-    expect(formatRuleApiSignalName('turn on')).toBe('turn_on_a')
-    expect(getTraceValueForEdge(apiEdge({ fromApi: 'turn on' }), {
-      selectedStateIndex: 0,
-      states: [
-        {
-          devices: [
-            { deviceId: 'button_1', variables: [{ name: 'turn_on_a', value: 'TRUE' }] }
-          ]
-        }
-      ]
-    }, 0)).toBe('TRUE')
   })
 })

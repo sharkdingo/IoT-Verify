@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import HintTooltip from '@/components/common/HintTooltip.vue'
 /**
  * Accessible on/off control for board run settings.
  *
@@ -25,13 +24,11 @@ withDefaults(defineProps<{
    */
   tone?: 'enabled' | 'adversarial' | 'sensitivity'
   disabled?: boolean
-  title?: string
   describedbyId?: string
   testId?: string
 }>(), {
   tone: 'enabled',
   disabled: false,
-  title: undefined,
   describedbyId: undefined,
   testId: undefined
 })
@@ -40,25 +37,20 @@ const emit = defineEmits<{ (e: 'change', checked: boolean): void }>()
 </script>
 
 <template>
-  <!-- `title` stays a prop: three call sites pass a *conditional* hint that explains why the switch is
-       disabled, so the hint is the caller's to decide. `HintTooltip` disables itself on an empty value, which
-       is why those callers can keep passing `undefined` with no `v-if`. -->
-  <HintTooltip :content="title">
-    <button
-      type="button"
-      role="switch"
-      :aria-checked="checked"
-      :aria-label="label"
-      :aria-describedby="describedbyId"
-      :data-testid="testId"
-      :disabled="disabled"
-      class="iot-toggle-switch"
-      :class="[`iot-toggle-switch--${tone}`, { 'iot-toggle-switch--on': checked }]"
-      @click="emit('change', !checked)"
-    >
-      <span class="iot-toggle-switch__thumb" aria-hidden="true" />
-    </button>
-  </HintTooltip>
+  <button
+    type="button"
+    role="switch"
+    :aria-checked="checked"
+    :aria-label="label"
+    :aria-describedby="describedbyId"
+    :data-testid="testId"
+    :disabled="disabled"
+    class="iot-toggle-switch"
+    :class="[`iot-toggle-switch--${tone}`, { 'iot-toggle-switch--on': checked }]"
+    @click="emit('change', !checked)"
+  >
+    <span class="iot-toggle-switch__thumb" aria-hidden="true" />
+  </button>
 </template>
 
 <style scoped>

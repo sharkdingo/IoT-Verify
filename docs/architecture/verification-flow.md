@@ -320,9 +320,8 @@ The ordinary UI displays `deviceLabel`, rule labels, literal variable names, and
   than repeating a single-step word on each of its states — a distinction that is about meaning, not
   only space: the same word on several steps reads as several separate faults.
 - **A safety counterexample's violation is its last state, including template 4.** Verification emits the
-  **positive** specification: `SmvGenerator.buildSmvContent` passes a null `ParameterizationConfig`, and
-  only that null forks to `specBuilder.build`. The negated form (`buildNegated`, `EF(...)`) is reached
-  solely by the fix/parameterization strategies, which read its verdict as a satisfiability bit and parse
+  **positive** specification through `SmvSpecificationBuilder.build`. The fix parameterization
+  strategies use `buildNegated` to emit `EF(...)`, read its verdict as a satisfiability bit, and parse
   no trace from it. So a client is always looking at NuSMV's counterexample to `AG(...)`, a path that
   *ends* where the property breaks — templates 1, 3, 4 and 7 all mark their final state.
 

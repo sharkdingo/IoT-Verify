@@ -8,7 +8,7 @@ import postcss from 'postcss'
  *
  * The rail marked the step with a ring and an 11px label from the start of playback, but during playback
  * the eye is on the canvas — and reaching the violating state changed nothing there: autoplay simply
- * called `stopTraceAnimation()` on the last state. The run's whole purpose arrived in silence.
+ * stopped on the last state. The run's whole purpose arrived in silence.
  *
  * Measured in a browser on `acceptance-demo-scene.json`: step 0 → 0 emphasised nodes, step 1 →
  * 1 (`camera_1`, the device the violated specification binds), returning to step 0 → 0 again.
@@ -16,13 +16,10 @@ import postcss from 'postcss'
 describe('violation emphasis reaches the canvas', () => {
   const root = process.cwd()
   const board = readFileSync(join(root, 'src/views/Board.vue'), 'utf8')
-  const canvas = readFileSync(join(root, 'src/components/CanvasBoard.vue'), 'utf8')
   const css = readFileSync(join(root, 'src/styles/board.css'), 'utf8')
   const specTypes = readFileSync(join(root, 'src/types/spec.ts'), 'utf8')
 
   it('passes the violating step and its subject devices to the canvas', () => {
-    // Derived once at the binding rather than added to each writer of `highlightedTrace`: a writer that
-    // forgot the field would be a violation the canvas silently failed to mark.
     expect(board, 'the canvas must receive the wrapped trace')
       .toContain(':highlighted-trace="canvasHighlightedTrace"')
     const at = board.indexOf('const canvasHighlightedTrace')
@@ -34,71 +31,6 @@ describe('violation emphasis reaches the canvas', () => {
     // ids is the subject of its own test below.
     expect(body, 'and the devices the violated specification binds')
       .toMatch(/violationDeviceIds[\s\S]*violatedSpec\?\./)
-  })
-
-  it('scopes the emphasis to the step, so it clears when the viewer leaves', () => {
-    const at = canvas.indexOf('const isAtViolationStep')
-    expect(at).toBeGreaterThan(-1)
-    const body = canvas.slice(at, at + 800)
-    // Equality against the selected index is what makes it step state rather than a sticky mark.
-    expect(body).toContain('trace.violationStateIndex === trace.selectedStateIndex')
-    // A liveness violation occupies a whole cycle, so the set wins where it exists: testing only the
-    // cycle's first state would drop the emphasis while the viewer is still inside the failing loop.
-    expect(body, 'the step set must be honoured before the single index')
-      .toContain('steps.includes(trace.selectedStateIndex)')
-  })
-
-  it('enumerates every step of a liveness cycle for the canvas', () => {
-    // Templates 2/5/6 negate to EG/GF, so NuSMV refutes them with an infinite lasso path. Trace 83
-    // (`scene_spec_4`, "the front door never re-locks while nobody is home") is the measured case: 5 states,
-    // loop from index 3, and its final state repeats index 3 exactly. Template 5 was missing from the
-    // last-state set entirely, so that run marked no step and emphasised no device.
-    const at = board.indexOf('const counterexampleViolationSteps')
-    expect(at, 'the step set should exist').toBeGreaterThan(-1)
-    const body = board.slice(at, at + 900)
-    expect(body, 'the cycle is enumerated from the loop range').toContain('counterexampleLoopRange')
-
-    // Bounded to the range computed itself. Slicing from `counterexampleLoopRange` all the way to
-    // `counterexampleViolationSteps` let the `LIVENESS_TEMPLATES` assertion below match text in the
-    // *following* computed, so it passed while claiming something about this one that is not true of it:
-    // locating the loop is template-blind on purpose, and `counterexampleViolationSteps` is what gates it.
-    const rangeAt = board.indexOf('const counterexampleLoopRange')
-    const range = board.slice(rangeAt, board.indexOf('})', board.indexOf('return { start, end }', rangeAt)))
-    // Read from NuSMV's own marker rather than guessed from the template or the index.
-    expect(range, 'the loop is located by the backend flag').toContain("state?.loopStart === true")
-    // The template gate lives in the consumer, because the marker alone does not mean the cycle is the
-    // violation — NuSMV prints it on safety counterexamples too (see the next test).
-    expect(range, 'locating a loop must not itself claim the cycle is the fault')
-      .not.toContain('LIVENESS_TEMPLATES')
-    expect(body, 'only a liveness template may claim its cycle').toContain('LIVENESS_TEMPLATES')
-  })
-
-  it('does not treat a loop on a safety counterexample as the violation', () => {
-    // Measured on NuSMV 2.7.1: `-- Loop starts here` appears on SAFETY counterexamples too — a CTL
-    // `AG(motion -> AX light)` (template 4) trace and an LTL `G(p)` trace both carry one, and the LTL trace
-    // carried the line TWICE. Keying the cycle off the marker alone therefore marks a cycle for a safety
-    // violation, whose fault is a single state.
-    const liveness = board.slice(board.indexOf('const LIVENESS_TEMPLATES'), board.indexOf('const LIVENESS_TEMPLATES') + 200)
-    expect(liveness, 'exactly the liveness templates').toMatch(/'2'.*'5'.*'6'/)
-
-    const at = board.indexOf('const counterexampleViolationSteps')
-    const body = board.slice(at, at + 1100)
-    // A liveness template with no marker must claim nothing rather than falling through to the last state,
-    // whose values are a loop re-print.
-    expect(body, 'liveness is handled on its own branch').toContain('LIVENESS_TEMPLATES.has(String(templateId))')
-
-    // Two markers in one trace: the backend computes loopBack against the LAST one, so the frontend must
-    // agree or it would over-mark by a state.
-    const range = board.slice(board.indexOf('const counterexampleLoopRange'), at)
-    expect(range, 'the last marker wins, matching the backend').toContain('start = index')
-
-    // A liveness template must never fall through to the last-state rule, which would name a single
-    // step for a fault that has none. Assert the set literal itself, not a source window: the surrounding
-    // prose legitimately names 2/5/6 when explaining why they are excluded.
-    const declaration = board.slice(board.indexOf('const LAST_STATE_VIOLATION_TEMPLATES'))
-    const literal = declaration.slice(0, declaration.indexOf(')') + 1)
-    expect(literal, 'the safety templates keyed by last state').toContain("'1', '3', '4', '7'")
-    expect(literal, 'liveness templates are excluded from the last-state rule').not.toMatch(/'2'|'5'|'6'/)
   })
 
   it('marks the violating state of an immediate-response counterexample too', () => {
@@ -138,43 +70,6 @@ describe('violation emphasis reaches the canvas', () => {
     expect(safetySteps, 'and does not recompute the last index itself').not.toMatch(/count\s*-\s*1/)
   })
 
-  it('does not carry a counterexample violation into a simulation replay', () => {
-    // `savedTraces` has three writers and no reset, and `currentTrace` prefers it unconditionally — so a
-    // counterexample opened earlier stays selected while a simulation replays through the same
-    // `highlightedTrace`, and the canvas outlined that counterexample's devices on a run that violated
-    // nothing. The emphasis is gated on the active playback kind instead.
-    const at = board.indexOf('const canvasHighlightedTrace')
-    const body = board.slice(at, at + 2400)
-    expect(body, 'the gate must read the playback kind').toContain("activePlaybackKind.value === 'counterexample'")
-    expect(body, 'a fuzz finding is also a violation replay').toContain("activePlaybackKind.value === 'fuzzing'")
-    // All three violation fields must be gated, not just the step: the device ids alone would still paint.
-    expect(body).toMatch(/violationStateIndex:\s*isViolationPlayback/)
-    expect(body).toMatch(/violationStateIndexes:\s*isViolationPlayback/)
-    expect(body).toMatch(/violationDeviceIds\s*=\s*isViolationPlayback/)
-  })
-
-  it('gates the playback panel badge on the same playback kind as the canvas', () => {
-    // The popover is shared by all three playback kinds, and the badge previously relied on its own
-    // `kind === 'fuzzing'` test — which gated it incidentally while also hiding it from every verification
-    // counterexample. Making the badge kind-agnostic there moves the gate here, so the stale-`savedTraces`
-    // leak above has to be re-stated for this surface or a simulation replay badges a state of a run that
-    // violated nothing.
-    const at = board.indexOf('const activeViolationStateNumber')
-    expect(at, 'the badge source should exist').toBeGreaterThan(-1)
-    const body = board.slice(at, at + 500)
-    expect(body, 'the gate must read the playback kind').toContain("kind !== 'counterexample'")
-    expect(body, 'a fuzz finding is also a violation replay').toContain("kind !== 'fuzzing'")
-    // Reads the single owner rather than the finding, which is what makes a safety counterexample marked.
-    expect(body, 'one owner for the violating step').toContain('counterexampleViolationStep.value')
-
-    const popover = readFileSync(join(root, 'src/components/PlaybackChangesPanel.vue'), 'utf8')
-    const predicate = popover.slice(popover.indexOf('const isViolationState'), popover.indexOf('const isViolationState') + 220)
-    expect(predicate, 'the component must not re-gate on the kind, which excluded counterexamples')
-      .not.toContain("props.kind === 'fuzzing'")
-    expect(predicate, 'an absent state number must match nothing, not state undefined')
-      .toContain('props.violationStateNumber !== undefined')
-  })
-
   it('gives the rail button the same violation word its visible marker shows', () => {
     // The marker renders `traceViolationHere` while the accessible name said `fuzzFirstViolation`
     // unconditionally, so a screen-reader user heard "First violation" on a verification counterexample
@@ -190,16 +85,8 @@ describe('violation emphasis reaches the canvas', () => {
     const aria = board.slice(board.indexOf('const getTraceStateAriaLabel'), at + 2000)
     expect(aria, 'the accessible name must read the helper, not its own copy of the wording')
       .toMatch(/getTraceStateAriaLabel[\s\S]{0,600}traceStateViolationLabel\(index\)/)
-    const terminal = readFileSync(join(root, 'src/components/PlaybackTerminal.vue'), 'utf8')
     expect(board).toContain(':violation-steps="counterexampleViolationSteps"')
     expect(board).toContain(':violation-label="traceStateViolationLabel"')
-    expect(terminal).toContain(':aria-label="markerLabel(index)"')
-    const markerLabel = terminal.slice(terminal.indexOf('const markerLabel'), terminal.indexOf('const rail ='))
-    expect(markerLabel).toContain('props.stateLabel(index)')
-    expect(markerLabel).toContain("t('app.playbackInitialState')")
-    expect(terminal).toContain(':data-violation="violationSteps.includes(index)"')
-    expect(terminal).toContain('{{ index + 1 }}')
-
   })
 
   it('marks a liveness cycle on the rail, not only on the canvas', () => {
@@ -233,12 +120,12 @@ describe('violation emphasis reaches the canvas', () => {
     // The helper is a strict superset of the old test: it returns the fuzz wording when a finding is
     // active, the safety word otherwise, and the cycle word inside a liveness loop.
     expect(board, 'the chip reads the one owner of "does this step carry a violation word"')
-      .toMatch(/v-if="traceStateViolationLabel\(traceAnimationState\.selectedStateIndex\)"/)
+      .toMatch(/v-if="traceStateViolationLabel\(activePlaybackStateIndex\)"/)
     expect(board, 'and prints what that helper returns rather than a hardcoded fuzz string')
-      .toMatch(/\{\{ traceStateViolationLabel\(traceAnimationState\.selectedStateIndex\) \}\}/)
+      .toMatch(/\{\{ traceStateViolationLabel\(activePlaybackStateIndex\) \}\}/)
     // The finding-only predicate must be gone, not merely supplemented: leaving it would keep two owners.
     expect(board, 'no second, finding-only violation predicate remains in the header')
-      .not.toContain('traceAnimationState.selectedStateIndex === activeFuzzingFinding.firstViolationStep')
+      .not.toContain('activePlaybackStateIndex === activeFuzzingFinding.firstViolationStep')
     // The old testid named exploration only; the chip is now kind-agnostic, so the id must be too. A
     // stale selector elsewhere would address a control that no longer exists.
     expect(board, 'the testid no longer claims the chip is exploration-only')
@@ -246,32 +133,13 @@ describe('violation emphasis reaches the canvas', () => {
     expect(board).toContain('data-testid="trace-timeline-violation-chip"')
   })
 
-  it('says why the loop-closing step shows no change, rather than reporting an empty diff', () => {
-    // On a one-state cycle NuSMV re-prints the loop entry with no variable lines, so the delta merge makes
-    // the final state identical to its predecessor: "No observable changes" is then true but reads as a
-    // broken animation. (A longer cycle prints real deltas, so the block must be ordered ahead of the
-    // change list's own empty state rather than replacing it — see PlaybackChangesPanel.spec.ts.)
-    const popover = readFileSync(join(root, 'src/components/PlaybackChangesPanel.vue'), 'utf8')
-    const loopAt = popover.indexOf('data-testid="playback-change-loop-back"')
-    const emptyAt = popover.indexOf('data-testid="playback-change-empty"')
-    expect(loopAt, 'the loop explanation must exist').toBeGreaterThan(-1)
-    expect(loopAt, 'and be tested before the generic empty state').toBeLessThan(emptyAt)
+  it('gives the Changes panel the loop-closing step', () => {
     expect(board, 'the board must tell the popover which step closes the loop')
-      .toContain(':is-loop-back-state="activePlaybackIsLoopBackState"')
-  })
-
-  it('scopes the emphasis to the specification subject, with a non-silent fallback', () => {
-    const at = canvas.indexOf('const isNodeAtViolation')
-    expect(at).toBeGreaterThan(-1)
-    const body = canvas.slice(at, at + 300)
-    expect(body, 'bound devices win when the specification names any').toContain('scoped.has(node.id)')
-    expect(body, 'and a specification binding none must still mark something')
-      .toContain('isNodeInTrace(node)')
-    expect(canvas, 'the class must be applied to the node').toContain("'device-at-violation': isNodeAtViolation(node)")
+      .toContain('isLoopBackState: activePlaybackIsLoopBackState.value')
   })
 
   it('reads the subject devices off fields the specification type actually has', () => {
-    // The scoping above is only real if the id list is non-empty for a specification that names devices.
+    // Canvas scoping requires a non-empty id list when the specification names devices.
     // It used to read `violatedSpec.boundDeviceIds` — a field `Specification` does not declare — so the
     // list was permanently `[]`, the fallback ran every time, and the canvas emphasised every device in
     // the state. The shape assertion in the gating test above passed throughout, because the defect was

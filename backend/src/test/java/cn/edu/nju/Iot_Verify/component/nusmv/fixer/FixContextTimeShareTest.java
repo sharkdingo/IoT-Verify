@@ -1,12 +1,10 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.fixer;
 
+import cn.edu.nju.Iot_Verify.testutil.MutableUtcClock;
 import org.junit.jupiter.api.Test;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -17,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class FixContextTimeShareTest {
 
-    private final MutableClock clock = new MutableClock(Instant.parse("2026-09-29T00:00:00Z"));
+    private final MutableUtcClock clock = new MutableUtcClock(Instant.parse("2026-09-29T00:00:00Z"));
 
     private FixContext contextWithDeadlineIn(Duration budget) {
         return FixContext.builder().clock(clock).deadline(clock.instant().plus(budget)).build();
@@ -196,32 +194,5 @@ class FixContextTimeShareTest {
         ctx.initializeStrategySearch("remove", 3, List.of(2L, 2L));
         assertFalse(ctx.prefersCompleteSearch());
         assertEquals(3, ctx.strategySearchProgress("remove").attemptLimit());
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant instant;
-
-        private MutableClock(Instant instant) {
-            this.instant = instant;
-        }
-
-        private void advance(Duration duration) {
-            instant = instant.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return instant;
-        }
     }
 }

@@ -1,35 +1,17 @@
-// Pure decision helpers for the verification-trace playback surface in Board.vue.
-// Extracted so the mutual-exclusion guard and trace-context derivation can be unit-tested
-// without mounting the whole Board component.
-
-import type { Trace } from '@/types/verify'
+import type { Trace, TraceState } from '@/types/verify'
 import { normalizeModelRelation, normalizeNuSmvDeviceName } from './modelRequest'
 import { formatModelTokenBySource } from './modelTokenDisplay'
 import type { ModelTokenSource } from '@/types/modelToken'
 
-export interface PlaybackPanelState {
-  simulationVisible: boolean
-  recommendationPanelVisible: boolean
-}
-
-export interface PlaybackGuardResult {
-  allowed: boolean
-  reasonCode: 'SIMULATION_VISIBLE' | 'RECOMMENDATION_VISIBLE' | null
-}
-
-/**
- * Whether a verification trace may open the playback animation right now. A trace uses the same
- * animation surface as the simulation timeline and the recommendations panel, so it must not stack
- * on top of either. Mirrors the guards `selectAndPlayTrace` applies to the current-result path.
- */
-export function canOpenTracePlayback(state: PlaybackPanelState): PlaybackGuardResult {
-  if (state.simulationVisible) {
-    return { allowed: false, reasonCode: 'SIMULATION_VISIBLE' }
+export const findPlaybackLoopRange = (states: readonly Pick<TraceState, 'loopStart' | 'loopBack'>[]) => {
+  // NuSMV can mark several entries. The parser pairs the final repeat with the last entry.
+  for (let start = states.length - 1; start >= 0; start--) {
+    if (states[start]?.loopStart === true) {
+      const end = states.findIndex(state => state?.loopBack === true)
+      return end < 0 ? null : { start, end }
+    }
   }
-  if (state.recommendationPanelVisible) {
-    return { allowed: false, reasonCode: 'RECOMMENDATION_VISIBLE' }
-  }
-  return { allowed: true, reasonCode: null }
+  return null
 }
 
 export interface TraceContext {
@@ -120,9 +102,6 @@ export const collectPlaybackDeviceIds = (
   return ids
 }
 
-export const isPlaybackDeviceAttacked = (device: PlaybackDevice): boolean =>
-  device.compromised === true
-
 const splitPlaybackParts = (value: string | null | undefined): string[] =>
   String(value || '')
     .split(';')
@@ -208,29 +187,6 @@ export const formatPlaybackSecurityLabel = (
 const playbackValue = (value: unknown): string => {
   if (value === null || value === undefined || String(value).trim() === '') return 'N/A'
   return String(value)
-}
-
-export const playbackDeviceSummaryParts = (
-  device: PlaybackDevice,
-  formatToken: (value: string) => string = value => value
-): string[] => {
-  const parts: string[] = []
-  if (device.state?.trim()) parts.push(formatToken(device.state.trim()))
-  if (device.mode?.trim() && device.mode.trim() !== device.state?.trim()) {
-    parts.push(formatToken(device.mode.trim()))
-  }
-  // Through `playbackValue`, so an absent value reads `N/A` here exactly as it does in the step's
-  // change list. The backend's parser creates a variable row before its value is parsed, so a
-  // missing value is reachable — and rendering it as `name=` shows unknown data as blank while the
-  // other surface for the same step says `N/A`.
-  // An unobserved row is omitted rather than shown as `N/A`: `N/A` claims the reading was expected and
-  // went missing, whereas this device never had one to report. See `TraceVariable.observed`.
-  ;(device.variables || [])
-    .filter(variable => variable.observed !== false)
-    .forEach(variable => parts.push(
-      `${formatToken(variable.name)}=${formatToken(playbackValue(variable.value))}`
-    ))
-  return parts
 }
 
 const sortedPlaybackFacts = (device: PlaybackComparableDevice | null | undefined) => {
@@ -366,15 +322,8 @@ export const playbackDeviceChangeDetails = (
     })
   }
 
-  // `observed !== false`, for the reason recorded above `playbackDeviceSummaryParts` and applied by
-  // `computeNodeRuntimeBadges` on the canvas: a device that never had a reading to report is omitted,
-  // not rendered as `N/A`, because `N/A` claims a reading was expected and went missing.
-  //
-  // This diff was the one reader of the three that did not filter, and the flag can flip between
-  // states — the parser creates a row before its value is parsed, and `mergeVariables` only re-applies
-  // observability when a value arrives. So a reading that never existed surfaced here as
-  // `illuminance: 20 -> N/A`, a change row for a change that did not happen, while the canvas
-  // correctly drew nothing and the pool strip showed the true value.
+  // The parser may create an unobserved placeholder before any value arrives. Exclude that
+  // placeholder so the comparison uses only reported readings.
   const observedVariables = (device: PlaybackDevice) =>
     (device.variables || []).filter(variable => variable.observed !== false)
 

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { detailedTraceState, malformedTraceStateFields } from '@/testing/fixtures/traceState'
 import {
   FUZZ_RESPONSE_INCOMPLETE_CODE,
   assertFuzzingFindingBelongsToRun,
   getFuzzActiveTaskLimit,
   getFuzzStoredTaskLimit,
-  resolveFuzzingRunFinding,
   validateFuzzingFinding,
   validateFuzzingFindingReplay,
   validateFuzzPaperDomainPreview,
@@ -537,10 +537,6 @@ describe('fuzzing response contracts', () => {
       findings: [detailFinding]
     })
     expect(validatedRun.findings[0].states).toHaveLength(1)
-    expect(resolveFuzzingRunFinding(validatedRun, detailFinding.id))
-      .toBe(validatedRun.findings[0])
-    expect(() => resolveFuzzingRunFinding(validatedRun, 999))
-      .toThrowError(expect.objectContaining({ code: FUZZ_RESPONSE_INCOMPLETE_CODE }))
     expect(() => validateFuzzingRun({
       ...run,
       outcome: 'FOUND_VIOLATION',
@@ -744,40 +740,7 @@ describe('fuzzing response contracts', () => {
   })
 
   it('rejects malformed nested trace fields and forged token provenance before replay', () => {
-    const detailedState = {
-      stateIndex: 0,
-      devices: [{
-        deviceId: 'device_1',
-        deviceLabel: 'Hall sensor',
-        templateName: 'Motion Detector',
-        modelTokenSource: 'BUNDLED',
-        state: 'idle',
-        compromised: false,
-        variables: [{
-          name: 'workingState',
-          value: 'idle',
-          trust: null,
-          modelTokenSource: 'BUNDLED'
-        }],
-        trustPrivacy: [],
-        privacies: []
-      }],
-      triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Record motion' }],
-      compromisedAutomationLinks: [],
-      trustPrivacies: [],
-      envVariables: [{
-        name: 'temperature',
-        value: '21',
-        trust: null,
-        modelTokenSource: 'UNKNOWN'
-      }],
-      globalVariables: [{
-        name: 'compromisedPointCount',
-        value: '0',
-        trust: null,
-        modelTokenSource: 'UNKNOWN'
-      }]
-    }
+    const detailedState = detailedTraceState(0)
     const finding = {
       id: 2,
       fuzzTaskId: 1,
@@ -791,44 +754,13 @@ describe('fuzzing response contracts', () => {
     }
 
     expect(validateFuzzingFinding(finding).states).toHaveLength(1)
+    const {
+      malformedDeviceAndReadingFields,
+      invalidEnvironmentTrust,
+      invalidGlobalProvenance
+    } = malformedTraceStateFields(detailedState)
     const malformedStates = [
-      {
-        ...detailedState,
-        devices: [{ ...detailedState.devices[0], modelTokenSource: null }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{ name: 'workingState', value: 'idle' }]
-        }]
-      },
-      {
-        ...detailedState,
-        envVariables: [{ name: 'temperature', value: '21', trust: 'untrusted' }]
-      },
-      {
-        ...detailedState,
-        devices: [{ ...detailedState.devices[0], modelTokenSource: 'FORGED' }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{
-            name: 'workingState',
-            value: 'idle',
-            modelTokenSource: 'CUSTOM'
-          }]
-        }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{ name: 'workingState', value: 1 }]
-        }]
-      },
+      ...malformedDeviceAndReadingFields,
       {
         ...detailedState,
         devices: [{
@@ -852,10 +784,7 @@ describe('fuzzing response contracts', () => {
           trust: true
         }]
       },
-      {
-        ...detailedState,
-        envVariables: [{ name: 'temperature', value: '21', trust: true }]
-      },
+      invalidEnvironmentTrust,
       {
         ...detailedState,
         devices: [{
@@ -873,14 +802,7 @@ describe('fuzzing response contracts', () => {
           trust: 'trusted'
         }]
       },
-      {
-        ...detailedState,
-        globalVariables: [{
-          name: 'compromisedPointCount',
-          value: '0',
-          modelTokenSource: 'BUNDLED'
-        }]
-      }
+      invalidGlobalProvenance
     ]
 
     malformedStates.forEach(malformedState => {

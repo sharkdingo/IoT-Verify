@@ -1,5 +1,6 @@
 // src/api/simulation.ts - Simulation API
 import api from './http'
+import { unpack } from './resultEnvelope'
 import { saveBlobResponseAsFile } from '@/utils/attachmentDownload'
 import type {
   SimulationRequest,
@@ -11,6 +12,7 @@ import type {
 } from '@/types/simulation'
 import type { TaskCancellationResult } from '@/types/task'
 import {
+  validateHistoryDeletionReceipt,
   validateSimulationTask,
   validateSimulationTaskSummaryList,
   validateSimulationResult,
@@ -18,11 +20,6 @@ import {
   validateSimulationTraceSummaryList,
   validateTaskCancellationResult
 } from '@/utils/runResponse'
-
-// 辅助函数：解包Result
-const unpack = <T>(response: any): T => {
-  return response.data.data
-}
 
 const SERVER_BOUNDED_REQUEST = { timeout: 0 } as const
 
@@ -59,7 +56,7 @@ export default {
   },
 
   deleteTask: async (taskId: number): Promise<void> => {
-    return unpack<void>(await api.delete(`/simulate/tasks/${taskId}`))
+    validateHistoryDeletionReceipt((await api.delete(`/simulate/tasks/${taskId}`)).data)
   },
 
   // 取消任务
@@ -94,7 +91,7 @@ export default {
 
   // 删除模拟记录
   deleteSimulation: async (id: number): Promise<void> => {
-    return unpack<void>(await api.delete(`/simulate/traces/${id}`))
+    validateHistoryDeletionReceipt((await api.delete(`/simulate/traces/${id}`)).data)
   },
 
   // 下载本次模拟执行的 SMV 模型文件

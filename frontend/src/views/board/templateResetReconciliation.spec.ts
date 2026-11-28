@@ -6,6 +6,7 @@ import { expect, it, vi } from 'vitest'
 import type { DeviceNode } from '@/types/node'
 import type { DeviceTemplate } from '@/types/device'
 import type { ModelEnvironmentVariable } from '@/types/model'
+import { createBoardSemanticCommit } from './semanticCommit'
 
 const source = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
 const bind = (name: string, nextDeclaration: string, ports: Record<string, unknown>) => {
@@ -31,7 +32,7 @@ it('adopts committed default template devices before deriving canvas state', () 
   })
   const replaceNodesFromServer = (value: DeviceNode[]) => { nodes.value = value }
   const ports = { deviceTemplates, environmentVariables, nodes, boardDataLoadState, replaceNodesFromServer,
-    reconcileDanglingBoardFocus, reloadUndoAvailability: vi.fn() }
+    reconcileDanglingBoardFocus, refreshBoardIfEditHistoryChanged: vi.fn() }
   const adopt = bind('replaceTemplateState', 'replaceTemplateCatalog', ports)
 
   adopt(expected)
@@ -42,14 +43,15 @@ it('adopts committed default template devices before deriving canvas state', () 
 })
 
 it('drops a concurrently removed device and its references together after reset recovery', () => {
-  const board = {
+  const board: Record<string, any> = {
     nodes: ref([{ id: 'lamp' }]), rules: ref([{ id: 'rule', toId: 'lamp' }]),
     specifications: ref([{ id: 'spec', deviceIds: ['lamp'] }]),
     deviceTemplates: ref([]), environmentVariables: ref([]), boardSnapshotError: ref(null),
-    boardAuthScopeEpoch: 1, hydratedBoardAuthScopeEpoch: 0,
+    boardAuthScopeEpoch: 1, hydratedBoardAuthScopeEpoch: ref(0),
     allBoardDataKeys: ['nodes', 'rules', 'specs', 'templates', 'environment'],
     boardDataLoadState: {}, reconcileDanglingBoardFocus: vi.fn(),
-    refreshCurrentBoardModelFingerprints: vi.fn(), syncBoardUndoAvailability: vi.fn(),
+    createBoardSemanticCommit,
+    adoptBoardComparisonSnapshot: (commit: () => void) => commit(), syncBoardUndoAvailability: vi.fn(),
     replaceNodesFromServer: (value: Array<{ id: string }>) => { board.nodes.value = value },
     syncRuleDerivedEdges: vi.fn(() => {
       expect(board.nodes.value).toEqual([])
@@ -57,6 +59,7 @@ it('drops a concurrently removed device and its references together after reset 
       expect(board.specifications.value).toEqual([])
     })
   }
+  board.commitSemanticScene = bind('commitSemanticScene', 'compareRunToCurrentBoard', board)
   bind('adoptBoardSnapshot', 'refreshBoardSnapshot', board)({
     nodes: [], rules: [], specifications: [], deviceTemplates: [], environmentVariables: [],
     editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' }

@@ -182,3 +182,8 @@ export interface FixApplyResult {
   canRedo: false
   editHistoryRevision: string
 }
+
+/** The Board either adopted a validated receipt, reconciled an unconfirmed write, or retired the request. */
+export type FixBoardApplyOutcome = FixApplyResult | 'unconfirmed' | null
+
+export type VerificationRepairBlock = 'app.runBoardSemanticsChanged' | 'app.fixApplyUnconfirmedReverify'

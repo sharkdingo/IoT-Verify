@@ -89,7 +89,7 @@ still expose derived `isAttack` and `attackBudget` summary fields for convenient
 | `traces` | `TraceDto[]` | Counterexample traces for parsed property violations. An `INCONCLUSIVE` run can retain traces parsed before another result became incomplete; clients must present them as partial evidence, not as a complete verdict. |
 | `specResults` | `SpecResultDto[]` | Per-emitted-spec result objects; specs skipped before SMV emission are counted/logged separately |
 | `checkLogs` | `String[]` | Human-readable check log |
-| `nusmvOutput` | `String` | NuSMV diagnostic output retained for storage/display. Values longer than 10,000 characters contain the first 10,000 characters plus an explicit truncation marker. Verdicts, per-spec results, and traces are parsed before this presentation cap is applied. **This is the only channel by which anything NuSMV says other than `-- specification … is true/false` can reach a user** — the trace parser models no other line — so the client must render it. It appears in the verification result dialog's run-context section. `frontend/src/views/board/solverOutputVisibility.spec.ts` guards rendering and the required response field, after a refactor once deleted the disclosure and a later sweep deleted its now-unreferenced label. |
+| `nusmvOutput` | `String` | NuSMV diagnostic output retained for storage/display. Values longer than 10,000 characters contain the first 10,000 characters plus an explicit truncation marker. Verdicts, per-spec results, and traces are parsed before this presentation cap is applied. This is the channel for solver diagnostics beyond parsed verdicts and traces. The [browser regression](../../frontend/e2e/smv-model-download.spec.ts) opens the run-context disclosure and reads the output. The [response contract test](../../frontend/src/utils/__tests__/runResponse.spec.ts) rejects a verification result missing the field. |
 | `disabledRuleCount` | `Integer` | Count of rules whose generated guard failed closed to `FALSE` |
 | `skippedSpecCount` | `Integer` | Count of specs omitted because no valid NuSMV property could be generated |
 | `generationIssues` | `ModelGenerationIssueDto[]` | Item-level name and reason for every disabled rule or omitted specification |
@@ -241,10 +241,14 @@ remains authoritative regardless of the worker. Lease, start, and terminal trans
 database clock and clear ownership on a committed terminal state. Local queued/running work is stopped
 through its task-specific Future when renewal proves that this instance no longer owns it.
 
-Progress updates are fenced by that same worker id and unexpired lease. Terminal transactions
-lock the task row before sampling the microsecond database time and before persisting linked
-verification counterexamples or simulation traces. This prevents a lock-delayed worker from
-publishing stale evidence and keeps creation/completion ordering valid even for sub-second tasks.
+Progress updates are fenced by that same worker id and unexpired lease. Verification and
+simulation stop before starting model generation when that progress update loses ownership.
+Verification also stops before calling NuSMV or decoding its output if the corresponding
+progress update loses ownership.
+Terminal transactions lock the task row before sampling the microsecond database time and
+before persisting linked verification counterexamples or simulation traces. This prevents a
+lock-delayed worker from publishing stale evidence and keeps creation/completion ordering valid even
+for sub-second tasks.
 Deleting a historical verification, simulation, or exploration result holds a shared user lock
 before touching the task and its evidence, so it cannot interleave with deletion of the same account.
 
@@ -1324,7 +1328,7 @@ omitted), never when the caller explicitly supplies an empty or malformed select
 | `sourceModelComplete` | `boolean` | Whether the counterexample source verification used a complete model |
 | `sourceDisabledRuleCount` / `sourceSkippedSpecCount` | `int` | Source-verification generation omissions |
 | `sourceGenerationIssues` | `ModelGenerationIssueDto[]` | Itemized `{ issueType, itemLabel, reasonCode, reason }` explanations from the source verification |
-| `templateSnapshotComparison` | `NOT_CHECKED \| UNCHANGED \| CHANGED \| UNAVAILABLE` | Structured comparison between current device templates and the frozen run snapshot; clients localize drift/unavailable limitations from this field |
+| `templateSnapshotComparison` | `NOT_CHECKED \| UNCHANGED \| CHANGED \| UNAVAILABLE` | Structured [template semantics comparison](../architecture/auto-fix.md#applying-a-suggestion-fixstrategyapplier) between current device templates and the frozen run snapshot; clients localize limitations from this field |
 | `summary` | `String` | Overall result summary |
 | `warnings` | `String[]` | English technical diagnostics for logs/advanced details; ordinary UI derives localized limitations from source-completeness fields, `templateSnapshotComparison`, generation issues, and strategy-attempt statuses |
 | `parameterTargets` | `ParameterTarget[]` | Every bounded numeric inequality eligible for preferred-range selection in this attempt, independent of whether a verified suggestion was found |
@@ -1477,8 +1481,8 @@ Its confirmation storage and security boundary are described in
 
   The specialized, proven-pre-write `503` mapping is defined in the
   [API error mapping](overview.md#error-and-status-codes); treat any *unclassified* `503` as an
-  uncertain mutation outcome and reconcile the current rule snapshot before retrying. The mechanism
-  behind these guards — fingerprint construction, the normalization both sides share, and the
+  uncertain mutation outcome and follow the [Board recovery rules](../guides/frontend-ui-conventions.md#2-feedback-semantics).
+  The mechanism behind these guards — fingerprint construction, the normalization both sides share, and the
   atomicity argument — is owned by
   [../architecture/auto-fix.md](../architecture/auto-fix.md#applying-a-suggestion-fixstrategyapplier).
 - **Frozen run settings.** The structured `attackScenario` and `enablePrivacy` settings belong to the
@@ -1499,7 +1503,7 @@ changed; apply does not repeat the expensive strategy search.
 | `appliedSuggestion` | `FixSuggestionDto` | Server-trusted suggestion actually applied; user-facing descriptions are included while internal rule/condition positions remain hidden |
 | `previousRuleCount` / `currentRuleCount` | `int` | Rule-set size before/after the atomic write; particularly important for the destructive `remove` strategy |
 | `message` | `String` | English API summary for logs and non-localized callers; the frontend uses the structured fields above to render a localized, scope-qualified result instead of treating this text as an unconditional guarantee |
-| `rules` | `RuleDto[]` | The full persisted rule list after applying. The frontend validates its count and directly replaces the Board rule collection from this authoritative snapshot; it refreshes separately only when the apply response itself is unconfirmed. |
+| `rules` | `RuleDto[]` | The full persisted rule list after applying. The frontend validates its count and adopts the rules with the returned edit-history revision. |
 | `canUndo` / `canRedo` | `boolean` | Required authoritative Board-edit availability. A successful apply is one reversible `RULE_SET/UPDATE` edit and returns `true` / `false` |
 | `editHistoryRevision` | `String` | Revision of the [Board edit history](board.md#boardundoresultdto) after applying the repair |
 

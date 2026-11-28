@@ -17,8 +17,4 @@ public class ServiceUnavailableException extends BaseException {
     public static ServiceUnavailableException aiService(Throwable cause) {
         return new ServiceUnavailableException("AI service is temporarily unavailable", cause);
     }
-
-    public static ServiceUnavailableException database() {
-        return new ServiceUnavailableException("Database service is temporarily unavailable");
-    }
 }

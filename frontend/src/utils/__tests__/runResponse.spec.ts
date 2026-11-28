@@ -1,6 +1,9 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import boardApi from '../../api/board'
+import http from '../../api/http'
 import type { ModelSemantics } from '@/types/modelSemantics'
+import { detailedTraceState, malformedTraceStateFields } from '@/testing/fixtures/traceState'
 import {
   RUN_RESPONSE_INCOMPLETE_CODE,
   activeTaskProgressStage,
@@ -11,13 +14,13 @@ import {
   validateSimulationTrace,
   validateSimulationTraceSummary,
   validateTaskCancellationResult,
-  validateTaskProgress,
-  validateTaskSubmissionId,
   validateVerificationRun,
   validateVerificationRunSummary,
   validateVerificationTask,
   validateVerificationResult
 } from '../runResponse'
+
+vi.mock('../../api/http', () => ({ default: { get: vi.fn() } }))
 
 const modelSemantics: ModelSemantics = {
   attackPointUnit: 'BEHAVIOR_CHANGING_DEVICE_INSTANCE_OR_AUTOMATION_LINK',
@@ -319,6 +322,11 @@ describe('verification and simulation response contracts', () => {
     expect(validateVerificationResult(validVerification())).toEqual(validVerification())
   })
 
+  it('rejects a verification result missing its NuSMV diagnostic output', () => {
+    const { nusmvOutput: _nusmvOutput, ...result } = validVerification()
+    expect(() => validateVerificationResult(result)).toThrow(/nusmvOutput/)
+  })
+
   it('keeps an unpersisted counterexample replayable without treating it as fixable', () => {
     const result = validateVerificationResult(unpersistedViolation())
     expect(result.traces[0].id).toBeUndefined()
@@ -403,8 +411,8 @@ describe('verification and simulation response contracts', () => {
      *
      * The backend derives the outcome with `specResults.stream().allMatch(o == SATISFIED)`, and `allMatch` is
      * true for an empty list — so a run whose specifications were all dropped before SMV emission would label
-     * itself SATISFIED. An early return upstream reports INCONCLUSIVE instead
-     * (`EmptySpecOutcomeContractTest` pins that), and this is the client's independent half: "safe" is the one
+     * itself SATISFIED. The backend result builder reports INCONCLUSIVE instead,
+     * and this is the client's independent half: "safe" is the one
      * answer a user acts on without reading further, so it should take two failures to produce it, not one.
      */
     expect(() => validateVerificationResult({
@@ -457,94 +465,35 @@ describe('verification and simulation response contracts', () => {
   })
 
   it('validates nested trace variables, security labels, and frozen token sources', () => {
-    const detailedState = {
-      stateIndex: 1,
-      devices: [{
-        deviceId: 'device_1',
-        deviceLabel: 'Hall sensor',
-        templateName: 'Motion Detector',
-        modelTokenSource: 'BUNDLED',
-        state: 'idle',
-        compromised: false,
-        variables: [{
-          name: 'workingState',
-          value: 'idle',
-          trust: 'trusted',
-          modelTokenSource: 'BUNDLED'
-        }],
-        trustPrivacy: [{
-          name: 'idle',
-          propertyScope: 'state',
-          mode: 'MotionMode',
-          trust: true,
-          privacy: null
-        }],
-        privacies: [{
-          name: 'recording',
-          propertyScope: 'content',
-          privacy: 'private'
-        }]
+    const detailedState = detailedTraceState(1, {
+      deviceTrust: 'trusted',
+      environmentTrust: 'untrusted',
+      trustPrivacy: [{
+        name: 'idle',
+        propertyScope: 'state',
+        mode: 'MotionMode',
+        trust: true,
+        privacy: null
       }],
-      triggeredRules: [{ ruleIndex: 0, ruleId: 'rule-1', ruleLabel: 'Record motion' }],
-      compromisedAutomationLinks: [],
-      trustPrivacies: [],
-      envVariables: [{
-        name: 'temperature',
-        value: '21',
-        trust: 'untrusted',
-        modelTokenSource: 'UNKNOWN'
-      }],
-      globalVariables: [{
-        name: 'compromisedPointCount',
-        value: '0',
-        trust: null,
-        modelTokenSource: 'UNKNOWN'
+      privacies: [{
+        name: 'recording',
+        propertyScope: 'content',
+        privacy: 'private'
       }]
-    }
+    })
 
     expect(validateSimulationResult({
       ...validSimulation(),
       states: [detailedState, { ...detailedState, stateIndex: 2 }]
     }).states[0]).toMatchObject({ stateIndex: 1 })
 
+    const {
+      malformedDeviceAndReadingFields,
+      invalidEnvironmentTrust,
+      invalidGlobalProvenance
+    } = malformedTraceStateFields(detailedState)
     const malformedStates = [
-      {
-        ...detailedState,
-        devices: [{ ...detailedState.devices[0], modelTokenSource: null }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{ name: 'workingState', value: 'idle' }]
-        }]
-      },
-      {
-        ...detailedState,
-        envVariables: [{ name: 'temperature', value: '21', trust: 'untrusted' }]
-      },
-      {
-        ...detailedState,
-        devices: [{ ...detailedState.devices[0], modelTokenSource: 'FORGED' }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{
-            name: 'workingState',
-            value: 'idle',
-            modelTokenSource: 'CUSTOM'
-          }]
-        }]
-      },
-      {
-        ...detailedState,
-        devices: [{
-          ...detailedState.devices[0],
-          variables: [{ name: 'workingState', value: 1 }]
-        }]
-      },
+      ...malformedDeviceAndReadingFields,
       {
         ...detailedState,
         devices: [{
@@ -585,18 +534,8 @@ describe('verification and simulation response contracts', () => {
           ]
         }]
       },
-      {
-        ...detailedState,
-        envVariables: [{ name: 'temperature', value: '21', trust: true }]
-      },
-      {
-        ...detailedState,
-        globalVariables: [{
-          name: 'compromisedPointCount',
-          value: '0',
-          modelTokenSource: 'BUNDLED'
-        }]
-      },
+      invalidEnvironmentTrust,
+      invalidGlobalProvenance,
       {
         ...detailedState,
         triggeredRules: [{ ruleId: 'rule-1', ruleLabel: 'Missing frozen index' }]
@@ -613,7 +552,7 @@ describe('verification and simulation response contracts', () => {
     malformedStates.forEach(malformedState => {
       expect(() => validateSimulationResult({
         ...validSimulation(),
-        states: [malformedState, state(2)]
+        states: [malformedState, { ...detailedState, stateIndex: 2 }]
       })).toThrow(expect.objectContaining({ code: RUN_RESPONSE_INCOMPLETE_CODE }))
     })
 
@@ -697,6 +636,13 @@ describe('verification and simulation response contracts', () => {
   it('validates completed task conclusions and requires a saved simulation trace', () => {
     expect(validateVerificationTask(validCompletedVerificationTask())).toEqual(validCompletedVerificationTask())
     expect(validateSimulationTask(validCompletedSimulationTask())).toEqual(validCompletedSimulationTask())
+
+    expect(() => validateVerificationTask({
+      ...validCompletedVerificationTask(), modelComplete: false
+    })).toThrow('modelComplete contradicts the conclusion or omissions')
+    expect(() => validateSimulationTask({
+      ...validCompletedSimulationTask(), modelComplete: false
+    })).toThrow('modelComplete contradicts disabled rules')
 
     expect(() => validateSimulationTask({
       ...validCompletedSimulationTask(),
@@ -850,9 +796,37 @@ describe('verification and simulation response contracts', () => {
     }))
   })
 
-  it('validates task ids, progress, and cancellation outcomes before the UI acts on them', () => {
-    expect(validateTaskSubmissionId(9, 'Task submission')).toBe(9)
-    expect(validateTaskProgress(63, 'Task progress')).toBe(63)
+  it.each(['detail', 'inbox'] as const)('checks verification task identity and progress in the %s API', async entry => {
+    const task = {
+      id: 9, progress: 63, status: 'RUNNING', initiator: 'USER', progressStage: 'EXECUTING_MODEL_CHECKER',
+      createdAt: '2026-07-12T00:00:00', startedAt: '2026-07-12T00:00:01',
+      isAttack: false, attackBudget: 0, enablePrivacy: false,
+      modelSemantics, modelSnapshot: modelSnapshot(1)
+    }
+    const shape = (value: unknown) => entry === 'detail' ? value : [value]
+    const read = () => entry === 'detail' ? boardApi.getTask(9) : boardApi.getTasks()
+    vi.mocked(http.get).mockResolvedValueOnce({ data: { data: shape(task) } })
+    await expect(read()).resolves.toEqual(shape(task))
+    const withoutProgressStage = { ...task, progressStage: null }
+    vi.mocked(http.get).mockResolvedValueOnce({ data: { data: shape(withoutProgressStage) } })
+    await expect(read()).resolves.toEqual(shape(withoutProgressStage))
+
+    for (const [invalid, field] of [
+      [{ ...task, progress: 101 }, 'progress'],
+      [{ ...task, id: 0 }, 'id'],
+      [{ ...task, status: 'WAITING' }, 'status is invalid'],
+      [{ ...task, progressStage: 'REQUESTING_MODEL' }, 'progressStage is invalid'],
+      [{ ...task, modelSnapshot: modelSnapshot(0) }, 'at least one specification']
+    ] as const) {
+      vi.mocked(http.get).mockResolvedValueOnce({ data: { data: shape(invalid) } })
+      await expect(read()).rejects.toMatchObject({
+        code: RUN_RESPONSE_INCOMPLETE_CODE,
+        message: expect.stringContaining(field)
+      })
+    }
+  })
+
+  it('validates task cancellation outcomes before the UI acts on them', () => {
     expect(validateTaskCancellationResult({
       taskId: 9,
       cancellationAccepted: true,
@@ -861,9 +835,6 @@ describe('verification and simulation response contracts', () => {
       executionMayStillBeStopping: true
     }, 9, 'Task cancellation')).toMatchObject({ cancellationAccepted: true })
 
-    expect(() => validateTaskProgress(101, 'Task progress')).toThrow(expect.objectContaining({
-      code: RUN_RESPONSE_INCOMPLETE_CODE
-    }))
     expect(() => validateTaskCancellationResult({
       taskId: 10,
       cancellationAccepted: false,

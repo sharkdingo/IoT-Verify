@@ -25,6 +25,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryScenarioDraftStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,7 +67,7 @@ class RecommendScenarioToolTest {
     void setUp() {
         snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of());
         lenient().when(boardStorageService.getSemanticSnapshot(1L)).thenAnswer(invocation -> snapshot);
-        draftStore = new AiScenarioDraftStore();
+        draftStore = inMemoryScenarioDraftStore();
         chatExecutionConfig = new ChatExecutionConfig();
         service = new ScenarioRecommendationService(
                 promptCompletionService, boardStorageService, draftStore,
@@ -90,9 +91,11 @@ class RecommendScenarioToolTest {
         snapshot = new BoardSemanticSnapshotDto(List.of(), List.of(), List.of(), List.of(), List.of(template));
         when(promptCompletionService.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
+                        ```json
                         {"scenarioName":"REST preview","scene":{
                           "devices":[{"id":"sensor","templateName":"Noise Sensor","label":"Sensor"}],
                           "environmentVariables":[],"rules":[],"specs":[]}}
+                        ```
                         """);
         chatExecutionConfig.setMaxToolResultBytes(4_096);
 

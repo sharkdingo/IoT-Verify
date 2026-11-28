@@ -117,6 +117,24 @@ describe('single device creation field ownership', () => {
     expect(wrapper.find('[data-testid="single-device-save-failure"]').exists()).toBe(false)
   })
 
+  it.each([false, true])('keeps an unconfirmed draft locked without taking focus (panel switched=%s)', async switched => {
+    const wrapper = await editor()
+    await wrapper.get('[data-testid="single-device-create"]').trigger('click')
+    const submission = wrapper.emitted('create-device')![0]![0] as any
+    if (switched) await wrapper.setProps({ activeSection: 'templates' })
+    submission.complete(false, { reasonCode: 'DEVICE_CREATE_OUTCOME_UNKNOWN', cause: 'Save unconfirmed', details: [], fields: {} })
+    if (switched) await wrapper.setProps({ activeSection: 'devices' })
+    await flushPromises()
+    expect(focus).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="single-device-save-unconfirmed"]').text()).toBe('Save unconfirmed')
+    expect(wrapper.get('[data-testid="single-device-create"]').attributes('disabled')).toBeDefined()
+    await (wrapper.vm as any).handleCreateDevice()
+    expect(wrapper.emitted('create-device')).toHaveLength(1)
+    await wrapper.get('[data-testid="single-device-name"]').setValue('Different device')
+    expect(wrapper.find('[data-testid="single-device-save-unconfirmed"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="single-device-create"]').attributes('disabled')).toBeUndefined()
+  })
+
   it.each([false, true])('an old completion (saved=%s) cannot change a newer draft', async saved => {
     const wrapper = await editor()
     await wrapper.get('[data-testid="single-device-create"]').trigger('click')

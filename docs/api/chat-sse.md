@@ -4,7 +4,7 @@ Contract for `/api/chat` — session management plus the streaming completion en
 Session endpoints use the standard `Result<T>` envelope ([overview.md](overview.md));
 the streaming endpoint does **not** — it is an SSE stream.
 
-Verified against code on 2026-10-26. Source: `controller/ChatController.java`,
+Verified against code on 2026-11-26. Source: `controller/ChatController.java`,
 `service/impl/ChatServiceImpl.java`, `dto/chat/`, `frontend/src/api/chat.ts`,
 `frontend/src/App.vue`, and `frontend/src/components/ChatView.vue`.
 
@@ -819,9 +819,10 @@ assistant row was acknowledged, not merely that the reader reached EOF. For a pe
 server error, `onFinish` receives that acknowledgement before `onError` receives the
 `SERVER_FRAME` error. A client abort does not masquerade as completion.
 
-`REFRESH_DATA` commands use a promise-returning component callback rather than a
-fire-and-forget event. The assistant remains interaction-locked until the owning Board
-method confirms the targeted refresh. If that refresh fails, the client immediately
+`REFRESH_DATA` commands for a turn are delivered after its tool loop has ended, including
+best-effort delivery of pending commands when the loop fails. They use a promise-returning
+component callback rather than a fire-and-forget event. The assistant remains interaction-locked
+until the owning Board method confirms the targeted refresh. If that refresh fails, the client immediately
 attempts the client-only `board_state` reconciliation. A second failure leaves a visible,
 localized retry panel open and keeps assistant requests, scene replacement, and trace
 playback locked until a later full reconciliation succeeds.

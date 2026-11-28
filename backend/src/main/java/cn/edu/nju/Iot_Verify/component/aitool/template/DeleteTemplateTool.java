@@ -68,12 +68,7 @@ public class DeleteTemplateTool extends AbstractAiTool {
     protected String doExecute(Long userId, String argsJson) {
         Long requestedTemplateId = null;
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("templateId", "confirmed", "impactToken"));
             long templateId = positiveLongArg(args, "templateId");
             requestedTemplateId = templateId;
@@ -103,7 +98,7 @@ public class DeleteTemplateTool extends AbstractAiTool {
                 response.put("message", "No changes were made. This device type cannot be deleted while listed device instances use it.");
                 response.put("requiresUserConfirmation", false);
                 response.put("preview", previewView);
-                return readOnlySuccessJson(response, "Template deletion preview unavailable.");
+                return readOnlySuccessJson(response);
             }
             if (domainImpactToken == null) {
                 return errorJson("Template deletion preview did not provide an impact token. No changes were made; retry the preview.",
@@ -119,7 +114,7 @@ public class DeleteTemplateTool extends AbstractAiTool {
                 response.put("message", "No changes were made. Confirm this exact preview to delete the device type.");
                 response.put("requiresUserConfirmation", true);
                 response.put("preview", previewView);
-                return readOnlySuccessJson(response, "Template deletion preview unavailable.");
+                return readOnlySuccessJson(response);
             }
 
             String impactToken = requiredTextField(args, "impactToken", "arguments");
@@ -141,7 +136,7 @@ public class DeleteTemplateTool extends AbstractAiTool {
                     "message", "Template deleted successfully.",
                     "operation", "deleted",
                     "result", deleted
-            ), "Template deleted successfully.");
+            ));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

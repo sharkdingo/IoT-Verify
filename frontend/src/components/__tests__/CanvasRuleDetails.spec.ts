@@ -16,7 +16,7 @@ const source: DeviceNode = { id: 'sensor', label: 'Hall sensor', templateName: '
 const target: DeviceNode = { ...source, id: 'light', label: 'Desk light', position: { x: 400, y: 200 } }
 const custom: DeviceNode = { ...source, id: 'custom', label: 'Custom source', templateName: 'Custom', position: { x: 200, y: 400 } }
 const edge: DeviceEdge = { id: 'edge', from: source.id, to: target.id,
-  fromLabel: source.label, toLabel: target.label, fromPos: source.position, toPos: target.position,
+  fromPos: source.position, toPos: target.position,
   fromApi: 'state', itemType: 'state', relation: '=', value: 'off', toApi: 'on', ruleId: '7', ruleIndex: 0 }
 const longValue = '完整保留 / Preserve every word '.repeat(30) + 'UNIQUE_END'
 const rule: RuleForm = { id: '7', sources: [
@@ -58,6 +58,11 @@ describe('complete canvas rule details', () => {
       expect(detail.text()).toContain('内容标签来源')
       expect(wrapper.get('.edge-hitarea').attributes('aria-label')).toContain('则向 Desk light 发送“开启”命令')
       expect(JSON.stringify({ source, target, custom, edge, rule })).toBe(before)
+      await wrapper.setProps({ nodes: [
+        { ...source, label: 'Renamed hall sensor' }, { ...target, label: 'Renamed desk light' }, custom
+      ] })
+      expect(detail.findAll('li')[0].text()).toBe('Renamed hall sensor 状态 = 关闭')
+      expect(wrapper.get('.edge-hitarea').attributes('aria-label')).toContain('则向 Renamed desk light 发送“开启”命令')
       await detail.trigger('pointerdown')
       await detail.trigger('wheel')
       expect(wrapper.emitted('canvas-pointerdown')).toBeUndefined()

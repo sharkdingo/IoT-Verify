@@ -6,21 +6,36 @@ import DeviceDialog from '@/components/DeviceDialog.vue'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import { i18n } from '@/assets/i18n'
 import type { DeviceManifest, DeviceTemplate } from '@/types/device'
+import type { DeviceNode } from '@/types/node'
 
-const mountRuntimeEditor = () => {
+const mountRuntimeEditor = (
+  onSaveRuntime?: () => void,
+  variables: DeviceNode['variables'] = [{ name: 'threshold', value: '10' }]
+) => {
   const manifest: DeviceManifest = { Name: 'Controller', Modes: [], APIs: [], InternalVariables: [{
     Name: 'threshold', IsInside: true, LowerBound: 0, UpperBound: 100,
     FalsifiableWhenCompromised: false, Trust: 'trusted', Privacy: 'public'
   }] }
-  return mount(DeviceDialog, { attachTo: document.body, props: { visible: true, deviceName: manifest.Name,
-    label: 'Controller', nodeId: 'controller', manifest,
-    deviceTemplates: [{ name: manifest.Name, manifest }],
-    nodes: [{ id: 'controller', templateName: manifest.Name, label: 'Controller', position: { x: 0, y: 0 },
-      state: 'Working', width: 176, height: 128, variables: [{ name: 'threshold', value: '10' }] }] },
-    global: { plugins: [i18n] } })
+  const node: DeviceNode = {
+    id: 'controller', templateName: manifest.Name, label: 'Controller',
+    position: { x: 0, y: 0 }, state: 'Working', width: 176, height: 128, variables
+  }
+  const wrapper = mount(DeviceDialog, {
+    attachTo: document.body,
+    props: { visible: true, deviceName: manifest.Name, label: node.label, nodeId: node.id, manifest, onSaveRuntime,
+      deviceTemplates: [{ name: manifest.Name, manifest }], nodes: [node] },
+    global: { plugins: [i18n] }
+  })
+  return { wrapper, node }
 }
+const runtimeValueInput = () => document.querySelector<HTMLInputElement>(
+  '[data-testid="device-runtime-variable-threshold"]'
+)!
+const runtimeTrustSelect = () => document.querySelector<HTMLSelectElement>(
+  '[data-testid="device-runtime-variable-trust-threshold"]'
+)!
 const setRuntimeValue = async (value: string) => {
-  const input = document.querySelector<HTMLInputElement>('[data-testid="device-runtime-variable-threshold"]')!
+  const input = runtimeValueInput()
   input.value = value
   input.dispatchEvent(new Event('input', { bubbles: true }))
   await flushPromises()
@@ -29,7 +44,7 @@ const setRuntimeValue = async (value: string) => {
 describe('DeviceDialog runtime rejection ownership', () => {
   afterEach(() => { document.body.innerHTML = ''; localStorage.removeItem('iot_verify_token') })
   it('blocks fractional text inline, while allowing the template default', async () => {
-    const wrapper = mountRuntimeEditor()
+    const { wrapper } = mountRuntimeEditor()
     await setRuntimeValue('1.5')
     expect(document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.disabled).toBe(true)
     expect(document.querySelector('[data-testid="device-runtime-blocked-reason"]')!.textContent).toMatch(/0.*100/)
@@ -44,7 +59,7 @@ describe('DeviceDialog runtime rejection ownership', () => {
     wrapper.unmount()
   })
   it('keeps a current server rejection with the draft and clears it when edited', async () => {
-    const wrapper = mountRuntimeEditor()
+    const { wrapper } = mountRuntimeEditor()
     await setRuntimeValue('25')
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
     await flushPromises()
@@ -61,8 +76,33 @@ describe('DeviceDialog runtime rejection ownership', () => {
     expect(document.querySelector('[data-testid="device-runtime-save-failure"]')).toBeNull()
     wrapper.unmount()
   })
+  it.each([false, true])('shows a recovered runtime as unconfirmed and preserves the draft (edited while saving=%s)', async edited => {
+    const { wrapper } = mountRuntimeEditor(() => { void wrapper.setProps({ runtimeSaving: true }) })
+    await setRuntimeValue('25')
+    const save = document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!
+    save.click()
+    await wrapper.vm.$nextTick()
+    const complete = wrapper.emitted('save-runtime')![0][2] as Function
+    if (edited) await setRuntimeValue('30')
+    await wrapper.setProps({ nodes: wrapper.props('nodes')!.map(node => ({ ...node,
+      variables: [{ name: 'threshold', value: '25' }] })) })
+    complete(false, { reasonCode: 'DEVICE_WRITE_OUTCOME_UNKNOWN', cause: 'Save unconfirmed', details: [], fields: {} })
+    await wrapper.setProps({ runtimeSaving: false })
+    expect(document.querySelector('[data-testid="device-runtime-save-unconfirmed"]')!.textContent).toContain('Save unconfirmed')
+    expect(document.querySelector('[data-testid="device-runtime-save-failure"]')).toBeNull()
+    expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
+    expect(document.querySelector<HTMLInputElement>('[data-testid="device-runtime-variable-threshold"]')!.value).toBe(edited ? '30' : '25')
+    expect(save.disabled).toBe(!edited)
+    if (edited) await setRuntimeValue('25')
+    expect(save.disabled).toBe(true)
+    save.click()
+    expect(wrapper.emitted('save-runtime')).toHaveLength(1)
+    await setRuntimeValue('30')
+    expect(save.disabled).toBe(false)
+    wrapper.unmount()
+  })
   it.each(['close', 'account', 'unmount'])('does not attach an old runtime rejection after %s', async action => {
-    const wrapper = mountRuntimeEditor()
+    const { wrapper } = mountRuntimeEditor()
     await setRuntimeValue('25')
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
     await flushPromises()
@@ -406,6 +446,10 @@ describe('DeviceDialog template authority', () => {
     expect(document.querySelector('[data-testid="device-runtime-adopt-latest"]')?.classList).toContain('min-h-11')
     expect(document.querySelector('[data-testid="device-runtime-keep-local"]')?.classList).toContain('min-h-11')
 
+    await wrapper.setProps({ nodes: [conflictingRefresh] })
+    expect(document.querySelector('[data-testid="device-runtime-conflict"]'),
+      'a repeated server snapshot does not settle the existing conflict').not.toBeNull()
+
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-keep-local"]')!.click()
     await wrapper.vm.$nextTick()
     expect(input()?.value).toBe('25')
@@ -479,7 +523,8 @@ describe('DeviceDialog template authority', () => {
         manifest,
         nodes: [node],
         deviceTemplates: [template],
-        specs: []
+        specs: [],
+        onSaveRuntime: () => { void wrapper.setProps({ runtimeSaving: true }) }
       },
       global: { plugins: [i18n] }
     })
@@ -517,6 +562,27 @@ describe('DeviceDialog template authority', () => {
     expect(state().value).toBe('active')
     expect(trust().value).toBe('untrusted')
     expect(privacy().value).toBe('private')
+    expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
+
+    trust().value = 'trusted'
+    trust().dispatchEvent(new Event('change', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.emitted('save-runtime')?.[0]?.[1]).toMatchObject({
+      state: 'active', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
+    })
+
+    privacy().value = 'public'
+    privacy().dispatchEvent(new Event('change', { bubbles: true }))
+    await wrapper.vm.$nextTick()
+    await wrapper.setProps({ nodes: [{
+      ...node, state: 'active', currentStateTrust: 'trusted', currentStatePrivacy: 'private'
+    }], runtimeSaving: false })
+
+    expect(state().value).toBe('active')
+    expect(trust().value).toBe('trusted')
+    expect(privacy().value).toBe('public')
     expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
     wrapper.unmount()
   })
@@ -607,150 +673,37 @@ describe('DeviceDialog template authority', () => {
   })
 
   it('does not overwrite an edit that returns to the old value while a save is in flight', async () => {
-    const manifest: DeviceManifest = {
-      Name: 'Custom Controller',
-      Modes: [],
-      WorkingStates: [],
-      InternalVariables: [{
-        Name: 'threshold',
-        IsInside: true,
-        FalsifiableWhenCompromised: false,
-        LowerBound: 0,
-        UpperBound: 100,
-        Trust: 'trusted',
-        Privacy: 'public'
-      }],
-      APIs: []
-    }
-    const template: DeviceTemplate = {
-      name: manifest.Name,
-      manifest,
-      defaultTemplate: false
-    }
-    const node = {
-      id: 'controller-1',
-      templateName: template.name,
-      label: 'Controller',
-      position: { x: 0, y: 0 },
-      state: 'idle',
-      width: 176,
-      height: 128,
-      variables: [{ name: 'threshold', value: '10' }]
-    }
-    let markSaving: (() => void) | null = null
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        runtimeSaving: false,
-        deviceName: template.name,
-        label: node.label,
-        nodeId: node.id,
-        manifest,
-        nodes: [node],
-        deviceTemplates: [template],
-        specs: [],
-        onSaveRuntime: () => markSaving?.()
-      },
-      global: { plugins: [i18n] }
-    })
-    markSaving = () => {
-      void wrapper.setProps({ runtimeSaving: true })
-    }
-    const input = () => document.querySelector<HTMLInputElement>(
-      '[data-testid="device-runtime-variable-threshold"]'
-    )!
-    const setInput = async (value: string) => {
-      input().value = value
-      input().dispatchEvent(new Event('input', { bubbles: true }))
-      await wrapper.vm.$nextTick()
-    }
+    const { wrapper, node } = mountRuntimeEditor(() => { void wrapper.setProps({ runtimeSaving: true }) })
 
-    await setInput('25')
+    await setRuntimeValue('25')
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
     await wrapper.vm.$nextTick()
     expect(wrapper.emitted('save-runtime')?.[0]?.[1]).toMatchObject({
       variables: [{ name: 'threshold', value: '25' }]
     })
 
-    await setInput('10')
+    await setRuntimeValue('10')
     await wrapper.setProps({
       nodes: [{ ...node, variables: [{ name: 'threshold', value: '25' }] }],
       runtimeSaving: false
     })
 
-    expect(input().value).toBe('10')
+    expect(runtimeValueInput().value).toBe('10')
 
     await wrapper.setProps({
       nodes: [{ ...node, variables: [{ name: 'threshold', value: '25' }] }]
     })
-    expect(input().value).toBe('10')
+    expect(runtimeValueInput().value).toBe('10')
     wrapper.unmount()
   })
 
   it('treats canonical trim and security-label normalization as its own save acknowledgement', async () => {
-    const manifest: DeviceManifest = {
-      Name: 'Canonical Controller',
-      Modes: [],
-      WorkingStates: [],
-      InternalVariables: [{
-        Name: 'threshold',
-        IsInside: true,
-        FalsifiableWhenCompromised: false,
-        LowerBound: 0,
-        UpperBound: 100,
-        Trust: 'trusted',
-        Privacy: 'public'
-      }],
-      APIs: []
-    }
-    const template: DeviceTemplate = {
-      name: manifest.Name,
-      manifest,
-      defaultTemplate: false
-    }
-    const node = {
-      id: 'canonical-controller-1',
-      templateName: template.name,
-      label: 'Canonical controller',
-      position: { x: 0, y: 0 },
-      state: 'idle',
-      width: 176,
-      height: 128,
-      variables: [{ name: 'threshold', value: '10', trust: 'trusted' }]
-    }
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        runtimeSaving: false,
-        deviceName: template.name,
-        label: node.label,
-        nodeId: node.id,
-        manifest,
-        nodes: [node],
-        deviceTemplates: [template],
-        specs: [],
-        onSaveRuntime: () => void wrapper.setProps({ runtimeSaving: true })
-      },
-      global: { plugins: [i18n] }
-    })
+    const { wrapper, node } = mountRuntimeEditor(() => { void wrapper.setProps({ runtimeSaving: true }) },
+      [{ name: 'threshold', value: '10', trust: 'trusted' }])
 
-    const valueInput = () => document.querySelector<HTMLInputElement>(
-      '[data-testid="device-runtime-variable-threshold"]'
-    )!
-    const trustSelect = () => document.querySelector<HTMLSelectElement>(
-      '[data-testid="device-runtime-variable-trust-threshold"]'
-    )!
-    const setInput = async (value: string) => {
-      valueInput().value = value
-      valueInput().dispatchEvent(new Event('input', { bubbles: true }))
-      await wrapper.vm.$nextTick()
-    }
-
-    await setInput(' 25 ')
-    trustSelect().value = 'untrusted'
-    trustSelect().dispatchEvent(new Event('change', { bubbles: true }))
+    await setRuntimeValue(' 25 ')
+    runtimeTrustSelect().value = 'untrusted'
+    runtimeTrustSelect().dispatchEvent(new Event('change', { bubbles: true }))
     await wrapper.vm.$nextTick()
 
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
@@ -767,18 +720,18 @@ describe('DeviceDialog template authority', () => {
       }]
     })
     expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
-    expect(valueInput().value).toBe('25')
-    expect(trustSelect().value).toBe('untrusted')
+    expect(runtimeValueInput().value).toBe('25')
+    expect(runtimeTrustSelect().value).toBe('untrusted')
 
     // A local edit made after Save remains local when the same acknowledgement arrives.
-    await setInput(' 30 ')
+    await setRuntimeValue(' 30 ')
     await wrapper.setProps({
       nodes: [{
         ...node,
         variables: [{ name: 'threshold', value: '25', trust: 'untrusted' }]
       }]
     })
-    expect(valueInput().value).toBe(' 30 ')
+    expect(runtimeValueInput().value).toBe(' 30 ')
     expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
 
     await wrapper.setProps({ runtimeSaving: false })
@@ -786,66 +739,10 @@ describe('DeviceDialog template authority', () => {
   })
 
   it('adopts template defaults when a saved runtime override is cleared', async () => {
-    const manifest: DeviceManifest = {
-      Name: 'Defaulted Controller',
-      Modes: [],
-      WorkingStates: [],
-      InternalVariables: [{
-        Name: 'threshold',
-        IsInside: true,
-        FalsifiableWhenCompromised: false,
-        LowerBound: 0,
-        UpperBound: 100,
-        Trust: 'trusted',
-        Privacy: 'public'
-      }],
-      APIs: []
-    }
-    const template: DeviceTemplate = {
-      name: manifest.Name,
-      manifest,
-      defaultTemplate: false
-    }
-    const node = {
-      id: 'defaulted-controller-1',
-      templateName: template.name,
-      label: 'Defaulted controller',
-      position: { x: 0, y: 0 },
-      state: 'idle',
-      width: 176,
-      height: 128,
-      variables: [{ name: 'threshold', value: '25', trust: 'untrusted' }]
-    }
-    let markSaving: (() => void) | null = null
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        runtimeSaving: false,
-        deviceName: template.name,
-        label: node.label,
-        nodeId: node.id,
-        manifest,
-        nodes: [node],
-        deviceTemplates: [template],
-        specs: [],
-        onSaveRuntime: () => markSaving?.()
-      },
-      global: { plugins: [i18n] }
-    })
-    markSaving = () => {
-      void wrapper.setProps({ runtimeSaving: true })
-    }
+    const { wrapper, node } = mountRuntimeEditor(() => { void wrapper.setProps({ runtimeSaving: true }) },
+      [{ name: 'threshold', value: '25', trust: 'untrusted' }])
 
-    const valueInput = () => document.querySelector<HTMLInputElement>(
-      '[data-testid="device-runtime-variable-threshold"]'
-    )!
-    const trustSelect = () => document.querySelector<HTMLSelectElement>(
-      '[data-testid="device-runtime-variable-trust-threshold"]'
-    )!
-    valueInput().value = ''
-    valueInput().dispatchEvent(new Event('input', { bubbles: true }))
-    await wrapper.vm.$nextTick()
+    await setRuntimeValue('')
 
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
     await wrapper.vm.$nextTick()
@@ -855,8 +752,8 @@ describe('DeviceDialog template authority', () => {
 
     await wrapper.setProps({ nodes: [{ ...node, variables: [] }] })
     expect(document.querySelector('[data-testid="device-runtime-conflict"]')).toBeNull()
-    expect(valueInput().value).toBe('0')
-    expect(trustSelect().value).toBe('')
+    expect(runtimeValueInput().value).toBe('0')
+    expect(runtimeTrustSelect().value).toBe('')
 
     await wrapper.setProps({ runtimeSaving: false })
     wrapper.unmount()
@@ -1107,66 +1004,9 @@ describe('DeviceDialog template authority', () => {
     wrapper.unmount()
   })
 
-  const mountRuntimeCloseGuard = (runtimeSaving = false) => {
-    const manifest: DeviceManifest = {
-      Name: 'Draft Controller',
-      Modes: [],
-      WorkingStates: [],
-      InternalVariables: [{
-        Name: 'threshold',
-        IsInside: true,
-        FalsifiableWhenCompromised: false,
-        LowerBound: 0,
-        UpperBound: 100,
-        Trust: 'trusted',
-        Privacy: 'public'
-      }],
-      APIs: []
-    }
-    const template: DeviceTemplate = {
-      name: manifest.Name,
-      manifest,
-      defaultTemplate: false
-    }
-    const node = {
-      id: 'draft-controller-1',
-      templateName: template.name,
-      label: 'Draft controller',
-      position: { x: 0, y: 0 },
-      state: 'Working',
-      width: 176,
-      height: 128,
-      variables: [{ name: 'threshold', value: '10' }]
-    }
-    const wrapper = mount(DeviceDialog, {
-      attachTo: document.body,
-      props: {
-        visible: true,
-        runtimeSaving,
-        deviceName: template.name,
-        label: node.label,
-        nodeId: node.id,
-        manifest,
-        nodes: [node],
-        deviceTemplates: [template],
-        specs: []
-      },
-      global: { plugins: [i18n] }
-    })
-    const input = () => document.querySelector<HTMLInputElement>(
-      '[data-testid="device-runtime-variable-threshold"]'
-    )!
-    const edit = async (value: string) => {
-      input().value = value
-      input().dispatchEvent(new Event('input', { bubbles: true }))
-      await wrapper.vm.$nextTick()
-    }
-    return { wrapper, node, edit }
-  }
-
   it('requires confirmation before discarding a runtime draft and keeps it after cancellation', async () => {
-    const { wrapper, edit } = mountRuntimeCloseGuard()
-    await edit('25')
+    const { wrapper } = mountRuntimeEditor()
+    await setRuntimeValue('25')
     const confirm = vi.spyOn(ElMessageBox, 'confirm')
       .mockRejectedValueOnce('cancel')
       .mockResolvedValue('confirm' as never)
@@ -1199,8 +1039,8 @@ describe('DeviceDialog template authority', () => {
       'keydown', { key: 'Escape', bubbles: true }
     ))]
   ])('guards %s with the same runtime-draft confirmation', async (_label, trigger) => {
-    const { wrapper, edit } = mountRuntimeCloseGuard()
-    await edit('25')
+    const { wrapper } = mountRuntimeEditor()
+    await setRuntimeValue('25')
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
 
     trigger(document.querySelector<HTMLElement>('.iot-dialog-overlay')!)
@@ -1212,13 +1052,13 @@ describe('DeviceDialog template authority', () => {
   })
 
   it('uses the acknowledged runtime as the new baseline and blocks leaving while saving', async () => {
-    const { wrapper, node, edit } = mountRuntimeCloseGuard()
+    const { wrapper, node } = mountRuntimeEditor()
     const exposed = wrapper.vm as unknown as {
       prepareClose: () => Promise<boolean>
     }
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
 
-    await edit('25')
+    await setRuntimeValue('25')
     document.querySelector<HTMLButtonElement>('[data-testid="device-runtime-save"]')!.click()
     await wrapper.setProps({ runtimeSaving: true })
 
@@ -1240,7 +1080,7 @@ describe('DeviceDialog template authority', () => {
     expect(await exposed.prepareClose()).toBe(true)
     expect(confirm).not.toHaveBeenCalled()
 
-    await edit('30')
+    await setRuntimeValue('30')
     expect(await exposed.prepareClose()).toBe(false)
     expect(confirm).toHaveBeenCalledOnce()
     wrapper.unmount()

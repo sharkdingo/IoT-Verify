@@ -1,7 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.aitool;
 
 import cn.edu.nju.Iot_Verify.component.ai.state.AiSessionStateStore;
-import cn.edu.nju.Iot_Verify.component.ai.state.InMemoryAiSessionStateStore;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,10 +34,6 @@ public class AiDestructiveActionGuard {
     private final AiSessionStateStore stateStore;
     private final Clock clock;
     private final SecureRandom secureRandom = new SecureRandom();
-
-    public AiDestructiveActionGuard(ObjectMapper objectMapper) {
-        this(objectMapper, new InMemoryAiSessionStateStore(), Clock.systemUTC());
-    }
 
     @Autowired
     public AiDestructiveActionGuard(ObjectMapper objectMapper, AiSessionStateStore stateStore) {

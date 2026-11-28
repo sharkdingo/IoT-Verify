@@ -172,11 +172,15 @@ class AddNodeToolNullParamsTest {
                   "state":"cool",
                   "currentStateTrust":"UNTRUSTED",
                   "currentStatePrivacy":"PRIVATE",
-                  "variables":[{"name":"fanSpeed","value":"3","trust":"trusted"}],
+                  "variables":[
+                    {"name":"fanSpeed","value":"3","trust":"trusted"},
+                    {"name":"sensorOffset","value":"0","trust":null}
+                  ],
                   "privacies":[{"name":"fanSpeed","privacy":"private"}]
                 }
                 """);
 
+        assertEquals("created", objectMapper.readTree(result).path("operation").asText(), result);
         ArgumentCaptor<DeviceRuntimeConfigDto> runtimeCaptor = ArgumentCaptor.forClass(DeviceRuntimeConfigDto.class);
         verify(nodeService).addNode(eq(1L), eq("Air Conditioner"), eq("bedroom_ac"),
                 isNull(), isNull(), runtimeCaptor.capture(), isNull(), isNull());
@@ -185,6 +189,9 @@ class AddNodeToolNullParamsTest {
         assertEquals("untrusted", runtime.getCurrentStateTrust());
         assertEquals("private", runtime.getCurrentStatePrivacy());
         assertEquals("fanSpeed", runtime.getVariables().get(0).getName());
+        assertEquals("trusted", runtime.getVariables().get(0).getTrust());
+        assertEquals("sensorOffset", runtime.getVariables().get(1).getName());
+        assertNull(runtime.getVariables().get(1).getTrust());
         assertEquals("private", runtime.getPrivacies().get(0).getPrivacy());
         assertTrue(result.contains("bedroom_ac"));
     }

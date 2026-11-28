@@ -39,17 +39,6 @@ final class TaskLeaseRenewal {
         return recovered;
     }
 
-    static <T extends TaskView> boolean renew(
-            TransactionTemplate transactionTemplate,
-            Supplier<Optional<T>> lockTask,
-            Supplier<LocalDateTime> databaseClock,
-            Consumer<T> flushTask,
-            String workerId,
-            Duration leaseDuration) {
-        return renewWithConfirmation(transactionTemplate, lockTask, databaseClock, flushTask,
-                workerId, leaseDuration).renewed();
-    }
-
     static <T extends TaskView> RenewalResult renewWithConfirmation(
             TransactionTemplate transactionTemplate,
             Supplier<Optional<T>> lockTask,

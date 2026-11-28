@@ -24,6 +24,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.file.Files;
 import java.lang.reflect.Method;
@@ -55,6 +57,13 @@ class SmvGeneratorFixesTest {
     }
 
     // ======================== helpers ========================
+
+    private String buildMain(Long userId, List<DeviceVerificationDto> devices, List<RuleDto> rules,
+                             Map<String, DeviceSmvData> deviceSmvMap, AttackScenarioDto attackScenario,
+                             boolean enablePrivacy) {
+        return mainBuilder.build(userId, devices, null, rules, deviceSmvMap, attackScenario, enablePrivacy,
+                SmvGenerationContext.noop(), List.of());
+    }
 
     private DeviceManifest.InternalVariable numericVar(String name, boolean isInside, int lo, int hi) {
         return DeviceManifest.InternalVariable.builder()
@@ -104,6 +113,22 @@ class SmvGeneratorFixesTest {
                 });
     }
 
+    private List<DeviceManifest.WorkingState> trustedWorkingStates(String... names) {
+        return Arrays.stream(names)
+                .map(name -> DeviceManifest.WorkingState.builder().name(name).trust("trusted").build())
+                .toList();
+    }
+
+    private DeviceSmvData switchActuator(String varName, String templateName, String mode) {
+        DeviceManifest manifest = DeviceManifest.builder()
+                .modes(List.of(mode))
+                .workingStates(trustedWorkingStates("off", "on"))
+                .apis(List.of(DeviceManifest.API.builder().name("turnOn").startState("off").endState("on").build()))
+                .build();
+        return buildSmvData(varName, templateName, List.of(mode), Map.of(mode, List.of("off", "on")),
+                List.of(), manifest);
+    }
+
     /** 构建一个最小的 DeviceSmvData（单 mode 或多 mode） */
     private DeviceSmvData buildSmvData(String varName, String templateName,
                                        List<String> modes,
@@ -140,7 +165,7 @@ class SmvGeneratorFixesTest {
     @DisplayName("Builder input: main module builder null devices throws categorized exception")
     void mainBuilder_nullDevices_throwsCategorizedException() {
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(1L, null, List.of(), Map.of(), AttackScenarioDto.none(), false));
+                () -> buildMain(1L, null, List.of(), Map.of(), AttackScenarioDto.none(), false));
         assertEquals("INVALID_BUILDER_INPUT", ex.getErrorCategory());
         assertTrue(ex.getMessage().contains("SmvMainModuleBuilder"));
         assertTrue(ex.getMessage().contains("devices"));
@@ -170,7 +195,7 @@ class SmvGeneratorFixesTest {
         smv.getEnvVariables().put("temperature", temperature);
 
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(1L,
+                () -> buildMain(1L,
                         List.of(device("a_temperature", "Sensor")),
                         List.of(),
                         Map.of("a_temperature", smv),
@@ -193,7 +218,7 @@ class SmvGeneratorFixesTest {
                 List.of(), manifest);
 
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(1L,
+                () -> buildMain(1L,
                         List.of(device(internalCounter, "Meter")),
                         List.of(),
                         Map.of(internalCounter, smv),
@@ -235,9 +260,7 @@ class SmvGeneratorFixesTest {
     void mainBuilder_parameterizedInitialState_emitsInitConstraints() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Power"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .build();
         DeviceSmvData smv = buildSmvData("light_1", "Light",
                 List.of("Power"), Map.of("Power", List.of("off", "on")),
@@ -252,10 +275,11 @@ class SmvGeneratorFixesTest {
         String model = mainBuilder.buildParameterized(
                 1L,
                 List.of(device("light_1", "Light")),
+                null,
                 List.of(),
                 Map.of("light_1", smv),
                 AttackScenarioDto.none(), false,
-                config);
+                config, SmvGenerationContext.noop());
 
         assertTrue(model.contains("\nINIT light_1.Power = on;"), model);
         assertTrue(model.contains("\nINIT light_1.trust_Power_on = trusted;"), model);
@@ -292,16 +316,9 @@ class SmvGeneratorFixesTest {
                 numericVar("temperature", true, 0, 100), numericVar("humidity", true, 0, 100));
         DeviceManifest sensorManifest = DeviceManifest.builder()
                 .modes(List.of()).internalVariables(variables).build();
-        DeviceManifest lightManifest = DeviceManifest.builder().modes(List.of("Power"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder().name("turnOn")
-                        .startState("off").endState("on").build())).build();
         DeviceSmvData sensor = buildSmvData("sensor_1", "Meter", List.of(), Map.of(),
                 variables, sensorManifest);
-        DeviceSmvData light = buildSmvData("light_1", "Light", List.of("Power"),
-                Map.of("Power", List.of("off", "on")), List.of(), lightManifest);
+        DeviceSmvData light = switchActuator("light_1", "Light", "Power");
         RuleDto rule = RuleDto.builder().conditions(List.of(
                 RuleDto.Condition.builder().deviceName("sensor_1").targetType("variable")
                         .attribute("temperature").relation(">=").value("30").build(),
@@ -319,8 +336,8 @@ class SmvGeneratorFixesTest {
                 .candidateConditionValues(Map.of("r0_c1", ParameterizationConfig.ConditionValueInfo.builder()
                         .frozenVarName("condition_value_r0_c1").lowerBound(0).upperBound(100).build())).build();
         return mainBuilder.buildParameterized(1L,
-                List.of(device("sensor_1", "Meter"), device("light_1", "Light")), List.of(rule),
-                Map.of("sensor_1", sensor, "light_1", light), AttackScenarioDto.none(), false, config);
+                List.of(device("sensor_1", "Meter"), device("light_1", "Light")), null, List.of(rule),
+                Map.of("sensor_1", sensor, "light_1", light), AttackScenarioDto.none(), false, config, SmvGenerationContext.noop());
     }
 
     @Test
@@ -328,25 +345,13 @@ class SmvGeneratorFixesTest {
     void mainBuilder_ruleExecutionProbes_areDeterministicAndRespectCasePriority() {
         DeviceManifest sensorManifest = DeviceManifest.builder()
                 .modes(List.of("ButtonMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("idle").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("pressed").trust("trusted").build()))
-                .build();
-        DeviceManifest lightManifest = DeviceManifest.builder()
-                .modes(List.of("Power"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("turnOn").startState("off").endState("on").build()))
+                .workingStates(trustedWorkingStates("idle", "pressed"))
                 .build();
 
         DeviceSmvData sensor = buildSmvData("button_1", "Button",
                 List.of("ButtonMode"), Map.of("ButtonMode", List.of("idle", "pressed")),
                 List.of(), sensorManifest);
-        DeviceSmvData light = buildSmvData("light_1", "Light",
-                List.of("Power"), Map.of("Power", List.of("off", "on")),
-                List.of(), lightManifest);
+        DeviceSmvData light = switchActuator("light_1", "Light", "Power");
         Map<String, DeviceSmvData> deviceMap = new LinkedHashMap<>();
         deviceMap.put("button_1", sensor);
         deviceMap.put("light_1", light);
@@ -361,7 +366,7 @@ class SmvGeneratorFixesTest {
                 .command(RuleDto.Command.builder().deviceName("light_1").action("turnOn").build())
                 .ruleString("Second light rule").build();
 
-        String model = mainBuilder.build(1L,
+        String model = buildMain(1L,
                 List.of(device("button_1", "Button"), device("light_1", "Light")),
                 List.of(first, second), deviceMap, AttackScenarioDto.none(), false);
 
@@ -383,9 +388,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", false, 0, 50)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on", "off"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("t1").startState("on").endState("off")
                         .trigger(DeviceManifest.Trigger.builder()
@@ -408,8 +411,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", false, 0, 50)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("t1").startState("on").endState("on")
                         .trigger(DeviceManifest.Trigger.builder()
@@ -457,9 +459,7 @@ class SmvGeneratorFixesTest {
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(affectOnly, readable))
                 .impactedVariables(List.of("illuminance"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on", "off"))
                 // A real state change, so the only thing that can reject this manifest is the trigger
                 // attribute itself. With `startState == endState` the test passed only because the
                 // trigger check happens to run first, and reverting the fix then failed it on the
@@ -475,8 +475,12 @@ class SmvGeneratorFixesTest {
                 List.of("Mode"), Map.of("Mode", List.of("on", "off")),
                 List.of(affectOnly, readable), rejected));
 
+        var generator = new SmvGenerator(null, deviceBuilder, new SmvRuleCommentWriter(),
+                mainBuilder, specBuilder, validator);
+        var devices = List.of(device("lamp_1", "Lamp"));
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> validator.validate(rejectedMap));
+                () -> generator.generateWithResolvedDeviceModel(1L, devices, List.of(), List.of(), List.of(),
+                        AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION, null, rejectedMap));
         assertTrue(ex.getMessage().contains("illuminance"),
                 () -> "the message must name the offending attribute: " + ex.getMessage());
         assertTrue(ex.getMessage().contains("autoOff"),
@@ -488,9 +492,7 @@ class SmvGeneratorFixesTest {
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(affectOnly, readable))
                 .impactedVariables(List.of("illuminance"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on", "off"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("autoOff").startState("on").endState("off")
                         .trigger(DeviceManifest.Trigger.builder()
@@ -502,8 +504,14 @@ class SmvGeneratorFixesTest {
                 List.of("Mode"), Map.of("Mode", List.of("on", "off")),
                 List.of(affectOnly, readable), accepted));
 
-        assertDoesNotThrow(() -> validator.validate(acceptedMap),
+        var generated = assertDoesNotThrow(
+                () -> generator.generateWithResolvedDeviceModel(1L, devices, List.of(), List.of(), List.of(),
+                        AttackScenarioDto.none(), false, SmvGenerator.GeneratePurpose.VERIFICATION, null, acceptedMap),
                 "a read-capable shared value stays a legal trigger attribute");
+        var modelFile = generated.smvFile();
+        modelFile.getParentFile().deleteOnExit();
+        modelFile.deleteOnExit();
+        assertTrue(modelFile.isFile());
     }
 
     @Test
@@ -512,8 +520,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", false, 0, 50)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("t1").startState("on").endState("on")
                         .trigger(DeviceManifest.Trigger.builder()
@@ -540,8 +547,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "State"))
                 .internalVariables(List.of())
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;cool").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("auto;cool"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("setAuto").startState("auto;cool")
                         // 只有 1 段，但设备有 2 个 mode → 应报错
@@ -573,14 +579,12 @@ class SmvGeneratorFixesTest {
         DeviceManifest mA = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(timeA))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceManifest mB = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(timeB))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
 
         DeviceSmvData smvA = buildSmvData("clock_1", "Clock",
@@ -668,14 +672,12 @@ class SmvGeneratorFixesTest {
         DeviceManifest mA = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(timeA))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceManifest mB = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(timeB))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
 
         DeviceSmvData smvA = buildSmvData("clock_1", "Clock",
@@ -735,7 +737,7 @@ class SmvGeneratorFixesTest {
         temperature.setNaturalChangeRate("[1,2,999]");
         DeviceVerificationDto dto = device("sensor_1", "Sensor");
         SmvGenerationException generationException = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(
+                () -> buildMain(
                         1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false));
         assertTrue(generationException.getMessage().contains("NaturalChangeRate '[1,2,999]'"),
                 generationException.getMessage());
@@ -810,8 +812,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(timeVar))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("running").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("running"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("reset")
                         .trigger(DeviceManifest.Trigger.builder()
@@ -838,7 +839,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("clock_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
 
         // P4 was about never comparing against an UNDECLARED identifier. `clock_1.time` satisfies
         // that: the mirror `clock_1.time := a_time` is emitted in main for every shared reading, so
@@ -867,9 +868,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(smoke))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("silent").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("alarming").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("silent", "alarming"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("raise alarm")
                         .startState("silent")
@@ -891,7 +890,7 @@ class SmvGeneratorFixesTest {
         assertDoesNotThrow(() -> validator.validate(Map.of("detector_1", smv)),
                 "the trigger attribute must be a legal read for this test to exercise the guard");
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(),
+        String result = buildMain(1L, List.of(dto), List.of(),
                 Map.of("detector_1", smv), AttackScenarioDto.anyUpToBudget(1), false);
 
         // The attack branch is what a compromised sensor feeds itself; it must be on the identifier the
@@ -911,9 +910,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(temperature))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("warm activation")
                         .startState("off")
@@ -930,7 +927,7 @@ class SmvGeneratorFixesTest {
 
         DeviceVerificationDto dto = device("heater_1", "Heater");
         dto.setState("off");
-        String result = mainBuilder.build(
+        String result = buildMain(
                 1L, List.of(dto), List.of(), Map.of("heater_1", smv), AttackScenarioDto.none(), false);
 
         assertTrue(result.contains("heater_1.temperature := a_temperature"), result);
@@ -969,7 +966,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("lock_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
 
         // P5 核心断言：trust_Mode_home 必须有 next() 且包含自保持
         assertTrue(result.contains("next(lock_1.trust_Mode_home)"),
@@ -1026,10 +1023,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Alpha", "Beta"))
                 .internalVariables(List.of())
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("shared;distinct").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("shared;shared").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("other;distinct").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("shared;distinct", "shared;shared", "other;distinct"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("goOther").startState("").endState("other;").signal(true).build()))
                 .build();
@@ -1095,107 +1089,78 @@ class SmvGeneratorFixesTest {
 
     // ======================== P6: privacy spec + enablePrivacy=false ========================
 
-    /** 通过反射调用 SmvGenerator.validateNoPrivacySpecs */
-    private void invokeValidateNoPrivacySpecs(List<SpecificationDto> specs) throws Exception {
-        // SmvGenerator 的构造函数需要所有依赖，但 validateNoPrivacySpecs 不使用它们
-        SmvGenerator generator = new SmvGenerator(null, null, null, null, null, null);
-        Method method = SmvGenerator.class.getDeclaredMethod("validateNoPrivacySpecs", List.class);
-        method.setAccessible(true);
-        try {
-            method.invoke(generator, specs);
-        } catch (java.lang.reflect.InvocationTargetException e) {
-            if (e.getCause() instanceof SmvGenerationException) {
-                throw (SmvGenerationException) e.getCause();
-            }
-            throw e;
+    @ParameterizedTest(name = "{0} detects {1}")
+    @CsvSource({"a, privacy", "if, privacy", "then, privacy", "a, ' PRIVACY '"})
+    void generateRejectsFirstPrivacySpecWhenDisabled(String group, String targetType) throws Exception {
+        SpecConditionDto privateValue = privacyGuardCondition(targetType, "temperature", "public");
+        privateValue.setPropertyScope("variable");
+        SpecificationDto first = privacyGuardSpec("first-private", group, privateValue);
+        SpecificationDto later = privacyGuardSpec("later-private", "a", privateValue);
+        SpecificationDto nonPrivacy = privacyGuardSpec("non-privacy", "a", privacyGuardCondition("state", "state", "on"));
+        nonPrivacy.setIfConditions(null);
+        nonPrivacy.setThenConditions(null);
+
+        SmvGenerationException error = assertThrows(SmvGenerationException.class, () ->
+                generateWithoutPrivacy(Arrays.asList(null, nonPrivacy, first, later)));
+
+        assertEquals("PRIVACY_SPEC_WITHOUT_PRIVACY", error.getErrorCategory());
+        assertEquals("Specification [first-private] references privacy properties, but privacy mode is not enabled. "
+                + "Enable privacy mode or remove privacy conditions from the specification.", error.getMessage());
+    }
+
+    @Test
+    void generateEmitsNonPrivacySpecsWhenPrivacyIsDisabled() throws Exception {
+        SpecConditionDto trust = privacyGuardCondition("trust", "temperature", "trusted");
+        trust.setPropertyScope("variable");
+        SpecConditionDto reading = privacyGuardCondition("variable", "temperature", "10");
+        reading.setVariableSource("reported");
+
+        var generated = generateWithoutPrivacy(List.of(
+                privacyGuardSpec("trust", "a", trust), privacyGuardSpec("state-and-reading", "then", reading)));
+
+        assertEquals(List.of("trust", "state-and-reading"),
+                generated.emittedSpecs().stream().map(SmvGenerationContext.EmittedSpec::specId).toList());
+        assertEquals(0, generated.skippedSpecCount());
+    }
+
+    @Test
+    void generateAcceptsNoSpecsWhenPrivacyIsDisabled() throws Exception {
+        var generated = generateWithoutPrivacy(List.of());
+
+        assertTrue(generated.smvFile().isFile());
+        assertTrue(generated.emittedSpecs().isEmpty());
+    }
+
+    private SpecConditionDto privacyGuardCondition(String targetType, String key, String value) {
+        SpecConditionDto condition = new SpecConditionDto();
+        condition.setDeviceId("ts_1");
+        condition.setTargetType(targetType);
+        condition.setKey(key);
+        condition.setRelation("=");
+        condition.setValue(value);
+        return condition;
+    }
+
+    private SpecificationDto privacyGuardSpec(String id, String group, SpecConditionDto condition) {
+        SpecificationDto spec = new SpecificationDto();
+        spec.setId(id);
+        spec.setName(id);
+        if ("a".equals(group)) {
+            spec.setTemplateId("1");
+            spec.setAConditions(List.of(condition));
+        } else {
+            spec.setTemplateId("4");
+            spec.setAConditions(null);
+            SpecConditionDto state = privacyGuardCondition("state", "state", "on");
+            spec.setIfConditions(List.of("if".equals(group) ? condition : state));
+            spec.setThenConditions(List.of("then".equals(group) ? condition : state));
         }
+        return spec;
     }
 
-    private SpecConditionDto makeCondition(String targetType) {
-        SpecConditionDto cond = new SpecConditionDto();
-        cond.setDeviceId("dev1");
-        cond.setTargetType(targetType);
-        cond.setKey("temperature");
-        cond.setRelation("=");
-        cond.setValue("trusted");
-        return cond;
-    }
-
-    @Test
-    @DisplayName("P6: privacy condition in aConditions throws when privacy disabled")
-    void privacyInAConditions_throws() {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("spec_privacy_1");
-        spec.setAConditions(List.of(makeCondition("privacy")));
-        spec.setIfConditions(List.of());
-        spec.setThenConditions(List.of());
-
-        SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> invokeValidateNoPrivacySpecs(List.of(spec)));
-        assertTrue(ex.getMessage().contains("spec_privacy_1"));
-        assertTrue(ex.getMessage().contains("privacy"));
-        assertEquals("PRIVACY_SPEC_WITHOUT_PRIVACY", ex.getErrorCategory());
-    }
-
-    @Test
-    @DisplayName("P6: privacy condition in ifConditions throws when privacy disabled")
-    void privacyInIfConditions_throws() {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("spec_privacy_2");
-        spec.setAConditions(List.of());
-        spec.setIfConditions(List.of(makeCondition("privacy")));
-        spec.setThenConditions(List.of());
-
-        SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> invokeValidateNoPrivacySpecs(List.of(spec)));
-        assertTrue(ex.getMessage().contains("spec_privacy_2"));
-    }
-
-    @Test
-    @DisplayName("P6: privacy condition in thenConditions throws when privacy disabled")
-    void privacyInThenConditions_throws() {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("spec_privacy_3");
-        spec.setAConditions(List.of());
-        spec.setIfConditions(List.of());
-        spec.setThenConditions(List.of(makeCondition("privacy")));
-
-        SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> invokeValidateNoPrivacySpecs(List.of(spec)));
-        assertTrue(ex.getMessage().contains("spec_privacy_3"));
-    }
-
-    @Test
-    @DisplayName("P6: privacy condition targetType is case-insensitive")
-    void privacyTargetType_caseInsensitive_throws() {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("spec_privacy_upper");
-        spec.setAConditions(List.of(makeCondition("PRIVACY")));
-        spec.setIfConditions(List.of());
-        spec.setThenConditions(List.of());
-
-        SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> invokeValidateNoPrivacySpecs(List.of(spec)));
-        assertTrue(ex.getMessage().contains("spec_privacy_upper"));
-        assertEquals("PRIVACY_SPEC_WITHOUT_PRIVACY", ex.getErrorCategory());
-    }
-
-    @Test
-    @DisplayName("P6: non-privacy specs pass validation")
-    void nonPrivacySpecs_passes() {
-        SpecificationDto spec = new SpecificationDto();
-        spec.setId("spec_trust_1");
-        spec.setAConditions(List.of(makeCondition("trust")));
-        spec.setIfConditions(List.of(makeCondition("state")));
-        spec.setThenConditions(List.of(makeCondition("variable")));
-
-        assertDoesNotThrow(() -> invokeValidateNoPrivacySpecs(List.of(spec)));
-    }
-
-    @Test
-    @DisplayName("P6: empty specs list passes validation")
-    void emptySpecs_passes() {
-        assertDoesNotThrow(() -> invokeValidateNoPrivacySpecs(List.of()));
+    private SmvGenerator.GenerateResult generateWithoutPrivacy(List<SpecificationDto> specs) throws Exception {
+        return buildGeneratorForClampTests().generate(
+                1L, List.of(buildClampTestDevice()), List.of(), specs, AttackScenarioDto.none(), false);
     }
 
     // ======================== P7: attackBudget=0 时 INVAR 约束 ========================
@@ -1205,8 +1170,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", false, lo, hi)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceSmvData smv = buildSmvData(varName, "Sensor",
                 List.of("Mode"),
@@ -1230,7 +1194,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("ts_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(0), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(0), false);
 
         assertTrue(result.contains("FROZENVAR"), "Should declare FROZENVAR section");
         assertTrue(result.contains("iot_verify_compromised_point_count: 0..1"),
@@ -1251,7 +1215,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("ts_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(3), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(3), false);
 
         assertTrue(result.contains("INVAR iot_verify_compromised_point_count <= 3"),
                 "The request budget should constrain the internal attacked-node counter");
@@ -1286,7 +1250,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("ts_1", smv);
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
 
         // Positive first: without it, a skipped specification yields an empty string and every
         // assertFalse below passes vacuously. Both cases here were silently neutered exactly that way
@@ -1323,7 +1287,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("ts_1", smv);
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
 
         assertTrue(result.contains("ts_1.temperature>30"),
                 () -> "the specification must be emitted for this check to mean anything, got: " + result);
@@ -1337,19 +1301,7 @@ class SmvGeneratorFixesTest {
     @Test
     @DisplayName("P8b: attack mode does not freeze an actuator without a TAP rule command")
     void attackMode_actuator_withoutRuleCommandDoesNotFreezeStateMachine() {
-        DeviceManifest actuatorManifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("turnOn").startState("off").endState("on").build()))
-                .build();
-        DeviceSmvData actuator = buildSmvData(
-                "light_1", "Light",
-                List.of("Mode"),
-                Map.of("Mode", List.of("off", "on")),
-                List.of(), actuatorManifest);
+        DeviceSmvData actuator = switchActuator("light_1", "Light", "Mode");
         actuator.setSensor(false);
         actuator.setInstanceStateTrust("trusted");
         actuator.getCurrentModeStates().put("Mode", "off");
@@ -1362,7 +1314,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("Light");
         dto.setState("off");
 
-        String smv = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(10), false);
+        String smv = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(10), false);
 
         assertFalse(smv.contains("light_1.is_attack=TRUE: light_1.Mode;"),
                 "Attack modeling must not freeze the whole actuator state machine, got:\n" + smv);
@@ -1385,7 +1337,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("Sensor");
         dto.setState("on");
 
-        String smv = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(10), false);
+        String smv = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(10), false);
 
         assertTrue(smv.contains("ts_1.is_attack=TRUE: 0..100;"),
                 "An attacked sensor reading should be nondeterministic within its declared domain, got:\n" + smv);
@@ -1394,14 +1346,35 @@ class SmvGeneratorFixesTest {
     }
 
     @Test
+    void missingVariableDomainKeepsTheOwningBuildersPolicies() {
+        var sensor = buildSensorSmvForIntensity("ts_1", 0, 100);
+        sensor.getVariables().get(0).setUpperBound(null);
+        var devices = List.of(device("ts_1", "Sensor"));
+        var model = Map.of("ts_1", sensor);
+        var attack = AttackScenarioDto.anyUpToBudget(1);
+
+        var deviceError = assertThrows(SmvGenerationException.class, () -> deviceBuilder.build(sensor, true, false));
+        assertEquals("Invalid template for device [ts_1]: Variable 'temperature' has no declared value domain",
+                deviceError.getMessage());
+        var environmentError = assertThrows(SmvGenerationException.class,
+                () -> buildMain(1L, devices, List.of(), model, attack, false));
+        assertEquals("Invalid template for device [environment]: Environment variable 'temperature' has no declared value domain",
+                environmentError.getMessage());
+
+        // The full generator rejects missing declarations before this main-module fallback is reached.
+        sensor.getSharedDeclarations().clear();
+        sensor.getManifest().getInternalVariables().get(0).setUpperBound(null);
+        String main = buildMain(1L, devices, List.of(), model, attack, false);
+        assertTrue(main.contains("ts_1.is_attack=TRUE: {TRUE, FALSE};"), () -> main);
+    }
+
+    @Test
     @DisplayName("P8b: device and automation-link compromise are separate command-failure points")
     void attackMode_deviceAndAutomationLinkAreSeparatePoints() {
         DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 0, 100);
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("heat").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "heat"))
                 .internalVariables(List.of(temperature))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("heat").startState("off").endState("heat").build()))
@@ -1428,7 +1401,7 @@ class SmvGeneratorFixesTest {
                         .action("heat")
                         .build())
                 .build();
-        String smv = mainBuilder.build(
+        String smv = buildMain(
                 1L, List.of(dto), List.of(rule), Map.of("thermostat_1", thermostat), AttackScenarioDto.anyUpToBudget(1), false);
 
         assertTrue(smv.contains("thermostat_1.is_attack=TRUE: 0..100;"),
@@ -1460,9 +1433,7 @@ class SmvGeneratorFixesTest {
         location.setFalsifiableWhenCompromised(true);
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("idle").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("active").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("idle", "active"))
                 .internalVariables(List.of(location))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("activate").startState("idle").endState("active").build()))
@@ -1476,7 +1447,7 @@ class SmvGeneratorFixesTest {
         assertTrue(deviceModule.contains("init(location) :=\n\tcase\n\t\tis_attack=TRUE: 0..10;"));
         assertTrue(deviceModule.contains("init(trust_location) :=\n\tcase\n\t\tis_attack=TRUE: untrusted;"));
 
-        String main = mainBuilder.build(
+        String main = buildMain(
                 1L, List.of(device("phone_1", "Phone")), List.of(),
                 Map.of("phone_1", phone), AttackScenarioDto.anyUpToBudget(1), false);
         assertTrue(main.contains("phone_1.is_attack=TRUE: 0..10;"));
@@ -1501,7 +1472,7 @@ class SmvGeneratorFixesTest {
         String deviceModule = deviceBuilder.build(washer, true, false);
         assertFalse(deviceModule.contains("is_attack=TRUE: 0..100"));
 
-        String main = mainBuilder.build(
+        String main = buildMain(
                 1L, List.of(device("washer_1", "Washer")), List.of(),
                 Map.of("washer_1", washer), AttackScenarioDto.anyUpToBudget(1), false);
         assertFalse(main.contains("washer_1.is_attack=TRUE: 0..100"));
@@ -1515,9 +1486,7 @@ class SmvGeneratorFixesTest {
     void attackMode_actuator_ruleCommandRequiresUnattackedTarget() {
         DeviceManifest actuatorManifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("locked").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("unlocked").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("locked", "unlocked"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("unlock").startState("locked").endState("unlocked").build()))
                 .transitions(List.of(DeviceManifest.Transition.builder()
@@ -1540,8 +1509,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest sensorManifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", true, 0, 100)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceSmvData sensor = buildSmvData(
                 "sensor_1", "Sensor",
@@ -1581,7 +1549,7 @@ class SmvGeneratorFixesTest {
         rule.setConditions(List.of(cond));
         rule.setCommand(cmd);
 
-        String smv = mainBuilder.build(1L, List.of(lockDto, sensorDto), List.of(rule), map, AttackScenarioDto.anyUpToBudget(10), false);
+        String smv = buildMain(1L, List.of(lockDto, sensorDto), List.of(rule), map, AttackScenarioDto.anyUpToBudget(10), false);
 
         String transitionBlock = "next(lock_1.Mode)";
         int blockStart = smv.indexOf(transitionBlock);
@@ -1603,9 +1571,7 @@ class SmvGeneratorFixesTest {
     void attackMode_multiModeActuator_doesNotFreezeEachMode() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;high").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("manual;low").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("auto;high", "manual;low"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("setAuto").endState("auto;high").build()))
                 .build();
@@ -1627,7 +1593,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("HVAC");
         dto.setState("auto;high");
 
-        String smv = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(5), false);
+        String smv = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(5), false);
 
         assertFalse(smv.contains("hvac_1.is_attack=TRUE: hvac_1.Mode;"),
                 "Attack modeling must not freeze Mode, got:\n" + smv);
@@ -1641,8 +1607,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest sensorManifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", true, 0, 100)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceSmvData sensor = buildSmvData(
                 "sensor_1", "Sensor",
@@ -1653,19 +1618,7 @@ class SmvGeneratorFixesTest {
         sensor.setInstanceStateTrust("trusted");
         sensor.getCurrentModeStates().put("Mode", "on");
 
-        DeviceManifest actuatorManifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("turnOn").startState("off").endState("on").build()))
-                .build();
-        DeviceSmvData actuator = buildSmvData(
-                "light_1", "Light",
-                List.of("Mode"),
-                Map.of("Mode", List.of("off", "on")),
-                List.of(), actuatorManifest);
+        DeviceSmvData actuator = switchActuator("light_1", "Light", "Mode");
         actuator.setSensor(false);
         actuator.setInstanceStateTrust("trusted");
         actuator.getCurrentModeStates().put("Mode", "off");
@@ -1699,7 +1652,7 @@ class SmvGeneratorFixesTest {
         rule.setConditions(List.of(cond));
         rule.setCommand(cmd);
 
-        String smv = mainBuilder.build(1L, List.of(sensorDto, lightDto), List.of(rule), map, AttackScenarioDto.none(), false);
+        String smv = buildMain(1L, List.of(sensorDto, lightDto), List.of(rule), map, AttackScenarioDto.none(), false);
 
         assertTrue(smv.contains("sensor_1.temperature>30") && smv.contains("light_1.Mode=off: on;"),
                 "Rule-generated transition (temperature>30 -> turnOn) must be present, got:\n" + smv);
@@ -1832,449 +1785,135 @@ class SmvGeneratorFixesTest {
     // ======================== P11: rule fail-closed + env init conflict ========================
 
     @Test
-    @DisplayName("P11: unresolved multi-mode state condition returns null (fail-closed)")
-    void unresolvedMultiModeStateCondition_returnsNull() throws Exception {
-        DeviceManifest sourceManifest = DeviceManifest.builder()
+    void unresolvableStateTupleDisablesRule() {
+        assertUnresolvableCondition(thermostat(), "auto;on",
+                guardCondition("thermostat_1", "state", "state", "=", "unknown_state"));
+    }
+
+    @Test
+    void multiModeStateConditionReadsBothCurrentModes() {
+        assertRuleGuard(thermostat(), "auto;on",
+                guardCondition("thermostat_1", "state", "state", "=", "auto;on"),
+                "(thermostat_1.Mode=auto & thermostat_1.FanMode=on)");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({
+            "blank attribute,mode,'   ',=,on",
+            "empty IN list,variable,temperature,IN,' , ; | '",
+            "unknown attribute,variable,non_existing_attr,=,1",
+            "missing target type,,temperature,=,30"
+    })
+    void malformedSensorConditionDisablesRule(String description, String targetType,
+                                              String attribute, String relation, String value) {
+        assertUnresolvableCondition(lockAndSensorMap().get("sensor_1"), "on",
+                guardCondition("sensor_1", targetType, attribute, relation, value));
+    }
+
+    @Test
+    void paddedVariableEqualityUsesNormalizedRelation() {
+        assertRuleGuard(lockAndSensorMap().get("sensor_1"), "on",
+                guardCondition("sensor_1", "variable", "temperature", " EQ ", "30"),
+                "sensor_1.temperature=30");
+    }
+
+    @Test
+    void paddedApiEqualityUsesNormalizedBoolean() {
+        assertRuleGuard(signalFan(), "off",
+                guardCondition("fan_1", "api", "fanAuto", " EQ ", " true "),
+                "fan_1.fanAuto_a=TRUE");
+    }
+
+    @Test
+    void nonBooleanSignalValueDisablesRule() {
+        assertUnresolvableCondition(signalFan(), "off",
+                guardCondition("fan_1", "api", "fanAuto", "=", "on"));
+    }
+
+    private DeviceSmvData thermostat() {
+        DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("manual;off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("auto;on", "manual;off"))
                 .build();
-        DeviceSmvData source = buildSmvData(
-                "thermostat_1", "Thermostat",
-                List.of("Mode", "FanMode"),
+        return buildSmvData("thermostat_1", "Thermostat", List.of("Mode", "FanMode"),
                 Map.of("Mode", List.of("auto", "manual"), "FanMode", List.of("on", "off")),
-                List.of(), sourceManifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("thermostat_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("thermostat_1");
-        condition.setAttribute("state");
-        condition.setRelation("=");
-        condition.setValue("unknown_state");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertNull(expr, "Unresolvable multi-mode state condition should fail-closed");
-    }
-
-    @Test
-    @DisplayName("P11: null/blank rule attribute fails closed")
-    void nullRuleAttribute_returnsNull() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "sensor_1", "Sensor",
-                List.of("Mode"),
-                Map.of("Mode", List.of("on")),
                 List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("sensor_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("sensor_1");
-        condition.setAttribute("   ");
-        condition.setRelation("=");
-        condition.setValue("on");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertNull(expr, "Blank attribute should fail-closed");
     }
 
-    @Test
-    @DisplayName("P11: rule relation with surrounding spaces is normalized")
-    void ruleRelationWithSpaces_isNormalized() throws Exception {
-        DeviceManifest.InternalVariable temp = numericVar("temperature", true, 0, 100);
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temp))
-                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "sensor_1", "Sensor",
-                List.of("Mode"),
-                Map.of("Mode", List.of("on")),
-                List.of(temp), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("sensor_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("sensor_1");
-        condition.setTargetType("variable");
-        condition.setAttribute("temperature");
-        condition.setRelation(" EQ ");
-        condition.setValue("30");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertEquals("sensor_1.temperature=30", expr);
-    }
-
-    @Test
-    @DisplayName("P11: rule IN relation with empty value list fails closed")
-    void ruleInWithEmptyValueList_returnsNull() throws Exception {
-        DeviceManifest.InternalVariable temp = numericVar("temperature", true, 0, 100);
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temp))
-                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "sensor_1", "Sensor",
-                List.of("Mode"),
-                Map.of("Mode", List.of("on")),
-                List.of(temp), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("sensor_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("sensor_1");
-        condition.setTargetType("variable");
-        condition.setAttribute("temperature");
-        condition.setRelation("IN");
-        condition.setValue(" , ; | ");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertNull(expr, "Empty IN list should fail-closed");
-    }
-
-    @Test
-    @DisplayName("P11: unknown rule attribute with relation fails closed")
-    void unknownRuleAttributeWithRelation_returnsNull() throws Exception {
-        DeviceManifest.InternalVariable temp = numericVar("temperature", true, 0, 100);
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temp))
-                .workingStates(List.of(DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "sensor_1", "Sensor",
-                List.of("Mode"),
-                Map.of("Mode", List.of("on")),
-                List.of(temp), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("sensor_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("sensor_1");
-        condition.setAttribute("non_existing_attr");
-        condition.setRelation("=");
-        condition.setValue("1");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertNull(expr, "Unknown attribute should fail-closed");
-    }
-
-    @Test
-    @DisplayName("P11: API signal condition with relation maps to api signal var")
-    void apiSignalConditionWithRelation_mapsToApiSignalVar() throws Exception {
+    private DeviceSmvData signalFan() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("auto").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "auto"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("fanAuto").signal(true).endState("auto").build()))
                 .build();
-        DeviceSmvData source = buildSmvData(
-                "fan_1", "Fan",
-                List.of("FanMode"),
-                Map.of("FanMode", List.of("off", "auto")),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("fan_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("fan_1");
-        condition.setTargetType("api");
-        condition.setAttribute("fanAuto");
-        condition.setRelation(" EQ ");
-        condition.setValue(" true ");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertEquals("fan_1.fanAuto_a=TRUE", expr);
+        return buildSmvData("fan_1", "Fan", List.of("FanMode"),
+                Map.of("FanMode", List.of("off", "auto")), List.of(), manifest);
     }
 
-    @Test
-    @DisplayName("P11: API signal condition with non-boolean value fails closed")
-    void apiSignalConditionWithNonBooleanValue_returnsNull() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("auto").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("fanAuto").signal(true).endState("auto").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "fan_1", "Fan",
-                List.of("FanMode"),
-                Map.of("FanMode", List.of("off", "auto")),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("fan_1", source);
-
+    private RuleDto.Condition guardCondition(String deviceName, String targetType, String attribute,
+                                             String relation, String value) {
         RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("fan_1");
-        condition.setTargetType("api");
-        condition.setAttribute("fanAuto");
-        condition.setRelation("=");
-        condition.setValue("on");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertNull(expr, "API signal relation value should be boolean");
+        condition.setDeviceName(deviceName);
+        condition.setTargetType(targetType);
+        condition.setAttribute(attribute);
+        condition.setRelation(relation);
+        condition.setValue(value);
+        return condition;
     }
 
-    @Test
-    @DisplayName("P11: relation-null API condition is an event pulse, not a persistent end state")
-    void apiSignalConditionWithoutRelation_useNextFalse_usesOnlyCurrentPulse() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("auto").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("fanAuto").signal(true).endState("auto").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "fan_1", "Fan",
-                List.of("FanMode"),
-                Map.of("FanMode", List.of("off", "auto")),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("fan_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("fan_1");
-        condition.setTargetType("api");
-        condition.setAttribute("fanAuto");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, false, null, null, 0, null);
-
-        assertEquals("fan_1.fanAuto_a=TRUE", expr);
+    private String assertRuleGuard(DeviceSmvData source, String state, RuleDto.Condition condition, String expected) {
+        SmvGenerationContext context = SmvGenerationContext.collecting();
+        String smv = buildGuardedUnlock(source, state, condition, context);
+        assertFalse(context.warningsSnapshot().generationIssues().stream().anyMatch(issue ->
+                issue.getReasonCode() == ModelGenerationIssueReasonCode.RULE_UNRESOLVABLE_TRIGGER_CONDITION), smv);
+        assertTrue(smv.contains(expected + " & lock_1.Mode=locked: unlocked;"), smv);
+        assertTrue(smv.contains("iot_verify_guard_probe_0 := " + expected + ";"), smv);
+        assertTrue(smv.contains("iot_verify_guard_probe_1 := " + expected + ";"), smv);
+        return smv;
     }
 
-    @Test
-    @DisplayName("P11: next-step API condition uses only the next event pulse")
-    void apiSignalConditionWithoutRelation_useNextTrue_usesOnlyNextPulse() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("auto").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("fanAuto").signal(true).endState("auto").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "fan_1", "Fan",
-                List.of("FanMode"),
-                Map.of("FanMode", List.of("off", "auto")),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("fan_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("fan_1");
-        condition.setTargetType("api");
-        condition.setAttribute("fanAuto");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, true, null, null, 0, null);
-
-        assertEquals("next(fan_1.fanAuto_a)=TRUE", expr);
+    private void assertUnresolvableCondition(DeviceSmvData source, String state, RuleDto.Condition condition) {
+        SmvGenerationContext context = SmvGenerationContext.collecting();
+        String smv = buildGuardedUnlock(source, state, condition, context);
+        var warnings = context.warningsSnapshot();
+        assertEquals(1, warnings.disabledRuleCount(), smv);
+        assertEquals(ModelGenerationIssueReasonCode.RULE_UNRESOLVABLE_TRIGGER_CONDITION,
+                warnings.generationIssues().get(0).getReasonCode());
+        assertTrue(smv.contains("FALSE & lock_1.Mode=locked: unlocked;"), smv);
+        assertTrue(smv.contains("iot_verify_guard_probe_0 := FALSE;"), smv);
+        assertFalse(smv.contains("iot_verify_guard_probe_1 :="), smv);
     }
 
-    @Test
-    @DisplayName("P11: API signal no-mode condition does not fallback to undeclared state var")
-    void apiSignalConditionWithoutRelation_noModeFallback_useNextTrue() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("powerOn").signal(true).endState("on").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "plug_1", "SmartPlug",
-                List.of(),
-                Map.of(),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("plug_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("plug_1");
-        condition.setTargetType("api");
-        condition.setAttribute("powerOn");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, true, null, null, 0, null);
-
-        assertEquals("next(plug_1.powerOn_a)=TRUE", expr);
+    private String buildGuardedUnlock(DeviceSmvData source, String state, RuleDto.Condition condition,
+                                      SmvGenerationContext context) {
+        DeviceSmvData lock = lockAndSensorMap().get("lock_1");
+        DeviceVerificationDto lockDto = device(lock.getVarName(), lock.getTemplateName());
+        lockDto.setState("locked");
+        DeviceVerificationDto sourceDto = device(source.getVarName(), source.getTemplateName());
+        sourceDto.setState(state);
+        RuleDto rule = ruleCommanding("unlock");
+        rule.setConditions(List.of(condition));
+        return mainBuilder.build(1L, List.of(sourceDto, lockDto), null, List.of(rule),
+                Map.of(source.getVarName(), source, lock.getVarName(), lock),
+                AttackScenarioDto.none(), false, context, List.of(
+                        GuardProbe.ofRule(0, GuardProbe.Kind.RULE_CONDITIONS, rule),
+                        GuardProbe.ofCondition(1, GuardProbe.Kind.CONDITION, condition)));
     }
 
     @Test
     @DisplayName("P11: main build uses current expression for relation-null API signal condition")
     void mainBuild_ruleWithNullRelationApiSignal_usesCurrentExpr() {
-        DeviceManifest fanManifest = DeviceManifest.builder()
-                .modes(List.of("FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("auto").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("fanAuto").signal(true).endState("auto").build()))
-                .build();
-        DeviceSmvData fan = buildSmvData(
-                "fan_1", "Fan",
-                List.of("FanMode"),
-                Map.of("FanMode", List.of("off", "auto")),
-                List.of(), fanManifest);
-
-        DeviceManifest lockManifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("locked").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("unlocked").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("unlock").startState("locked").endState("unlocked").build()))
-                .build();
-        DeviceSmvData lock = buildSmvData(
-                "lock_1", "Lock",
-                List.of("Mode"),
-                Map.of("Mode", List.of("locked", "unlocked")),
-                List.of(), lockManifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("fan_1", fan);
-        map.put("lock_1", lock);
-
-        DeviceVerificationDto fanDto = new DeviceVerificationDto();
-        fanDto.setVarName("fan_1");
-        fanDto.setTemplateName("Fan");
-        fanDto.setState("off");
-
-        DeviceVerificationDto lockDto = new DeviceVerificationDto();
-        lockDto.setVarName("lock_1");
-        lockDto.setTemplateName("Lock");
-        lockDto.setState("locked");
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("fan_1");
-        condition.setTargetType("api");
-        condition.setAttribute("fanAuto");
-
-        RuleDto.Command command = new RuleDto.Command();
-        command.setDeviceName("lock_1");
-        command.setAction("unlock");
-
-        RuleDto rule = new RuleDto();
-        rule.setConditions(List.of(condition));
-        rule.setCommand(command);
-
-        String smv = mainBuilder.build(1L, List.of(fanDto, lockDto), List.of(rule), map, AttackScenarioDto.none(), false);
-
-        assertTrue(smv.contains("fan_1.fanAuto_a=TRUE & lock_1.Mode=locked: unlocked;"),
-                "State transition should use the current rule condition/event, got:\n" + smv);
+        String smv = assertRuleGuard(signalFan(), "off", guardCondition("fan_1", "api", "fanAuto", null, null),
+                "fan_1.fanAuto_a=TRUE");
         assertFalse(smv.contains("fan_1.FanMode=auto & lock_1.Mode=locked: unlocked;"),
                 "Remaining in the API end state must not retrigger an event rule, got:\n" + smv);
     }
 
     @Test
-    @DisplayName("P11: multi-mode state tuple with useNext builds conjunction on next(mode)")
-    void stateTupleCondition_useNext_buildsTupleConjunction() throws Exception {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode", "FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("manual;off").trust("trusted").build()))
-                .build();
-        DeviceSmvData source = buildSmvData(
-                "thermostat_1", "Thermostat",
-                List.of("Mode", "FanMode"),
-                Map.of("Mode", List.of("auto", "manual"), "FanMode", List.of("on", "off")),
-                List.of(), manifest);
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("thermostat_1", source);
-
-        RuleDto.Condition condition = new RuleDto.Condition();
-        condition.setDeviceName("thermostat_1");
-        condition.setTargetType("state");
-        condition.setAttribute("state");
-        condition.setRelation("=");
-        condition.setValue("auto;on");
-
-        Method method = SmvMainModuleBuilder.class.getDeclaredMethod(
-                "buildSingleCondition", RuleDto.Condition.class, Map.class, boolean.class, String.class, Integer.class, int.class, ParameterizationConfig.class);
-        method.setAccessible(true);
-        String expr = (String) method.invoke(mainBuilder, condition, map, true, null, null, 0, null);
-
-        assertEquals("(next(thermostat_1.Mode)=auto & next(thermostat_1.FanMode)=on)", expr);
-    }
-
-    @Test
     @DisplayName("P11: self-referencing state condition in target transition avoids recursive next")
     void selfReferencingStateCondition_targetTransition_noRecursiveNext() {
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("turnOn").startState("off").endState("on").build()))
-                .build();
-
-        DeviceSmvData fan = buildSmvData(
-                "fan_1", "Fan",
-                List.of("Mode"),
-                Map.of("Mode", List.of("off", "on")),
-                List.of(), manifest);
+        DeviceSmvData fan = switchActuator("fan_1", "Fan", "Mode");
 
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("fan_1", fan);
@@ -2299,7 +1938,7 @@ class SmvGeneratorFixesTest {
         rule.setConditions(List.of(condition));
         rule.setCommand(command);
 
-        String smv = mainBuilder.build(1L, List.of(fanDto), List.of(rule), map, AttackScenarioDto.none(), false);
+        String smv = buildMain(1L, List.of(fanDto), List.of(rule), map, AttackScenarioDto.none(), false);
         assertTrue(smv.contains("fan_1.Mode=off"), "Rule guard should use current state on self-reference");
         assertFalse(smv.contains("next(fan_1.Mode)=off"),
                 "Self-referencing target transition must not read next(fan_1.Mode) recursively");
@@ -2322,9 +1961,7 @@ class SmvGeneratorFixesTest {
 
         DeviceManifest lightManifest = DeviceManifest.builder()
                 .modes(List.of("Power"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .apis(List.of(DeviceManifest.API.builder().name("turnOn").startState("off").endState("on").build()))
                 .build();
         DeviceSmvData light1 = buildSmvData(
@@ -2372,7 +2009,7 @@ class SmvGeneratorFixesTest {
         rule.setCommand(command);
 
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(1L, List.of(sensorDto, lightDto1, lightDto2), List.of(rule), map, AttackScenarioDto.none(), false));
+                () -> buildMain(1L, List.of(sensorDto, lightDto1, lightDto2), List.of(rule), map, AttackScenarioDto.none(), false));
         assertEquals("DEVICE_NOT_FOUND", ex.getErrorCategory());
     }
 
@@ -2431,9 +2068,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(temperature))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .transitions(List.of(DeviceManifest.Transition.builder()
                         .name("t1")
                         .startState("off")
@@ -2459,7 +2094,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("Heater");
         dto.setState("off");
 
-        String smv = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String smv = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
         assertTrue(smv.contains("heater_1.temperature>=30"), "Trigger relation should be normalized to >=, got:\n" + smv);
         assertFalse(smv.contains("heater_1.temperatureGTE30"), "Raw relation keyword should not appear in output");
     }
@@ -2468,9 +2103,7 @@ class SmvGeneratorFixesTest {
     @DisplayName("P11: API signal transition on no-mode device is rejected")
     void apiSignalTransition_noModeDevice_isRejected() {
         DeviceManifest manifest = DeviceManifest.builder()
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("powerOn").signal(true).startState("off").endState("on").build()))
                 .build();
@@ -2490,7 +2123,7 @@ class SmvGeneratorFixesTest {
         dto.setState("on");
 
         SmvGenerationException ex = assertThrows(SmvGenerationException.class,
-                () -> mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false));
+                () -> buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false));
         assertEquals("TEMPLATE_INVALID", ex.getErrorCategory());
         assertTrue(ex.getMessage().contains("powerOn"));
     }
@@ -2533,7 +2166,7 @@ class SmvGeneratorFixesTest {
         map.put("clock_1", d1);
         map.put("clock_2", d2);
 
-        String smvText = mainBuilder.build(1L, List.of(dto1, dto2), List.of(), map, AttackScenarioDto.none(), false);
+        String smvText = buildMain(1L, List.of(dto1, dto2), List.of(), map, AttackScenarioDto.none(), false);
         assertTrue(smvText.contains("a_time: 0..23;"), "Environment variable must still be declared globally");
         assertFalse(smvText.contains("init(a_time)"),
                 "Only the top-level environment pool may initialize shared environment variables");
@@ -2566,7 +2199,7 @@ class SmvGeneratorFixesTest {
 
         String smvText = mainBuilder.build(1L, List.of(dto),
                 List.of(new BoardEnvironmentVariableDto("time", "10", "trusted", "public")),
-                List.of(), map, AttackScenarioDto.none(), false, SmvGenerationContext.noop());
+                List.of(), map, AttackScenarioDto.none(), false, SmvGenerationContext.noop(), List.of());
         assertTrue(smvText.contains("a_time: 0..23;"), "Environment variable must be declared globally");
         assertTrue(smvText.contains("init(a_time) := 10;"),
                 "Explicit environment pool value must initialize a_time");
@@ -2674,7 +2307,7 @@ class SmvGeneratorFixesTest {
 
         SmvGenerationException ex = assertThrows(SmvGenerationException.class, () -> mainBuilder.build(1L, List.of(dto),
                 List.of(new BoardEnvironmentVariableDto("mystery", "abc", "trusted", "public")),
-                List.of(), map, AttackScenarioDto.none(), false, SmvGenerationContext.noop()));
+                List.of(), map, AttackScenarioDto.none(), false, SmvGenerationContext.noop(), List.of()));
         assertEquals("TEMPLATE_INVALID", ex.getErrorCategory());
         assertTrue(ex.getMessage().contains("mystery"));
     }
@@ -2686,9 +2319,7 @@ class SmvGeneratorFixesTest {
     void specStateTupleCondition_keepsTupleConjunction() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("manual;off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("auto;on", "manual;off"))
                 .build();
         DeviceSmvData smv = buildSmvData("thermostat_1", "Thermostat",
                 List.of("Mode", "FanMode"),
@@ -2712,7 +2343,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("(thermostat_1.Mode=auto & thermostat_1.FanMode=on)"),
                 "State tuple should compile to conjunction, got:\n" + result);
     }
@@ -2722,9 +2353,7 @@ class SmvGeneratorFixesTest {
     void specStateTupleInCondition_preservesTupleSegments() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "FanMode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("auto;on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("manual;off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("auto;on", "manual;off"))
                 .build();
         DeviceSmvData smv = buildSmvData("thermostat_1", "Thermostat",
                 List.of("Mode", "FanMode"),
@@ -2749,7 +2378,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("((thermostat_1.Mode=auto & thermostat_1.FanMode=on) | "
                         + "(thermostat_1.Mode=manual & thermostat_1.FanMode=off))"),
                 "State tuple IN should preserve semicolon-separated tuple segments, got:\n" + result);
@@ -2760,9 +2389,7 @@ class SmvGeneratorFixesTest {
     void specModeCondition_compilesToModeComparison() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "State"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("home;idle").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("sleep;idle").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("home;idle", "sleep;idle"))
                 .build();
         DeviceSmvData smv = buildSmvData("home_mode", "Home Mode",
                 List.of("Mode", "State"),
@@ -2787,7 +2414,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("home_mode.Mode=sleep"),
                 "Mode condition should compile to explicit mode comparison, got:\n" + result);
     }
@@ -2797,9 +2424,7 @@ class SmvGeneratorFixesTest {
     void safetySpec_modeCondition_injectsModeTrust() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode", "State"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("home;idle").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("sleep;idle").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("home;idle", "sleep;idle"))
                 .build();
         DeviceSmvData smv = buildSmvData("home_mode", "Home Mode",
                 List.of("Mode", "State"),
@@ -2824,7 +2449,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("home_mode.Mode=sleep"),
                 "Safety spec should keep the mode comparison, got:\n" + result);
         assertTrue(result.contains("home_mode.trust_Mode_sleep=untrusted"),
@@ -2836,9 +2461,7 @@ class SmvGeneratorFixesTest {
     void specNonCanonicalDeviceReference_isSkippedWithReadableIssue() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on", "off"))
                 .build();
         DeviceSmvData sensor1 = buildSmvData(
                 "sensor_1", "Sensor",
@@ -2925,8 +2548,7 @@ class SmvGeneratorFixesTest {
                 DeviceManifest.builder()
                         .modes(List.of("Mode"))
                         .internalVariables(List.of(numericVar("localOnly", true, 0, 100)))
-                        .workingStates(List.of(
-                                DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                        .workingStates(trustedWorkingStates("on"))
                         .build());
         smv.getCurrentModeStates().put("Mode", "on");
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
@@ -2961,9 +2583,7 @@ class SmvGeneratorFixesTest {
     void specStateValueAmbiguousAcrossModes_skipsWithActionableIssue() {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("M1", "M2"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on;off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("off;on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on;off", "off;on"))
                 .build();
         DeviceSmvData smv = buildSmvData("dev_1", "Device",
                 List.of("M1", "M2"),
@@ -3033,7 +2653,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("a_temperature>30"),
                 "Environment variable should be referenced as a_temperature, got:\n" + result);
         assertFalse(result.contains("sensor_1.temperature>30"),
@@ -3089,9 +2709,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest manifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of())
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("off").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("off", "on"))
                 .build();
         DeviceSmvData smv = buildSmvData("light_1", "Light",
                 List.of("Mode"), Map.of("Mode", List.of("off", "on")),
@@ -3113,7 +2731,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), Map.of("light_1", smv), false);
+        String result = specBuilder.build(List.of(spec), Map.of("light_1", smv), false, SmvGenerationContext.noop());
 
         assertTrue(result.contains("light_1.Mode=off & light_1.trust_Mode_off=untrusted"), result);
         assertTrue(result.contains("light_1.Mode=on & light_1.trust_Mode_on=untrusted"), result);
@@ -3154,7 +2772,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("a_temperature>30"),
                 "Relation with spaces should normalize to >, got:\n" + result);
     }
@@ -3239,7 +2857,7 @@ class SmvGeneratorFixesTest {
         spec.setIfConditions(List.of());
         spec.setThenConditions(List.of());
 
-        String result = specBuilder.build(List.of(spec), map, false);
+        String result = specBuilder.build(List.of(spec), map, false, SmvGenerationContext.noop());
         assertTrue(result.contains("a_temperature>30"),
                 "Safety spec should keep env expression on a_temperature, got:\n" + result);
         assertTrue(result.contains("sensor_1.trust_temperature=untrusted"),
@@ -3291,7 +2909,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("TestDev");
         dto.setState("on;fast");
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
 
         assertNotNull(result);
         // The rate is a DEFINE inside the device module, so assert there rather than on main.
@@ -3345,7 +2963,7 @@ class SmvGeneratorFixesTest {
         dto.setTemplateName("TestDev2");
         dto.setState("on;fast");
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
 
         // The all-empty state should NOT produce a guardless ": error;" line
         assertFalse(result.matches("(?s).*\\t\\t:\\s*error;.*"),
@@ -3421,48 +3039,49 @@ class SmvGeneratorFixesTest {
                 "Case-variant trust values ('Trusted' vs 'trusted') should not cause a conflict");
     }
 
+    private enum TemperatureEffect {
+        NONE, DECLARED_DYNAMICS, IMPACT_WITHOUT_STATE_DYNAMICS
+    }
+
+    private String temperatureTransition(String naturalRate, TemperatureEffect effect, AttackScenarioDto attackScenario) {
+        DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 15, 35);
+        temperature.setNaturalChangeRate(naturalRate);
+        boolean impactsTemperature = effect != TemperatureEffect.NONE;
+        String deviceId = impactsTemperature ? "ac_1" : "dev_1";
+        String templateName = impactsTemperature ? "AC" : "DEV";
+        String commandName = impactsTemperature ? "setOn" : "turnOn";
+
+        var state = DeviceManifest.WorkingState.builder().name("on").trust("trusted");
+        if (effect == TemperatureEffect.DECLARED_DYNAMICS) {
+            state.dynamics(List.of(DeviceManifest.Dynamic.builder()
+                    .variableName("temperature").changeRate("5").build()));
+        }
+        var manifest = DeviceManifest.builder()
+                .modes(List.of("Mode"))
+                .internalVariables(List.of(temperature))
+                .workingStates(List.of(state.build()))
+                .apis(List.of(DeviceManifest.API.builder()
+                        .name(commandName).startState("on").endState("on").build()));
+        if (impactsTemperature) manifest.impactedVariables(List.of("temperature"));
+
+        DeviceSmvData smv = buildSmvData(deviceId, templateName, List.of("Mode"), Map.of("Mode", List.of("on")),
+                List.of(temperature), manifest.build());
+        smv.getCurrentModeStates().put("Mode", "on");
+        smv.getEnvVariables().put("temperature", temperature);
+        if (impactsTemperature) smv.getImpactedVariables().add("temperature");
+
+        DeviceVerificationDto dto = device(deviceId, templateName);
+        dto.setState("on");
+        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
+        map.put(deviceId, smv);
+        return buildMain(1L, List.of(dto), List.of(), map, attackScenario, false);
+    }
+
     @Test
     @DisplayName("A10: numeric env next() candidates are clamped and keep attack range consistent")
     void numericEnvTransition_attackRangeAndCandidatesClamped() {
-        DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 15, 35);
-        temperature.setNaturalChangeRate("[-2,3]");
-
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temperature))
-                .impactedVariables(List.of("temperature"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder()
-                                .name("on")
-                                .trust("trusted")
-                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
-                                        .variableName("temperature")
-                                        .changeRate("5")
-                                        .build()))
-                                .build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("setOn")
-                        .startState("on")
-                        .endState("on")
-                        .build()))
-                .build();
-
-        DeviceSmvData smv = buildSmvData("ac_1", "AC",
-                List.of("Mode"), Map.of("Mode", List.of("on")),
-                List.of(temperature), manifest);
-        smv.getCurrentModeStates().put("Mode", "on");
-        smv.getEnvVariables().put("temperature", temperature);
-        smv.getImpactedVariables().add("temperature");
-
-        DeviceVerificationDto dto = new DeviceVerificationDto();
-        dto.setVarName("ac_1");
-        dto.setTemplateName("AC");
-        dto.setState("on");
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("ac_1", smv);
-
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.anyUpToBudget(50), false);
+        String result = temperatureTransition("[-2,3]", TemperatureEffect.DECLARED_DYNAMICS,
+                AttackScenarioDto.anyUpToBudget(50));
 
         assertTrue(result.contains("a_temperature: 15..35;"),
                 "Attack mode must preserve the environment domain declared by the template, got:\n" + result);
@@ -3482,42 +3101,7 @@ class SmvGeneratorFixesTest {
     @Test
     @DisplayName("A10-boundary: extreme NCR boundary branch candidates are clamped")
     void numericEnvTransition_extremeNcr_boundaryBranchesClamped() {
-        // NCR=[-30,30] on range 15..35 — boundary candidates would overflow without clamp
-        DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 15, 35);
-        temperature.setNaturalChangeRate("[-30,30]");
-
-        // Device that does NOT impact temperature (no dynamics for temperature)
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temperature))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder()
-                                .name("on")
-                                .trust("trusted")
-                                .build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("turnOn")
-                        .startState("on")
-                        .endState("on")
-                        .build()))
-                .build();
-
-        DeviceSmvData smv = buildSmvData("dev_1", "DEV",
-                List.of("Mode"), Map.of("Mode", List.of("on")),
-                List.of(temperature), manifest);
-        smv.getCurrentModeStates().put("Mode", "on");
-        smv.getEnvVariables().put("temperature", temperature);
-        // No impactedVariables → no rate expression → exercises no-rate boundary branches
-
-        DeviceVerificationDto dto = new DeviceVerificationDto();
-        dto.setVarName("dev_1");
-        dto.setTemplateName("DEV");
-        dto.setState("on");
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("dev_1", smv);
-
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = temperatureTransition("[-30,30]", TemperatureEffect.NONE, AttackScenarioDto.none());
 
         // A rate far wider than the domain still yields only in-domain candidates, because every
         // admissible delta is clamped. Clamping is what pins both boundaries, so the generator emits
@@ -3534,9 +3118,7 @@ class SmvGeneratorFixesTest {
                     "declared rate [-30, 30] must admit and clamp delta " + delta + ", got:\n" + result);
         }
 
-        temperature.setNaturalChangeRate("[2,3]");
-        String increasingResult = mainBuilder.build(
-                1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String increasingResult = temperatureTransition("[2,3]", TemperatureEffect.NONE, AttackScenarioDto.none());
         // "[2, 3]" excludes 0, so the value must rise every step: no stutter candidate is emitted.
         assertTrue(increasingResult.contains("TRUE: {max(15, min(35, a_temperature + 2)), "
                         + "max(15, min(35, a_temperature + 3))}"),
@@ -3547,46 +3129,7 @@ class SmvGeneratorFixesTest {
     @Test
     @DisplayName("A10-boundary: impacted environment combines every declared rate before clamping")
     void numericEnvTransition_withRate_extremeNcr_combinesDeclaredRatesAtBoundaries() {
-        // NCR=[-30,30] on range 15..35, WITH a device that impacts temperature
-        DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 15, 35);
-        temperature.setNaturalChangeRate("[-30,30]");
-
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temperature))
-                .impactedVariables(List.of("temperature"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder()
-                                .name("on")
-                                .trust("trusted")
-                                .dynamics(List.of(DeviceManifest.Dynamic.builder()
-                                        .variableName("temperature")
-                                        .changeRate("5")
-                                        .build()))
-                                .build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("setOn")
-                        .startState("on")
-                        .endState("on")
-                        .build()))
-                .build();
-
-        DeviceSmvData smv = buildSmvData("ac_1", "AC",
-                List.of("Mode"), Map.of("Mode", List.of("on")),
-                List.of(temperature), manifest);
-        smv.getCurrentModeStates().put("Mode", "on");
-        smv.getEnvVariables().put("temperature", temperature);
-        smv.getImpactedVariables().add("temperature");
-
-        DeviceVerificationDto dto = new DeviceVerificationDto();
-        dto.setVarName("ac_1");
-        dto.setTemplateName("AC");
-        dto.setState("on");
-
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("ac_1", smv);
-
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = temperatureTransition("[-30,30]", TemperatureEffect.DECLARED_DYNAMICS, AttackScenarioDto.none());
 
         assertFalse(result.contains("a_temperature=35-(ac_1.temperature_rate)"),
                 "declared dynamics should not be replaced by a special upper-boundary branch, got:\n" + result);
@@ -3607,32 +3150,7 @@ class SmvGeneratorFixesTest {
     @Test
     @DisplayName("A10-boundary: explicit zero natural rate uses only the declared device effect")
     void numericEnvTransition_withRate_zeroNcr_usesOnlyDeclaredDeviceEffect() {
-        DeviceManifest.InternalVariable temperature = numericVar("temperature", false, 15, 35);
-        temperature.setNaturalChangeRate("0");
-
-        DeviceManifest manifest = DeviceManifest.builder()
-                .modes(List.of("Mode"))
-                .internalVariables(List.of(temperature))
-                .impactedVariables(List.of("temperature"))
-                .workingStates(List.of(DeviceManifest.WorkingState.builder()
-                        .name("on").trust("trusted").build()))
-                .apis(List.of(DeviceManifest.API.builder()
-                        .name("setOn").startState("on").endState("on").build()))
-                .build();
-
-        DeviceSmvData smv = buildSmvData("ac_1", "AC",
-                List.of("Mode"), Map.of("Mode", List.of("on")),
-                List.of(temperature), manifest);
-        smv.getCurrentModeStates().put("Mode", "on");
-        smv.getEnvVariables().put("temperature", temperature);
-        smv.getImpactedVariables().add("temperature");
-
-        DeviceVerificationDto dto = device("ac_1", "AC");
-        dto.setState("on");
-        Map<String, DeviceSmvData> map = new LinkedHashMap<>();
-        map.put("ac_1", smv);
-
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = temperatureTransition("0", TemperatureEffect.IMPACT_WITHOUT_STATE_DYNAMICS, AttackScenarioDto.none());
 
         assertFalse(result.contains("a_temperature=35-(ac_1.temperature_rate)"), result);
         assertFalse(result.contains("a_temperature=15-(ac_1.temperature_rate)"), result);
@@ -3679,7 +3197,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("dev_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(dto), List.of(), map, AttackScenarioDto.none(), false);
 
         // A declared interval constrains the per-step change, so every integer in [-8, 8] is an
         // admissible next value and each candidate is clamped to the declared domain. Clamping alone
@@ -3732,7 +3250,7 @@ class SmvGeneratorFixesTest {
         Map<String, DeviceSmvData> map = new LinkedHashMap<>();
         map.put("dev_1", smv);
 
-        String result = mainBuilder.build(1L, List.of(device), List.of(), map, AttackScenarioDto.none(), false);
+        String result = buildMain(1L, List.of(device), List.of(), map, AttackScenarioDto.none(), false);
 
         assertFalse(result.contains("next(dev_1.waterTemperature_rate)"),
                 "Local-only dynamics should not create environment-impact rate variables, got:\n" + result);
@@ -3742,7 +3260,7 @@ class SmvGeneratorFixesTest {
                 "WorkingState.Dynamics.ChangeRate should update local numeric variable directly, got:\n" + result);
 
         var.setNaturalChangeRate("[2,3]");
-        String sameDirection = mainBuilder.build(
+        String sameDirection = buildMain(
                 1L, List.of(device), List.of(), map, AttackScenarioDto.none(), false);
         // "[2, 3]" excludes 0, so each declared drift combines with the state's ChangeRate of +1 and
         // there is no dynamic-only candidate: the natural change is mandatory.
@@ -3797,7 +3315,7 @@ class SmvGeneratorFixesTest {
         // Must not throw, and the impact rate must exist as a DEFINE over the current state so the
         // device's effect reaches the environment in the same step rather than one step later.
         String result = assertDoesNotThrow(() ->
-                mainBuilder.build(1L, List.of(device), List.of(), map, AttackScenarioDto.none(), false));
+                buildMain(1L, List.of(device), List.of(), map, AttackScenarioDto.none(), false));
         assertNotNull(result);
 
         String deviceModule = deviceBuilder.build(smv, false, false);
@@ -3878,7 +3396,7 @@ class SmvGeneratorFixesTest {
         dto.setState("off");
 
         validator.validate(Map.of("presence_1", smv));
-        String result = mainBuilder.build(
+        String result = buildMain(
                 1L, List.of(dto), List.of(), Map.of("presence_1", smv), AttackScenarioDto.none(), false);
 
         assertTrue(result.contains("presence_1.Power=off: FALSE;"), result);
@@ -3905,7 +3423,7 @@ class SmvGeneratorFixesTest {
         DeviceVerificationDto dto = device("device_1", "Device");
 
         validator.validate(Map.of("device_1", smv));
-        String result = mainBuilder.build(
+        String result = buildMain(
                 1L, List.of(dto), List.of(), Map.of("device_1", smv), AttackScenarioDto.none(), false);
 
         assertTrue(result.contains("TRUE: device_1.phase;"), result);
@@ -3948,9 +3466,7 @@ class SmvGeneratorFixesTest {
     private Map<String, DeviceSmvData> lockAndSensorMap() {
         DeviceManifest lockManifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("locked").trust("trusted").build(),
-                        DeviceManifest.WorkingState.builder().name("unlocked").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("locked", "unlocked"))
                 .apis(List.of(DeviceManifest.API.builder()
                         .name("unlock").startState("locked").endState("unlocked").build()))
                 .build();
@@ -3963,8 +3479,7 @@ class SmvGeneratorFixesTest {
         DeviceManifest sensorManifest = DeviceManifest.builder()
                 .modes(List.of("Mode"))
                 .internalVariables(List.of(numericVar("temperature", true, 0, 100)))
-                .workingStates(List.of(
-                        DeviceManifest.WorkingState.builder().name("on").trust("trusted").build()))
+                .workingStates(trustedWorkingStates("on"))
                 .build();
         DeviceSmvData sensor = buildSmvData("sensor_1", "Sensor", List.of("Mode"),
                 Map.of("Mode", List.of("on")),
@@ -4013,8 +3528,8 @@ class SmvGeneratorFixesTest {
         rule.getConditions().get(0).setAttribute("  temperature  ");
 
         SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smv = mainBuilder.build(1L, lockAndSensorDtos(), List.of(rule),
-                lockAndSensorMap(), AttackScenarioDto.none(), false, context);
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(rule),
+                lockAndSensorMap(), AttackScenarioDto.none(), false, context, List.of());
 
         assertEquals(0, context.warningsSnapshot().disabledRuleCount(),
                 "Admission resolves the attribute trimmed, so generation must too, got:\n" + smv);
@@ -4025,8 +3540,8 @@ class SmvGeneratorFixesTest {
     @DisplayName("An unresolvable rule command action is reported, not silently dropped")
     void unresolvableCommandAction_isRecordedAsDisabledRule() {
         SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smv = mainBuilder.build(1L, lockAndSensorDtos(), List.of(ruleCommanding("open sesame")),
-                lockAndSensorMap(), AttackScenarioDto.none(), false, context);
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(ruleCommanding("open sesame")),
+                lockAndSensorMap(), AttackScenarioDto.none(), false, context, List.of());
 
         SmvGenerationContext.WarningSnapshot snapshot = context.warningsSnapshot();
         assertEquals(1, snapshot.disabledRuleCount(),
@@ -4037,11 +3552,31 @@ class SmvGeneratorFixesTest {
     }
 
     @Test
+    void undeclaredModeConditionDisablesTheRule() {
+        RuleDto rule = ruleCommanding("unlock");
+        RuleDto.Condition condition = rule.getConditions().get(0);
+        condition.setDeviceName("lock_1");
+        condition.setTargetType("mode");
+        condition.setAttribute("Mode_locked");
+        condition.setRelation("=");
+        condition.setValue("locked");
+
+        SmvGenerationContext context = SmvGenerationContext.collecting();
+        mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(rule), lockAndSensorMap(),
+                AttackScenarioDto.none(), false, context, List.of());
+
+        var warnings = context.warningsSnapshot();
+        assertEquals(1, warnings.disabledRuleCount());
+        assertEquals(ModelGenerationIssueReasonCode.RULE_UNRESOLVABLE_TRIGGER_CONDITION,
+                warnings.generationIssues().get(0).getReasonCode());
+    }
+
+    @Test
     @DisplayName("A rule command action with surrounding whitespace still resolves to its API")
     void paddedCommandAction_resolvesLikeAdmissionValidation() {
         SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smv = mainBuilder.build(1L, lockAndSensorDtos(), List.of(ruleCommanding("  unlock  ")),
-                lockAndSensorMap(), AttackScenarioDto.none(), false, context);
+        String smv = mainBuilder.build(1L, lockAndSensorDtos(), null, List.of(ruleCommanding("  unlock  ")),
+                lockAndSensorMap(), AttackScenarioDto.none(), false, context, List.of());
 
         assertEquals(0, context.warningsSnapshot().disabledRuleCount(),
                 "Admission compares trimmed, so generation must too, got:\n" + smv);

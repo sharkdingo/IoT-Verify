@@ -10,8 +10,6 @@ import cn.edu.nju.Iot_Verify.util.SmvConstants;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
-import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
-import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
@@ -26,9 +24,18 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.canReadConditionValue;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findDeclaredVariableIn;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasContent;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasSignalApi;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.isEnvironmentVariable;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateEnumRelation;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateRuntimePrivacies;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateRuntimeVariables;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateVariableValues;
 
 final class NusmvRequestValidator {
 
@@ -102,8 +109,15 @@ final class NusmvRequestValidator {
                             "currentStatePrivacy is only valid for device templates with modes");
                 }
             }
-            validateDeviceVariables(device.getVariables(), smv, prefix + ".variables", errors);
-            validateDevicePrivacies(device.getPrivacies(), smv, prefix + ".privacies", errors);
+            Function<String, DeviceManifest.InternalVariable> findVariable =
+                    name -> conditionVariable(smv, name);
+            validateRuntimeVariables(errors, prefix + ".variables", device.getVariables(), findVariable,
+                    (trustField, trust) -> validateLiteralValues(errors, trustField, "=", trust,
+                            Set.of("trusted", "untrusted"), "trusted or untrusted"),
+                    "Environment variable must be supplied through environmentVariables: ");
+            validateRuntimePrivacies(errors, prefix + ".privacies", device.getPrivacies(), findVariable,
+                    (name, declaration) -> "Environment variable privacy must be supplied through environmentVariables: "
+                            + declaration.getName());
         }
     }
 
@@ -191,6 +205,21 @@ final class NusmvRequestValidator {
     static void validateEnvironmentVariables(List<BoardEnvironmentVariableDto> environmentVariables,
                                              Map<String, DeviceSmvData> deviceSmvMap,
                                              Map<String, String> errors) {
+        validateEnvironmentEntries(environmentVariables, deviceSmvMap, errors, true);
+    }
+
+    /** Validate caller-authored overrides before default merging can collapse or replace them. */
+    static void validateEnvironmentVariableOverrides(
+            List<BoardEnvironmentVariableDto> environmentVariables,
+            Map<String, DeviceSmvData> deviceSmvMap,
+            Map<String, String> errors) {
+        validateEnvironmentEntries(environmentVariables, deviceSmvMap, errors, false);
+    }
+
+    private static void validateEnvironmentEntries(List<BoardEnvironmentVariableDto> environmentVariables,
+                                                   Map<String, DeviceSmvData> deviceSmvMap,
+                                                   Map<String, String> errors,
+                                                   boolean completePool) {
         Map<String, DeviceManifest.InternalVariable> required = NusmvEnvironmentPool.collectRequired(deviceSmvMap);
         Set<String> seen = new HashSet<>();
         Set<String> provided = new HashSet<>();
@@ -226,150 +255,28 @@ final class NusmvRequestValidator {
                 validateLiteralValues(errors, prefix + ".privacy", "=", variable.getPrivacy(),
                         Set.of("public", "private"), "public or private");
             }
-            String value = trimToNull(variable.getValue());
-            if (hasValueDomain(definition) && value == null) {
-                putError(errors, prefix + ".value", "Environment variable value is required for " + name);
-            } else if (value != null) {
+            String value = variable.getValue();
+            if (completePool) {
+                value = trimToNull(value);
+                if (hasValueDomain(definition) && value == null) {
+                    putError(errors, prefix + ".value", "Environment variable value is required for " + name);
+                }
+            } else if (value != null && !hasText(value)) {
+                putError(errors, prefix + ".value", "Environment variable value cannot be blank when provided");
+                continue;
+            }
+            if (value != null) {
                 validateVariableValues(errors, prefix + ".value", definition, "=", value);
             }
         }
 
+        if (!completePool) {
+            return;
+        }
         for (String requiredName : required.keySet()) {
             if (!provided.contains(requiredName)) {
                 putError(errors, "environmentVariables",
                         "Missing environment variable required by the board: " + requiredName);
-            }
-        }
-    }
-
-    /** Validate caller-authored overrides before default merging can collapse or replace them. */
-    static void validateEnvironmentVariableOverrides(
-            List<BoardEnvironmentVariableDto> environmentVariables,
-            Map<String, DeviceSmvData> deviceSmvMap,
-            Map<String, String> errors) {
-        Map<String, DeviceManifest.InternalVariable> required = NusmvEnvironmentPool.collectRequired(deviceSmvMap);
-        Set<String> seen = new HashSet<>();
-        List<BoardEnvironmentVariableDto> values = environmentVariables == null
-                ? List.of() : environmentVariables;
-        for (int i = 0; i < values.size(); i++) {
-            BoardEnvironmentVariableDto variable = values.get(i);
-            String prefix = "environmentVariables[" + i + "]";
-            if (variable == null) {
-                putError(errors, prefix, "Environment variable item cannot be null");
-                continue;
-            }
-            String name = trimToNull(variable.getName());
-            if (name == null) {
-                putError(errors, prefix + ".name", "Environment variable name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                putError(errors, prefix + ".name", "Duplicate environment variable: " + name);
-            }
-            DeviceManifest.InternalVariable definition = required.get(name);
-            if (definition == null) {
-                putError(errors, prefix + ".name",
-                        "Environment variable is not required by the current board: " + name);
-                continue;
-            }
-            if (variable.getTrust() != null) {
-                validateLiteralValues(errors, prefix + ".trust", "=", variable.getTrust(),
-                        Set.of("trusted", "untrusted"), "trusted or untrusted");
-            }
-            if (variable.getPrivacy() != null) {
-                validateLiteralValues(errors, prefix + ".privacy", "=", variable.getPrivacy(),
-                        Set.of("public", "private"), "public or private");
-            }
-            if (variable.getValue() != null && !hasText(variable.getValue())) {
-                putError(errors, prefix + ".value", "Environment variable value cannot be blank when provided");
-            } else if (hasText(variable.getValue())) {
-                validateVariableValues(errors, prefix + ".value", definition, "=", variable.getValue());
-            }
-        }
-    }
-
-
-    private static void validateDeviceVariables(List<VariableStateDto> variables,
-                                                DeviceSmvData smv,
-                                                String field,
-                                                Map<String, String> errors) {
-        if (variables == null) {
-            return;
-        }
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < variables.size(); i++) {
-            VariableStateDto variable = variables.get(i);
-            String prefix = field + "[" + i + "]";
-            if (variable == null) {
-                putError(errors, prefix, "Variable item cannot be null");
-                continue;
-            }
-            String name = trimToNull(variable.getName());
-            String value = trimToNull(variable.getValue());
-            if (name == null) {
-                putError(errors, prefix + ".name", "Variable name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                putError(errors, prefix + ".name", "Duplicate variable override: " + name);
-            }
-            if (value == null) {
-                putError(errors, prefix + ".value", "Variable value is required");
-            }
-            if (variable.getTrust() != null) {
-                validateLiteralValues(errors, prefix + ".trust", "=", variable.getTrust(),
-                        Set.of("trusted", "untrusted"), "trusted or untrusted");
-            }
-
-            DeviceManifest.InternalVariable manifestVariable = internalVariable(smv, name);
-            if (manifestVariable == null) {
-                putError(errors, prefix + ".name", "Unknown runtime variable for device template: " + name);
-            } else if (isEnvironmentVariable(manifestVariable)) {
-                putError(errors, prefix + ".name",
-                        "Environment variable must be supplied through environmentVariables: " + name);
-            } else if (value != null) {
-                validateVariableValues(errors, prefix + ".value", manifestVariable, "=", value);
-            }
-        }
-    }
-
-    private static void validateDevicePrivacies(List<PrivacyStateDto> privacies,
-                                                DeviceSmvData smv,
-                                                String field,
-                                                Map<String, String> errors) {
-        if (privacies == null) {
-            return;
-        }
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < privacies.size(); i++) {
-            PrivacyStateDto privacy = privacies.get(i);
-            String prefix = field + "[" + i + "]";
-            if (privacy == null) {
-                putError(errors, prefix, "Privacy item cannot be null");
-                continue;
-            }
-            String name = trimToNull(privacy.getName());
-            String value = trimToNull(privacy.getPrivacy());
-            if (name == null) {
-                putError(errors, prefix + ".name", "Privacy target name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                putError(errors, prefix + ".name", "Duplicate privacy override: " + name);
-            }
-            if (value == null) {
-                putError(errors, prefix + ".privacy", "Privacy value is required");
-            } else {
-                validateLiteralValues(errors, prefix + ".privacy", "=", value,
-                        Set.of("public", "private"), "public or private");
-            }
-            DeviceManifest.InternalVariable manifestVariable = internalVariable(smv, name);
-            if (manifestVariable == null) {
-                putError(errors, prefix + ".name",
-                        "Unknown device-local variable privacy target: " + name);
-            } else if (isEnvironmentVariable(manifestVariable)) {
-                putError(errors, prefix + ".name",
-                        "Environment variable privacy must be supplied through environmentVariables: " + manifestVariable.getName());
             }
         }
     }
@@ -610,7 +517,7 @@ final class NusmvRequestValidator {
         }
         switch (targetType) {
             case "variable" -> {
-                DeviceManifest.InternalVariable variable = internalVariable(smv, attribute);
+                DeviceManifest.InternalVariable variable = conditionVariable(smv, attribute);
                 if (variable == null) {
                     putError(errors, prefix + ".attribute",
                             "Unknown internal variable for rule condition: " + attribute);
@@ -907,15 +814,6 @@ final class NusmvRequestValidator {
         }
     }
 
-    private static void validateEnumRelation(Map<String, String> errors,
-                                             String field,
-                                             String relation,
-                                             String label) {
-        if (!SmvRelationUtils.isEnumRelation(relation)) {
-            putError(errors, field, label + " conditions support only =, !=, IN, and NOT_IN");
-        }
-    }
-
     private static void validateStateValues(Map<String, String> errors,
                                             String field,
                                             DeviceSmvData smv,
@@ -996,41 +894,6 @@ final class NusmvRequestValidator {
         }
     }
 
-    private static void validateVariableValues(Map<String, String> errors,
-                                               String field,
-                                               DeviceManifest.InternalVariable variable,
-                                               String relation,
-                                               String rawValue) {
-        if (variable == null || !hasText(rawValue)) {
-            return;
-        }
-        List<String> candidates = ("in".equals(relation) || "not in".equals(relation))
-                ? SmvRelationUtils.splitRuleValues(rawValue)
-                : List.of(rawValue.trim());
-        if (candidates.isEmpty()) {
-            putError(errors, field, "Variable condition value cannot be empty");
-            return;
-        }
-        if (("=".equals(relation) || "!=".equals(relation)) && candidates.size() != 1) {
-            putError(errors, field, "Variable relation '" + relation + "' requires exactly one value");
-            return;
-        }
-
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            validateEnumRelation(errors, field, relation, "enum variable");
-        }
-        ManifestConditionSemantics.ValueIssue issue =
-                ManifestConditionSemantics.firstInvalidVariableValue(variable, candidates);
-        if (issue == null) return;
-        String message = switch (issue.error()) {
-            case UNKNOWN_ENUM -> "Illegal enum value for variable '" + variable.getName() + "': " + issue.candidate();
-            case OUT_OF_RANGE -> "Variable value out of range for '" + variable.getName() + "': " + issue.candidate()
-                    + " (allowed " + variable.getLowerBound() + ".." + variable.getUpperBound() + ")";
-            case NOT_INTEGER -> "Variable value must be an integer for '" + variable.getName() + "': " + issue.candidate();
-        };
-        errors.putIfAbsent(field, message);
-    }
-
     private static <T> void rejectNullItems(Map<String, String> errors,
                                             String field,
                                             List<T> values,
@@ -1077,82 +940,19 @@ final class NusmvRequestValidator {
         return deviceSmvMap.get(deviceRef.trim());
     }
 
-    private static boolean hasApi(DeviceManifest manifest, String apiName) {
-        return findApi(manifest, apiName) != null;
-    }
-
-    private static boolean hasContent(DeviceManifest manifest, String contentName) {
-        if (manifest == null || manifest.getContents() == null || !hasText(contentName)) {
-            return false;
-        }
-        String trimmed = contentName.trim();
-        for (DeviceManifest.Content content : manifest.getContents()) {
-            if (content != null && trimmed.equals(content.getName())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasInternalVariable(DeviceSmvData smv, String name) {
-        return internalVariable(smv, name) != null;
-    }
-
-    private static boolean isEnvironmentVariable(DeviceManifest.InternalVariable variable) {
-        return variable != null && !Boolean.TRUE.equals(variable.getIsInside());
-    }
-
     private static boolean hasValueDomain(DeviceManifest.InternalVariable variable) {
         return variable != null
                 && ((variable.getValues() != null && !variable.getValues().isEmpty())
                 || (variable.getLowerBound() != null && variable.getUpperBound() != null));
     }
 
-    /**
-     * Resolves a variable a rule or specification may use as a condition source.
-     *
-     * <p>Excludes an affect-only shared declaration ({@code Reads=false}): the generator emits no
-     * {@code device.name := a_name} mirror for it, so a condition on it would reference a value the
-     * device never observes. Returning it here accepted the request and then produced a condition with
-     * nothing behind it, which the user could not distinguish from a working rule. The frontend hides
-     * these too; this is the boundary that also covers API and AI-tool callers.
-     */
-    private static DeviceManifest.InternalVariable internalVariable(DeviceSmvData smv, String name) {
-        if (smv == null || smv.getVariables() == null || !hasText(name)) {
-            return null;
-        }
-        String trimmed = name.trim();
-        for (DeviceManifest.InternalVariable variable : smv.getVariables()) {
-            if (variable != null && trimmed.equals(variable.getName())) {
-                boolean affectOnlyShared = !Boolean.TRUE.equals(variable.getIsInside())
-                        && Boolean.FALSE.equals(variable.getReads());
-                return affectOnlyShared ? null : variable;
-            }
-        }
-        return null;
+    private static DeviceManifest.InternalVariable conditionVariable(DeviceSmvData smv, String name) {
+        DeviceManifest.InternalVariable variable = declaredVariable(smv, name);
+        return canReadConditionValue(variable) ? variable : null;
     }
 
-    private static boolean hasVariableOrEnvKey(DeviceSmvData smv, String key) {
-        return variableOrEnvKey(smv, key) != null;
-    }
-
-    /**
-     * Any declared variable, regardless of read capability — for questions about a variable's
-     * <em>existence</em> rather than its use as a condition source. Kept separate from
-     * {@link #internalVariable} so the narrowing there cannot leak into a check that must stay as
-     * permissive as the generated model.
-     */
     private static DeviceManifest.InternalVariable declaredVariable(DeviceSmvData smv, String name) {
-        if (smv == null || smv.getVariables() == null || !hasText(name)) {
-            return null;
-        }
-        String trimmed = name.trim();
-        for (DeviceManifest.InternalVariable variable : smv.getVariables()) {
-            if (variable != null && trimmed.equals(variable.getName())) {
-                return variable;
-            }
-        }
-        return null;
+        return findDeclaredVariableIn(smv == null ? null : smv.getVariables(), name);
     }
 
     private static DeviceManifest.InternalVariable variableOrEnvKey(DeviceSmvData smv, String key) {
@@ -1160,7 +960,7 @@ final class NusmvRequestValidator {
             return null;
         }
         String normalized = key.trim();
-        DeviceManifest.InternalVariable internal = internalVariable(smv, normalized);
+        DeviceManifest.InternalVariable internal = conditionVariable(smv, normalized);
         if (internal != null) {
             return internal;
         }

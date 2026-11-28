@@ -1,28 +1,21 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { APIRequestContext, APIResponse, Page } from '@playwright/test'
-import type { DeviceManifest, DeviceTemplate } from '../src/types/device'
+import type { DeviceTemplate } from '../src/types/device'
 import type { PortableSceneFile } from '../src/types/scene'
 import type { SimulationResult } from '../src/types/simulation'
 import type { RuleDto } from '../src/types/rule'
 import { validateSimulationTrace, validateVerificationResult } from '../src/utils/runResponse'
-import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { apiBaseURL, createAuthenticatedUser, seedBrowserSession, expect, test, type AuthUser } from './support/auth'
 import { expectSameBoardSnapshot, readBoardModelFingerprints } from './support/boardSnapshot'
 import { expandControlTool } from './support/controlCenter'
+import { shadowDefaultTemplate } from './support/templates'
 import { clickUnderTooltip } from './support/tooltips'
 
 const examples = path.resolve(process.cwd(), '..', 'docs', 'examples')
 
 const openBoard = async (page: Page, auth: AuthUser, theme = 'light') => {
-  await page.addInitScript(({ token, user, theme }) => {
-    localStorage.setItem('iot_verify_token', token)
-    localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    localStorage.setItem('locale', 'en')
-    localStorage.setItem('iot_verify_theme', theme)
-  }, {
-    token: auth.token,
-    user: { userId: auth.userId, phone: auth.phone, username: auth.username }, theme
-  })
+  await seedBrowserSession(page, auth, { locale: 'en', theme })
   await page.goto('/#/board')
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
 }
@@ -52,12 +45,12 @@ const importFile = async (
   return { status: reply.status(), body: await reply.json() }
 }
 
-const exportFile = async (page: Page) => {
+const exportFile = async (page: Page): Promise<PortableSceneFile> => {
   const download = page.waitForEvent('download')
   await clickUnderTooltip(page, page.getByTestId('scene-export'))
-  const filename = await (await download).path()
-  expect(filename).not.toBeNull()
-  return JSON.parse(await readFile(filename!, 'utf8'))
+  const file = await download
+  expect(file.suggestedFilename()).toMatch(/^iot-verify-scene-.*\.json$/)
+  return JSON.parse(await readFile(await file.path(), 'utf8'))
 }
 
 const readAccountScene = async (request: APIRequestContext, auth: AuthUser) => {
@@ -73,23 +66,6 @@ const data = async (response: Pick<APIResponse, 'json' | 'ok'>) => {
   const body = await response.json()
   expect(response.ok(), JSON.stringify(body)).toBe(true)
   return body.data
-}
-
-const shadowDefaultTemplate = async (
-  request: APIRequestContext, auth: AuthUser, name: string, edit: (manifest: DeviceManifest) => void
-) => {
-  const headers = { Authorization: `Bearer ${auth.token}` }
-  const boardUrl = `${apiBaseURL}/api/board`
-  const templates: DeviceTemplate[] = await data(await request.get(`${boardUrl}/templates`, { headers }))
-  const original = templates.find(template => template.name === name)!
-  expect(original?.defaultTemplate).toBe(true)
-  const deletion = `${boardUrl}/templates/${original.id}`
-  const preview = await data(await request.get(`${deletion}/deletion-preview`, { headers }))
-  await data(await request.post(`${deletion}/delete`, { headers, data: { impactToken: preview.impactToken } }))
-  const custom = structuredClone(original.manifest)
-  edit(custom)
-  await data(await request.post(`${boardUrl}/templates`, { headers, data: { name: original.name, manifest: custom } }))
-  return original.manifest
 }
 
 test('adopts device values from a committed default template reset without reloading the Board', async ({ page, request }) => {
@@ -176,6 +152,116 @@ test('shows the shared variable conflict before a default template reset', async
   await expect(dialog.getByTestId('default-template-reset-confirm')).toBeDisabled()
 })
 
+const seedTemplateReceiptBoard = async (request: APIRequestContext, auth: AuthUser) => {
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  await data(await request.post(`${apiBaseURL}/api/board/nodes`, { headers, data: { devices: [{
+    id: 'receipt_light', label: 'Journal light', templateName: 'Light', state: 'off',
+    position: { x: 120, y: 120 }, width: 176, height: 128
+  }] } }))
+  return headers
+}
+
+test('blocks replay of an unconfirmed default template reset and keeps the recovered undo revision', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  await seedTemplateReceiptBoard(request, auth)
+  await openBoard(page, auth)
+  const undo = page.getByTestId('board-undo')
+  await expect(undo).toBeEnabled()
+  await page.getByTestId('control-tab-templates').click()
+  await expandControlTool(page, 'control-template-repository')
+  const reset = page.getByTestId('reset-default-templates')
+  let writes = 0
+  const recoveryReads: string[] = []
+  await page.route('**/api/board/templates/defaults/reset', async route => {
+    writes += 1
+    await route.abort()
+  })
+  page.on('request', outgoing => {
+    if (!writes || outgoing.method() !== 'GET') return
+    const endpoint = new URL(outgoing.url()).pathname
+    if (['/api/board/snapshot', '/api/board/templates', '/api/board/edits/availability'].includes(endpoint)) {
+      recoveryReads.push(endpoint)
+    }
+  })
+
+  await clickUnderTooltip(page, reset)
+  const recovery = page.waitForResponse(response => response.url().endsWith('/api/board/snapshot'))
+  await clickUnderTooltip(page, page.getByTestId('default-template-reset-confirm'))
+  const recovered = await data(await recovery)
+  await expect(page.getByText('Could not confirm whether the reset completed.', { exact: false })).toBeVisible()
+  await expect(page.getByText(/^Default templates reset:/)).toHaveCount(0)
+  expect(recovered.editHistory).toMatchObject({ canUndo: true })
+  await clickUnderTooltip(page, reset)
+  await expect(page.getByText('The previous template change is still unconfirmed.', { exact: false })).toBeVisible()
+  await expect(page.getByTestId('default-template-reset-confirm')).toHaveCount(0)
+  expect(writes).toBe(1)
+  expect(recoveryReads).toEqual(['/api/board/snapshot'])
+
+  const undone = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo'))
+  await clickUnderTooltip(page, undo)
+  const response = await undone
+  expect(response.request().postDataJSON()).toEqual({ expectedEditHistoryRevision: recovered.editHistory.editHistoryRevision })
+  expect(await data(response)).toMatchObject({ applied: true })
+  await expect(page.locator('[data-node-id="receipt_light"]')).toHaveCount(0)
+})
+
+test('reviews a template deletion conflict and recovers its committed deletion from one snapshot', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const headers = await seedTemplateReceiptBoard(request, auth)
+  const templates = await data(await request.get(`${apiBaseURL}/api/board/templates`, { headers }))
+  const name = 'Receipt test spare type'
+  const created = await data(await request.post(`${apiBaseURL}/api/board/templates`, {
+    headers, data: { name, manifest: { ...templates.find((template: { name: string }) => template.name === 'Light').manifest, Name: name } }
+  }))
+  await openBoard(page, auth)
+  await page.getByTestId('control-tab-templates').click()
+  await expandControlTool(page, 'control-template-repository')
+  const card = page.getByTestId('template-group-custom').locator('.template-card').filter({ hasText: name })
+  await clickUnderTooltip(page, card.getByRole('button', { name: `Delete Template: ${name}`, exact: true }))
+  const dialog = page.getByTestId('template-delete-dialog')
+  const confirm = dialog.getByTestId('template-delete-confirm')
+  await expect(dialog).toContainText('1 undo/redo entries')
+
+  await data(await request.patch(`${apiBaseURL}/api/board/nodes/label?nodeId=receipt_light`, {
+    headers, data: { expectedLabel: 'Journal light', label: 'Changed elsewhere' }
+  }))
+  let writes = 0
+  const target = `/api/board/templates/${created.id}/delete`
+  const recoveryReads: string[] = []
+  await page.route(url => url.pathname === target, async route => {
+    writes += 1
+    if (writes === 1) return route.continue()
+    const committed = await route.fetch()
+    expect(committed.ok(), await committed.text()).toBe(true)
+    await route.abort()
+  })
+  page.on('request', outgoing => {
+    if (writes < 2 || outgoing.method() !== 'GET') return
+    const endpoint = new URL(outgoing.url()).pathname
+    if (['/api/board/snapshot', '/api/board/templates', '/api/board/edits/availability'].includes(endpoint)) {
+      recoveryReads.push(endpoint)
+    }
+  })
+  const rejected = page.waitForResponse(response => new URL(response.url()).pathname === target)
+  await clickUnderTooltip(page, confirm)
+  expect((await rejected).status()).toBe(409)
+  await expect(dialog).toContainText('2 undo/redo entries')
+  await expect(card).toBeVisible()
+
+  const recovery = page.waitForResponse(response => response.url().endsWith('/api/board/snapshot'))
+  await clickUnderTooltip(page, confirm)
+  const recovered = await data(await recovery)
+  await expect(page.getByText('Deletion is unconfirmed', { exact: false })).toBeVisible()
+  await expect(page.getByText(`Template “${name}” deleted`, { exact: true })).toHaveCount(0)
+  await expect(card).toHaveCount(0)
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByTestId('board-undo')).toBeDisabled()
+  await expect(page.locator('[data-node-id="receipt_light"]')).toContainText('Changed elsewhere')
+  expect(recovered.editHistory).toMatchObject({ canUndo: false, canRedo: false })
+  expect(writes).toBe(2)
+  expect(recoveryReads).toEqual(['/api/board/snapshot'])
+})
+
 test('exported scenes round-trip repeatedly across accounts without template accumulation or changing references', async ({ page, browser, request }) => {
   test.setTimeout(120_000)
   const source = await createAuthenticatedUser(request, { usernamePrefix: 'roundtripSource' })
@@ -205,11 +291,25 @@ test('exported scenes round-trip repeatedly across accounts without template acc
     })
     expect(initial.status).toBe(200)
     await expect(page.getByText(/^Scene replaced:/)).toBeVisible()
-    const exported = await exportFile(page)
-    expect(exported.templates.map((template: { name: string }) => template.name).sort())
-      .toEqual(['Door', 'Door Access Request', 'Light', 'Occupancy Sensor'])
-    expect(exported.devices.find((device: { id: string }) => device.id === door.id).templateName).toBe('Door')
     const originalSource = await readAccountScene(request, source)
+    const [sourceSnapshot, sourceCatalog] = originalSource
+    const exported = await exportFile(page)
+    const templateNames = exported.templates.map(template => template.name).sort()
+    expect(templateNames).toEqual(['Door', 'Door Access Request', 'Light', 'Occupancy Sensor'])
+    expect(exported.devices.find(device => device.id === door.id)?.templateName).toBe('Door')
+    expect(exported.rules.every(rule => !('id' in rule))).toBe(true)
+    const customTemplates = sourceCatalog.filter((template: DeviceTemplate) =>
+      template.defaultTemplate === false && templateNames.includes(template.name)).length
+    expect(customTemplates).toBeGreaterThan(0)
+    const { devices, environmentVariables, rules, specs, templates } = exported
+    expect(devices).toHaveLength(sourceSnapshot.nodes.length)
+    expect(environmentVariables).toHaveLength(sourceSnapshot.environmentVariables.length)
+    expect(rules).toHaveLength(sourceSnapshot.rules.length)
+    expect(specs).toHaveLength(sourceSnapshot.specifications.length)
+    await expect(page.getByText('Scene JSON download requested: '
+      + `${devices.length} devices, ${environmentVariables.length} environment variables, ${rules.length} rules, `
+      + `${specs.length} specifications, ${templates.length} templates (${customTemplates} custom).`,
+    { exact: false })).toBeVisible()
     for (let round = 0; round < 2; round++) {
       const imported = await importFile(targetPage, {
         name: 'source-export.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(exported))
@@ -230,7 +330,12 @@ test('exported scenes round-trip repeatedly across accounts without template acc
     expect(returned.status).toBe(200)
     expect(returned.body.data.createdTemplates).toHaveLength(0)
     await expect(page.getByText(/^Scene replaced:/)).toBeVisible()
+    await page.getByRole('button', { name: '切换到中文', exact: true }).click()
     expect(await exportFile(page)).toEqual(exported)
+    await expect(page.getByText('已发起场景 JSON 下载：'
+      + `${devices.length} 个设备、${environmentVariables.length} 项环境变量、${rules.length} 条规则、`
+      + `${specs.length} 条规约、${templates.length} 个模板（自定义 ${customTemplates} 个）。`,
+    { exact: false })).toBeVisible()
     expect((await readAccountScene(request, source))[1]).toEqual(originalSource[1])
   } finally {
     await targetContext.close()
@@ -581,3 +686,74 @@ test('a template-library change invalidates a pending clear without clearing the
   await expect(page.locator('.device-node')).toHaveCount(4)
   await expect(page.getByTestId('template-group-custom').locator('.template-card')).toHaveCount(3)
 })
+
+for (const kind of ['import', 'clear'] as const) {
+  test(`recovers a lost scene ${kind} receipt without inventing undo history`, async ({ page, request }) => {
+    const auth = await createAuthenticatedUser(request)
+    await openBoard(page, auth)
+    expect((await importFile(page, path.join(examples, 'default-climate-conflict-scene.json'))).status).toBe(200)
+    const originalLabel = 'Living-room Air Conditioner'
+    const renamed = await request.patch(`${apiBaseURL}/api/board/nodes/label?nodeId=ac_1`, {
+      headers: { Authorization: `Bearer ${auth.token}` },
+      data: { expectedLabel: originalLabel, label: 'Revised Air Conditioner' }
+    })
+    expect(renamed.ok(), await renamed.text()).toBe(true)
+    await page.reload()
+    const undo = page.getByTestId('board-undo')
+    await expect(undo).toBeEnabled()
+
+    const isImport = kind === 'import'
+    const file = isImport ? Buffer.from(JSON.stringify(await exportFile(page))) : null
+    const savedRevision = (await readAccountScene(request, auth))[0].editHistory.editHistoryRevision
+    let writes = 0
+    let reads = 0
+    await page.route(isImport ? '**/api/board/scene' : '**/api/board/batch', async route => {
+      if (route.request().method() !== 'POST') return route.continue()
+      writes += 1
+      // Import never reaches the server. Clear commits, then its response is lost.
+      if (!isImport) {
+        const committed = await route.fetch()
+        expect(committed.ok(), await committed.text()).toBe(true)
+      }
+      await route.abort()
+    })
+    page.on('request', outgoing => {
+      if (writes && outgoing.method() === 'GET' && outgoing.url().endsWith('/api/board/snapshot')) reads += 1
+    })
+
+    const selectFile = () => page.getByTestId('scene-import-file').setInputFiles({
+      name: 'current-scene.json', mimeType: 'application/json', buffer: file!
+    })
+    if (isImport) await selectFile()
+    else await clickUnderTooltip(page, page.getByTestId('scene-clear'))
+    const dialog = page.getByRole('dialog', { name: isImport ? 'Replace the current scene?' : 'Clear Scene', exact: true })
+    const refresh = page.waitForResponse(response => response.url().endsWith('/api/board/snapshot'))
+    await dialog.getByRole('button', { name: isImport ? 'Replace scene' : 'Clear', exact: true }).click()
+    const recovered = await data(await refresh)
+    await expect(page.getByText(isImport ? 'The import response was not confirmed.' : 'The clear response was not confirmed.',
+      { exact: false })).toBeVisible()
+    expect(writes).toBe(1)
+    expect(reads).toBe(1)
+    if (!isImport) {
+      await expect(page.locator('.device-node')).toHaveCount(0)
+      await expect(undo).toBeDisabled()
+      await expect(page.getByText(/^Scene cleared,/)).toHaveCount(0)
+      expect(recovered.editHistory).toMatchObject({ canUndo: false, canRedo: false })
+      return
+    }
+
+    await expect(page.getByText(/^Scene replaced:/)).toHaveCount(0)
+    expect(recovered.editHistory).toMatchObject({ canUndo: true, editHistoryRevision: savedRevision })
+    await selectFile()
+    await expect(page.getByText('The previous scene replacement is still unconfirmed.', { exact: false })).toBeVisible()
+    await expect(dialog).toHaveCount(0)
+    expect(writes).toBe(1)
+    await expect(undo).toBeEnabled()
+    const undone = page.waitForResponse(response => response.url().endsWith('/api/board/edits/undo'))
+    await clickUnderTooltip(page, undo)
+    const response = await undone
+    expect(response.request().postDataJSON()).toEqual({ expectedEditHistoryRevision: recovered.editHistory.editHistoryRevision })
+    expect(await data(response)).toMatchObject({ applied: true })
+    await expect(page.locator('[data-node-id="ac_1"]')).toContainText(originalLabel)
+  })
+}

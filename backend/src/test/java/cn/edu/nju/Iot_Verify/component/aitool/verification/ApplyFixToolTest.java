@@ -39,6 +39,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.IntStream;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -76,7 +77,7 @@ class ApplyFixToolTest {
         JwtConfig jwtConfig = new JwtConfig();
         jwtConfig.setSecret("apply-fix-tool-test-secret-long-enough-for-hmac");
         tokenService = new FixSuggestionTokenService(objectMapper, jwtConfig);
-        guard = new AiDestructiveActionGuard(objectMapper);
+        guard = inMemoryActionGuard(objectMapper);
         chatExecutionConfig = new ChatExecutionConfig();
         messageCodec = new LlmMessageCodec(objectMapper);
         nextMessageId = 521L;
@@ -240,7 +241,7 @@ class ApplyFixToolTest {
         jwtConfig.setSecret("apply-fix-tool-preview-test-secret-long-enough");
         FixSuggestionTokenService localTokenService = new FixSuggestionTokenService(
                 new ObjectMapper(), jwtConfig);
-        AiDestructiveActionGuard localGuard = new AiDestructiveActionGuard(failingMapper);
+        AiDestructiveActionGuard localGuard = inMemoryActionGuard(failingMapper);
         ApplyFixTool failingTool = new ApplyFixTool(
                 fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig,
                 suggestionService);
@@ -380,7 +381,7 @@ class ApplyFixToolTest {
         JwtConfig jwtConfig = new JwtConfig();
         jwtConfig.setSecret("apply-fix-tool-result-test-secret-long-enough");
         FixSuggestionTokenService localTokenService = new FixSuggestionTokenService(new ObjectMapper(), jwtConfig);
-        AiDestructiveActionGuard localGuard = new AiDestructiveActionGuard(failingMapper);
+        AiDestructiveActionGuard localGuard = inMemoryActionGuard(failingMapper);
         ApplyFixTool failingTool = new ApplyFixTool(
                 fixService, localTokenService, failingMapper, localGuard, chatExecutionConfig,
                 suggestionService);

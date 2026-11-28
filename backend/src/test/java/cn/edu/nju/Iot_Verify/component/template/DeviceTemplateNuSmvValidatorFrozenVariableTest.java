@@ -18,8 +18,8 @@ class DeviceTemplateNuSmvValidatorFrozenVariableTest {
     private final DeviceTemplateNuSmvValidator validator = new DeviceTemplateNuSmvValidator(null);
 
     @Test
-    @DisplayName("reject local enum variable without any driver mechanism")
-    void testRejectLocalEnumWithoutDriver() {
+    @DisplayName("a local enum without state dynamics needs a transition assignment")
+    void testLocalEnumNeedsDriver() {
         DeviceManifest manifest = new DeviceManifest();
         manifest.setName("Broken Sensor");
 
@@ -44,6 +44,13 @@ class DeviceTemplateNuSmvValidatorFrozenVariableTest {
 
         assertTrue(ex.getMessage().contains("has no driver mechanism"));
         assertTrue(ex.getMessage().contains("status"));
+
+        manifest.setTransitions(List.of(DeviceManifest.Transition.builder()
+                .name("activate")
+                .trigger(DeviceManifest.Trigger.builder().attribute("status").relation("=").value("idle").build())
+                .assignments(List.of(DeviceManifest.Assignment.builder().attribute("status").value("active").build()))
+                .build()));
+        assertDoesNotThrow(() -> validator.validateTemplateManifestForNuSmv("Broken Sensor", manifest));
     }
 
     @Test

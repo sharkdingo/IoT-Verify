@@ -49,7 +49,7 @@ const RECOMMENDATION_RECOVERY_SLOW_RETRY_MS = 5_000
 export type RecommendationRecoveryFailurePlan = {
   consecutiveFailures: number
   retryDelayMs: number
-  releaseTracking: false
+  outcomeUnknown: boolean
 }
 
 /** Status transport failures are never evidence that the server-side request ended. */
@@ -60,12 +60,13 @@ export const planRecommendationRecoveryAfterStatusFailure = (
     ? Math.max(0, previousConsecutiveFailures)
     : 0
   const consecutiveFailures = Math.min(Number.MAX_SAFE_INTEGER, normalizedFailures + 1)
+  const outcomeUnknown = consecutiveFailures >= RECOMMENDATION_RECOVERY_FAST_FAILURES
   return {
     consecutiveFailures,
     retryDelayMs: consecutiveFailures <= RECOMMENDATION_RECOVERY_FAST_FAILURES
       ? RECOMMENDATION_RECOVERY_FAST_RETRY_MS
       : RECOMMENDATION_RECOVERY_SLOW_RETRY_MS,
-    releaseTracking: false
+    outcomeUnknown
   }
 }
 

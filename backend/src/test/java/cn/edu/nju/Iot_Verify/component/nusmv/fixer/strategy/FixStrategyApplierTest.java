@@ -29,7 +29,7 @@ class FixStrategyApplierTest {
                 .build();
 
         List<RuleDto> result = FixStrategyApplier.apply(
-                "parameter", suggestion, List.of(adjusted, untouched), Map.of(), Map.of(),
+                "parameter", suggestion, List.of(adjusted, untouched), Map.of(),
                 Map.of("sensor-one", "Living room sensor", "actuator", "Heater"));
 
         assertEquals("25", result.get(0).getConditions().get(0).getValue());
@@ -62,7 +62,7 @@ class FixStrategyApplierTest {
                 .build();
 
         List<RuleDto> result = FixStrategyApplier.apply(
-                "condition", suggestion, List.of(untouched, adjusted), Map.of(),
+                "condition", suggestion, List.of(untouched, adjusted),
                 Map.of("door-smv", "door-node"),
                 Map.of("sensor-two", "Hall sensor", "door-node", "Front door",
                         "actuator", "Heater"));

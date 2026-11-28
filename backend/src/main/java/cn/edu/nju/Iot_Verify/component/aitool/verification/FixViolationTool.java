@@ -88,12 +88,7 @@ public class FixViolationTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "traceId", "strategies", "preferredRangeSelections", "preferredRanges"));
 
@@ -250,7 +245,7 @@ public class FixViolationTool extends AbstractAiTool {
             message += " Use per-candidate verification results and strategy limits as evidence; candidate order is not "
                     + "a ranking of total behavioral impact or proof of optimality across strategies.";
             summary.put("message", message);
-            return readOnlySuccessJson(summary, message);
+            return readOnlySuccessJson(summary);
 
         } catch (ResourceNotFoundException e) {
             return errorJson("Trace not found: " + e.getMessage(), "NOT_FOUND", 404);

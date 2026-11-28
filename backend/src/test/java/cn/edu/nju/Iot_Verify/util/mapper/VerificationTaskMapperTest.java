@@ -10,7 +10,6 @@ import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskSummaryDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationOutcome;
 import cn.edu.nju.Iot_Verify.exception.PersistedDataIntegrityException;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
-import cn.edu.nju.Iot_Verify.repository.projection.VerificationTaskSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.VerificationRunSummaryProjection;
 import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import org.junit.jupiter.api.Test;
@@ -25,11 +24,11 @@ import static org.mockito.Mockito.when;
 class VerificationTaskMapperTest {
     @Test
     void rejectsResultsWithoutFrozenRequirements() {
-        VerificationTaskPo task = VerificationTaskPo.builder().id(7L)
-                .specResultsJson("[{\"specId\":\"s1\",\"templateId\":\"1\",\"antecedentReachability\":\"NOT_APPLICABLE\"}]")
-                .build();
-        assertThrows(PersistedDataIntegrityException.class, () ->
-                org.springframework.test.util.ReflectionTestUtils.invokeMethod(new VerificationTaskMapper(), "readSpecResults", task));
+        VerificationTaskPo task = validCompletedTask(7L);
+        task.setSpecResultsJson("[{\"specId\":\"s1\",\"templateId\":\"1\",\"antecedentReachability\":\"NOT_APPLICABLE\"}]");
+
+        assertEquals("specResultsJson", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toDto(task)).getField());
     }
 
     private final VerificationTaskMapper mapper = new VerificationTaskMapper();
@@ -43,57 +42,13 @@ class VerificationTaskMapperTest {
             AttackScenarioDto.none(), false, 3, 2, 1));
 
     @Test
-    void mapsTaskInboxProjectionWithoutDetailColumns() {
-        VerificationTaskSummaryProjection projection = mock(VerificationTaskSummaryProjection.class);
-        when(projection.getId()).thenReturn(6L);
-        when(projection.getUserId()).thenReturn(1L);
-        when(projection.getInitiator()).thenReturn(RunInitiator.AI_ASSISTANT);
-        when(projection.getStatus()).thenReturn(VerificationTaskPo.TaskStatus.FAILED);
-        when(projection.getCreatedAt()).thenReturn(CREATED_AT);
-        when(projection.getCompletedAt()).thenReturn(CREATED_AT.plusSeconds(1));
-        when(projection.getProcessingTimeMs()).thenReturn(null);
-        when(projection.getProgress()).thenReturn(100);
-        when(projection.getIsAttack()).thenReturn(false);
-        when(projection.getAttackBudget()).thenReturn(0);
-        when(projection.getModeledDeviceAttackPointCount()).thenReturn(3);
-        when(projection.getModeledFalsifiableReadingDeviceCount()).thenReturn(1);
-        when(projection.getModeledAutomationLinkAttackPointCount()).thenReturn(2);
-        when(projection.getEnablePrivacy()).thenReturn(false);
-        when(projection.getModelSemanticsJson()).thenReturn(NO_ATTACK_MODEL_SEMANTICS_JSON);
-        when(projection.getModelSnapshotJson()).thenReturn(MODEL_SNAPSHOT_JSON);
-        when(projection.getOutcome()).thenReturn(VerificationOutcome.INCONCLUSIVE);
-        when(projection.getGenerationIssuesJson()).thenReturn("[]");
-        when(projection.getErrorMessage()).thenReturn("solver unavailable");
-
-        VerificationTaskSummaryDto summary = mapper.toSummaryDto(projection);
-
-        assertEquals(6L, summary.getId());
-        assertEquals(RunInitiator.AI_ASSISTANT, summary.getInitiator());
-        assertEquals("FAILED", summary.getStatus());
-        assertEquals("solver unavailable", summary.getErrorMessage());
-        assertEquals(5, summary.getModelSemantics().getModeledAttackPointCount());
-    }
-
-    @Test
     void mapsStructuredSpecResultsAndLogs() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(7L)
-                .userId(1L)
-                .status(VerificationTaskPo.TaskStatus.COMPLETED)
-                .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
+        VerificationTaskPo po = finishedTask(7L)
                 .progressStage(TaskProgressStage.PARSING_RESULTS)
                 .isAttack(true)
                 .attackBudget(2)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
                 .enablePrivacy(true)
                 .modelSemanticsJson(ATTACK_MODEL_SEMANTICS_JSON)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
                 .outcome(VerificationOutcome.VIOLATED)
                 .violatedSpecCount(1)
                 .disabledRuleCount(1)
@@ -189,24 +144,7 @@ class VerificationTaskMapperTest {
 
     @Test
     void mapsCompletedInconclusiveTaskWithoutCallingItViolation() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(8L)
-                .userId(1L)
-                .status(VerificationTaskPo.TaskStatus.COMPLETED)
-                .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
-                .isAttack(false)
-                .attackBudget(0)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
-                .enablePrivacy(false)
-                .modelSemanticsJson(NO_ATTACK_MODEL_SEMANTICS_JSON)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
-                .outcome(VerificationOutcome.INCONCLUSIVE)
+        VerificationTaskPo po = finishedTask(8L)
                 .violatedSpecCount(1)
                 .disabledRuleCount(0)
                 .skippedSpecCount(0)
@@ -229,24 +167,9 @@ class VerificationTaskMapperTest {
      */
     @Test
     void mapsACancelledTaskThatStoppedBeforeFinishingItsWork() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(9L)
-                .userId(1L)
+        VerificationTaskPo po = finishedTask(9L)
                 .status(VerificationTaskPo.TaskStatus.CANCELLED)
-                .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
                 .progress(30)
-                .isAttack(false)
-                .attackBudget(0)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
-                .enablePrivacy(false)
-                .modelSemanticsJson(NO_ATTACK_MODEL_SEMANTICS_JSON)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
-                .outcome(VerificationOutcome.INCONCLUSIVE)
                 .checkLogsJson("[]")
                 .build();
 
@@ -259,23 +182,7 @@ class VerificationTaskMapperTest {
 
     @Test
     void runMappersKeepTheReplayableCountSuppliedByTheService() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(10L)
-                .userId(1L)
-                .status(VerificationTaskPo.TaskStatus.COMPLETED)
-                .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
-                .isAttack(false)
-                .attackBudget(0)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
-                .enablePrivacy(false)
-                .modelSemanticsJson(NO_ATTACK_MODEL_SEMANTICS_JSON)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
+        VerificationTaskPo po = finishedTask(10L)
                 .outcome(VerificationOutcome.VIOLATED)
                 .violatedSpecCount(1)
                 .disabledRuleCount(0)
@@ -324,23 +231,8 @@ class VerificationTaskMapperTest {
 
     @Test
     void missingModelSnapshotFailsClosed() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(9L)
-                .userId(1L)
-                .status(VerificationTaskPo.TaskStatus.COMPLETED)
-                .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
-                .isAttack(false)
-                .attackBudget(0)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
-                .enablePrivacy(false)
-                .modelSemanticsJson(NO_ATTACK_MODEL_SEMANTICS_JSON)
-                .outcome(VerificationOutcome.INCONCLUSIVE)
+        VerificationTaskPo po = finishedTask(9L)
+                .modelSnapshotJson(null)
                 .violatedSpecCount(0)
                 .disabledRuleCount(0)
                 .skippedSpecCount(0)
@@ -354,19 +246,10 @@ class VerificationTaskMapperTest {
 
     @Test
     void missingModelSemanticsFailsClosed() {
-        VerificationTaskPo po = VerificationTaskPo.builder()
-                .id(11L)
-                .userId(1L)
+        VerificationTaskPo po = task(11L)
+                .modelSemanticsJson(null)
                 .status(VerificationTaskPo.TaskStatus.PENDING)
-                .createdAt(CREATED_AT)
                 .progress(0)
-                .isAttack(false)
-                .attackBudget(0)
-                .modeledDeviceAttackPointCount(3)
-                .modeledFalsifiableReadingDeviceCount(1)
-                .modeledAutomationLinkAttackPointCount(2)
-                .enablePrivacy(false)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
                 .build();
 
         PersistedDataIntegrityException error = assertThrows(
@@ -465,16 +348,11 @@ class VerificationTaskMapperTest {
                 () -> mapper.toDto(incompleteProgress)).getField());
     }
 
-    private VerificationTaskPo validCompletedTask(Long id) {
+    private VerificationTaskPo.VerificationTaskPoBuilder task(Long id) {
         return VerificationTaskPo.builder()
                 .id(id)
                 .userId(1L)
-                .status(VerificationTaskPo.TaskStatus.COMPLETED)
                 .createdAt(CREATED_AT)
-                .startedAt(CREATED_AT)
-                .completedAt(CREATED_AT.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
                 .isAttack(false)
                 .attackBudget(0)
                 .modeledDeviceAttackPointCount(3)
@@ -482,8 +360,21 @@ class VerificationTaskMapperTest {
                 .modeledAutomationLinkAttackPointCount(2)
                 .enablePrivacy(false)
                 .modelSemanticsJson(NO_ATTACK_MODEL_SEMANTICS_JSON)
-                .modelSnapshotJson(MODEL_SNAPSHOT_JSON)
-                .outcome(VerificationOutcome.INCONCLUSIVE)
+                .modelSnapshotJson(MODEL_SNAPSHOT_JSON);
+    }
+
+    private VerificationTaskPo.VerificationTaskPoBuilder finishedTask(Long id) {
+        return task(id)
+                .status(VerificationTaskPo.TaskStatus.COMPLETED)
+                .startedAt(CREATED_AT)
+                .completedAt(CREATED_AT.plusSeconds(1))
+                .processingTimeMs(1_000L)
+                .progress(100)
+                .outcome(VerificationOutcome.INCONCLUSIVE);
+    }
+
+    private VerificationTaskPo validCompletedTask(Long id) {
+        return finishedTask(id)
                 .violatedSpecCount(0)
                 .disabledRuleCount(0)
                 .skippedSpecCount(0)

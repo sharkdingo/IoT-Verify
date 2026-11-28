@@ -19,12 +19,123 @@ history into a technical spec. The spec content itself now lives under
 
 #### Fixed
 
+- Chat keeps older-message loading and feedback tied to the current conversation visit.
+  Each conversation can fetch its own older messages after a switch.
 - Chat continues monitoring the selected conversation for replies when a confirmation check from
   the previous conversation finishes after a switch.
 - A background reply appears in the selected conversation even if the task finishes before the
   first activity check reports it running.
 - Imported boards retain repair actions for the current model when template catalogs return
   in a different order.
+- CI risk routing emits a decision when the checkout path contains spaces or a `#` character.
+- Assistant device runtime edits now succeed when a saved variable inherits trust from its template and the edit omits a trust override.
+- Board run settings link unavailable attack switches and mandatory verification sensitivity-label
+  propagation to their visible reasons for assistive technology.
+- Environment Pool value drafts keep their original baseline across tabs. A stale edit preserves
+  the draft and shows the conflict. A lost receipt blocks repetition until the affected values
+  change, so undo can restore the prior values and allow a fresh edit.
+- Narrowing the window while a desktop layout save is pending preserves the usual failure feedback.
+- Combined Board and history refreshes compare the model through the adopted snapshot once.
+- Exploration filter and paging failures stay in History when the panel closes during the read.
+- Background verification, simulation, and counterexample search stop before starting the next
+  model, solver, or result-decoding stage when its progress update loses the task lease.
+- Cancelling a recommendation or automatic fix while its running status is being published
+  prevents the underlying operation from starting after the stop is accepted.
+
+### 2026-11-27
+
+#### Fixed
+
+- An unconfirmed automatic-fix apply reads one Board snapshot before the next queued edit.
+  The original trace requires fresh verification before another apply, and recovery does
+  not show the success receipt.
+- Verification results and History keep other eligible counterexamples repairable after an
+  unconfirmed apply if the model still matches. A model change requires fresh verification
+  for the whole run on both surfaces.
+- Fix search and apply use the same template semantics as the run fingerprint. Description
+  and icon changes leave saved repairs applicable, while modeling changes require a new run.
+- The rule editor and recommendations use server-side exact matching. Equivalent rules
+  skip AI similarity, and recovering an equivalent rule after a lost save response leaves
+  that submission unconfirmed and the batch stopped.
+- Rule creation and recommendation application share the queued write receipt. Restoring
+  a previously unconfirmed draft keeps its submission blocked, and a late confirmation
+  from a previous account cannot update the current canvas.
+- Task Status and progress share cancellation feedback and check the task directly after
+  a lost receipt. Completed tasks keep their results, and one unavailable task list no
+  longer prevents other task kinds from updating.
+- Dismissing a failed or cancelled task checks the addressed record after a lost receipt.
+  Known absence removes the row across tabs while keeping the original outcome unconfirmed.
+  A surviving task keeps its row without refreshing the other task lists.
+- Background verification, simulation, and exploration follow the task ID returned by an
+  unconfirmed dispatch. A lost response without an ID reports an unconfirmed submission
+  and directs the user to saved tasks or results before retrying.
+- Device creation in the Devices form, template drop dialog, and recommendations shares
+  one write receipt. A lost response can reveal the saved device and its undo revision
+  through one refresh while keeping the write unconfirmed and preventing a duplicate submit.
+- Batch creation and JSON/CSV device import now use the same write receipt. Recovery shows
+  devices found on the Board and blocks repeat submission of the draft. A single undo still
+  reverses the batch and its Environment Pool changes.
+- Device rename and runtime edits share queued receipt recovery. A lost response leaves
+  the draft visible with an unconfirmed status and blocks repeat submission, while the
+  recovery snapshot supplies the current device and undo revision.
+- Device deletion rechecks the reviewed impact in the queue. A lost response reports the
+  device's presence after one recovery snapshot and blocks reusing an unconfirmed review.
+  Compound undo restores the device and its related content from the recovered revision.
+- Device drags and resizes share queued receipt recovery. An older response preserves the
+  latest gesture and still reconciles the undo revision. Layout-only edits keep verification
+  results current.
+- Rule and specification edits recover a lost response through one queued Board snapshot.
+  The list shows the saved item and uses the recovered undo revision while the editor keeps
+  the draft unconfirmed and prevents resubmitting it.
+- Rule and specification deletion share queued receipt recovery and recheck the reviewed item
+  before dispatch. After a lost response, the list reflects the current Board, keeps the outcome
+  unconfirmed, and blocks repeating the same unresolved deletion. Undo uses the recovered revision
+  to restore the deleted item at its original position.
+- Rule priority moves use the displayed order and share queued receipt recovery. A lost
+  response keeps the move unconfirmed, shows the recovered order, and uses its undo revision.
+  An unresolved move pauses the arrows to prevent a duplicate submission.
+- Environment Pool edits use the same queued receipt recovery. After a lost response, the
+  list shows the server values, the value draft stays available, and the same patch cannot
+  be resubmitted in the current scene and session. Undo uses the recovered revision.
+- Scene import and clear share queued receipt recovery. Matching scene content after a lost
+  response preserves the undo history reported by the snapshot. Reusing the same unconfirmed
+  preview is blocked.
+- Template deletion and default template reset share queued receipt recovery. A lost response
+  reloads the current Board and undo history together. The same unconfirmed preview cannot
+  be submitted again, and a valid deletion conflict still shows the current impact.
+- Clearing unusable undo history now recovers the current Board and history in one snapshot after
+  a lost response. The outcome stays unconfirmed, and the same preview cannot be submitted again.
+- Undo and redo use the shared receipt handling. Definite rejections are reported directly, a
+  lost response recovers the current Board, and the same unconfirmed action cannot replay against
+  the same history revision.
+- Manual and recommended requirement creation share receipt recovery. An equivalent requirement in
+  a recovered snapshot leaves the original save unconfirmed. Drafts and recommendation cards are
+  retained, and batch counters include only confirmed writes.
+- An unconfirmed device type import recovers the current Board from one snapshot. The catalog
+  shows any saved type, and reselecting the same name shows the unresolved outcome without
+  submitting it again.
+- Repeated clicks on a pending history result share one read. A late response from a previous
+  visit cannot reopen or clear the current result, even when browser navigation returns to the same link.
+- History deletion checks the addressed verification, observation, or exploration result after
+  an unconfirmed response. Confirmed absence removes the result and its replay across tabs;
+  an inconclusive check preserves the current list and never retries the deletion.
+- Switching or exiting Board playback retires its frozen scene and autoplay together. Exiting
+  before the initial replay fit preserves the live canvas zoom and position.
+- Background Board refresh preserves pan and zoom. Each complete snapshot compares the
+  installed scene once, and an unchanged scene reuses its confirmed model fingerprints.
+- Returning to a desktop viewport restores the latest local layout even when an older save
+  replies while the viewport is narrow. Resizing alone sends no layout write.
+- Incomplete layout responses keep the saved-view retry available and report autosaves as
+  unconfirmed. The current pan, zoom, and panel edits stay visible.
+- Applying rule recommendations in bulk checks similarity once before saving and keeps
+  independent undo entries. The batch stops after an unconfirmed save, even when the
+  refreshed Board contains that rule.
+- Device and specification recommendation batches also stop after an unconfirmed save.
+  A recovered item appears on the Board and stays outside the confirmed count.
+- An unconfirmed recommendation stop keeps checking the original request while releasing
+  verification and other Board tools. Late results from the stopped request are discarded.
+- Dragging a device recalculates its connected lines and self-loops. Canvas navigation
+  reuses unchanged scene geometry and minimap marks.
 
 ### 2026-11-26
 
@@ -32,6 +143,19 @@ history into a technical spec. The spec content itself now lives under
 
 - Run comparison no longer applies another Board revision's fingerprints to the displayed scene.
   Device rename conflicts and uncertain responses reconcile from one complete Board snapshot.
+- Run comparison refreshes after same-turn scene edits even if they return to the original model.
+  A different delivery order for the same template catalog or Environment Pool does not block it.
+- Device creation and batch import use a complete Board snapshot to reconcile lost responses
+  without mixing device, Environment Pool, and edit history reads or submitting a second write.
+- Assistant collection refreshes in one turn share a confirmed Board snapshot instead of
+  separate collection and edit-history reads. Action receipts and run-history updates remain separate.
+- Leaving the Board no longer produces an uncaught error from a cancelled, queued snapshot refresh.
+- Rule, device, and specification recommendations stay busy while a cancelled worker is still
+  stopping, even when the generation response has already returned.
+- A late task status error no longer replaces a confirmed cancellation for verification,
+  simulation, or exploration.
+- Board write recovery adopts the canvas and its undo revision from one snapshot. A failed undo
+  or redo finishes reading that snapshot before the next queued edit starts.
 - Verification, simulation, and exploration notify the local worker only after cancellation commits.
   A rollback leaves work running, and a worker that loses its lease cannot record a user cancellation.
 - Verification and simulation reclaim queue slots when cancellation races with dispatch. Account
@@ -3579,10 +3703,8 @@ history into a technical spec. The spec content itself now lives under
   which is also the only one that exists for a run where every specification held).
 
   `GET /api/verify/traces/{id}/smv` remains supported for API consumers holding only a trace id, but
-  the web client no longer calls it and its client method is deleted. Placement is pinned by
-  `runArtifactPlacement.spec.ts`, and `e2e/smv-model-download.spec.ts` now covers the download
-  end to end — that clicking delivers a NuSMV model of the submitted scene, which nothing verified
-  before.
+  the web client no longer calls it and its client method is deleted. `e2e/smv-model-download.spec.ts`
+  covers placement and the downloaded NuSMV model of the submitted scene.
 
 - **The counterexample-details dialog now separates the counterexample from the run that produced
   it.** Its contents read as one flat list of "counterexample properties", but only the violated
@@ -4686,7 +4808,7 @@ history into a technical spec. The spec content itself now lives under
   re-validator re-reads the whole stored collection on every device add, layout move, spec add and undo,
   checking it there would have rejected all of those over a rule the request never mentioned, leaving no
   way to get unstuck; the same trap `requireResolvedVariableSource` already documents.
-  `saveNodes_isNotBlockedByAStoredRuleThatExceedsTheConditionCap` pins that, and fails with the lockout
+  `addNodes_isNotBlockedByAStoredRuleThatExceedsTheConditionCap` pins that, and fails with the lockout
   when the check is moved back.
 
   Two further details the first attempt got wrong. The `ruleString` bound sat below the

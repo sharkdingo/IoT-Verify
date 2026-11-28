@@ -73,9 +73,7 @@ public class GetVerificationRunTool extends AbstractAiTool {
             response.put("generationIssues", safeList(run.getGenerationIssues()));
             response.put("specResults", VerificationToolPresenter.specResults(run.getSpecResults()));
             response.put("checkLogCount", safeList(run.getCheckLogs()).size());
-            return readOnlySuccessJson(response, "Verification run loaded.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return readOnlySuccessJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

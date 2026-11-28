@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import RuleBuilder from '../RuleBuilder.vue'
 import type { DeviceNode } from '@/types/node'
 import actualI18n from '@/assets/i18n'
+import { BOARD_ITEM_EDIT_OUTCOME_UNKNOWN } from '@/composables/useUnconfirmedBoardItemEdit'
 import boardApi, {
   type DuplicateRuleCheckResult,
   type RuleSimilarityResult
@@ -440,6 +441,36 @@ describe('RuleBuilder action semantics', () => {
     wrapper.unmount()
     acknowledgement.mockRestore()
   })
+  it('remembers an unconfirmed save after reopening or restoring the draft', async () => {
+    const wrapper = mount(RuleBuilder, {
+      props: { active: true, nodes, deviceTemplates: [template] },
+      global: { plugins: [i18n] }
+    })
+    await completeRuleDraft(wrapper)
+    const save = wrapper.get('[data-testid="rule-save"]')
+    await save.trigger('click')
+    await flushPromises()
+    const [request] = wrapper.emitted('save-rule')![0] as [{ complete: (saved: boolean, failure: unknown) => void }]
+    request.complete(false, { reasonCode: BOARD_ITEM_EDIT_OUTCOME_UNKNOWN, cause: 'The save outcome is unconfirmed.', details: [], fields: {} })
+    await wrapper.setProps({ active: false })
+    await wrapper.setProps({ active: true })
+    expect(wrapper.get('[data-testid="rule-save-outcome-unknown"]').text()).toContain('unconfirmed')
+    expect(save.element).toHaveProperty('disabled', true)
+    await save.trigger('click')
+    expect(wrapper.emitted('save-rule')).toHaveLength(1)
+    const target = wrapper.get('#rule-target-action')
+    await target.setValue('turn_on')
+    expect(wrapper.find('[data-testid="rule-save-outcome-unknown"]').exists()).toBe(false)
+    expect(save.element).toHaveProperty('disabled', false)
+    await target.setValue('turn_off')
+    expect(wrapper.get('[data-testid="rule-save-outcome-unknown"]').text()).toContain('unconfirmed')
+    expect(save.element).toHaveProperty('disabled', true)
+    await save.trigger('click')
+    expect(wrapper.emitted('save-rule')).toHaveLength(1)
+    await wrapper.get('[data-testid="rule-reset"]').trigger('click')
+    expect(wrapper.find('[data-testid="rule-save-outcome-unknown"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
   it('keeps duplicate rejection details in the draft until it is edited', async () => {
     scrollIntoView.mockClear()
     const wrapper = mount(RuleBuilder, {
@@ -516,6 +547,7 @@ describe('RuleBuilder action semantics', () => {
     await wrapper.get('#rule-source-device').setValue('localized-source')
 
     await wrapper.get('#rule-source-type').setValue('mode')
+    expect(wrapper.get('label[for="rule-source-mode"]').text()).toBe(i18n.global.t('app.modes'))
     const modeOption = wrapper.get('#rule-source-mode').get('option[value="Mode"]')
     expect(modeOption.text()).toBe('Operating mode')
     expect(modeOption.attributes('value')).toBe('Mode')
@@ -523,9 +555,12 @@ describe('RuleBuilder action semantics', () => {
     expect(wrapper.get('#rule-source-value').get('option[value="off"]').text()).toBe('Disabled')
 
     await wrapper.get('#rule-source-type').setValue('state')
+    expect(wrapper.find('#rule-source-mode').exists()).toBe(false)
+    expect(wrapper.find('#rule-source-state').exists()).toBe(false)
     expect(wrapper.get('#rule-source-value').get('option[value="off"]').text()).toBe('Disabled')
 
     await wrapper.get('#rule-source-type').setValue('variable')
+    expect(wrapper.get('label[for="rule-source-variable"]').text()).toBe(i18n.global.t('app.variable'))
     const variableOption = wrapper.get('#rule-source-variable').get('option[value="SwitchState"]')
     expect(variableOption.text()).toBe('Switch status (Internal variable)')
     expect(variableOption.attributes('value')).toBe('SwitchState')
@@ -729,12 +764,7 @@ describe('RuleBuilder action semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('#rule-source-device').setValue('source')
-    await wrapper.get('#rule-source-type').setValue('api')
-    await wrapper.get('#rule-source-api').setValue('turn_on')
-    await wrapper.get('[data-testid="rule-add-source"]').trigger('click')
-    await wrapper.get('#rule-target-device').setValue('target')
-    await wrapper.get('#rule-target-action').setValue('turn_off')
+    await completeRuleDraft(wrapper)
     expect((wrapper.get('[data-testid="rule-save"]').element as HTMLButtonElement).disabled).toBe(false)
 
     await wrapper.setProps({ nodes: nodes.filter(node => node.id !== 'source') })
@@ -756,12 +786,7 @@ describe('RuleBuilder action semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    await wrapper.get('#rule-source-device').setValue('source')
-    await wrapper.get('#rule-source-type').setValue('api')
-    await wrapper.get('#rule-source-api').setValue('turn_on')
-    await wrapper.get('[data-testid="rule-add-source"]').trigger('click')
-    await wrapper.get('#rule-target-device').setValue('target')
-    await wrapper.get('#rule-target-action').setValue('turn_off')
+    await completeRuleDraft(wrapper)
     const savePromise = wrapper.get('[data-testid="rule-save"]').trigger('click')
     await wrapper.setProps({ nodes: nodes.filter(node => node.id !== 'source') })
     resolveCheck({

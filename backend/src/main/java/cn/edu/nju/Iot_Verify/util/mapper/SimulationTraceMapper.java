@@ -15,8 +15,6 @@ import cn.edu.nju.Iot_Verify.util.JsonUtils;
 import cn.edu.nju.Iot_Verify.util.ModelGenerationDiagnostics;
 import cn.edu.nju.Iot_Verify.util.ModelPlaybackSceneSnapshot;
 import cn.edu.nju.Iot_Verify.util.PersistedModelContextIntegrity;
-import cn.edu.nju.Iot_Verify.util.TraceStateIntegrity;
-import com.fasterxml.jackson.core.type.TypeReference;
 import org.springframework.stereotype.Component;
 import lombok.extern.slf4j.Slf4j;
 
@@ -41,15 +39,16 @@ public class SimulationTraceMapper {
         List<ModelGenerationIssueDto> generationIssues = JsonUtils.readPersisted(
                 "simulation trace", po.getId(), "generationIssuesJson",
                 () -> readGenerationIssues(po.getGenerationIssuesJson()));
-        List<TraceStateDto> states = readRequiredStates(
-                po.getId(), po.getStatesJson(), po.getStateCount(),
-                po.getSteps(), po.getRequestedSteps());
+        List<TraceStateDto> states = PersistedTraceEvidence.readStates(
+                "simulation trace", po.getId(), po.getStatesJson(), "state list is empty");
+        requireStateMetadata(po.getId(), po.getStateCount(), po.getSteps(), po.getRequestedSteps());
+        PersistedTraceEvidence.requireStateCount("simulation trace", po.getId(), states, po.getStateCount());
         int disabledRuleCount = ModelGenerationDiagnostics.disabledRuleCount(generationIssues, logs);
         PersistedModelContextIntegrity.ValidatedContext context = modelContext(po);
         SimulationRequestDto frozenRequest = readFrozenRequest(po.getId(), po.getRequestJson());
-        List<RuleDto> frozenRules = readFrozenRules(
-                po.getId(), frozenRequest, context.modelSnapshot().getRuleCount());
-        states = validateRuleEvidence(po.getId(), states, frozenRules);
+        List<RuleDto> frozenRules = PersistedTraceEvidence.readFrozenRules(
+                "simulation trace", po.getId(), frozenRequest::getRules, context.modelSnapshot().getRuleCount());
+        states = PersistedTraceEvidence.validateRuleEvidence("simulation trace", po.getId(), states, frozenRules);
         SimulationTraceDto dto = SimulationTraceDto.builder()
                 .id(po.getId())
                 .initiator(po.getInitiator())
@@ -145,25 +144,6 @@ public class SimulationTraceMapper {
         }
     }
 
-    private List<TraceStateDto> readRequiredStates(
-            Long id, String statesJson, Integer stateCount, int steps, int requestedSteps) {
-        List<TraceStateDto> states = JsonUtils.readPersistedRequired(
-                "simulation trace", id, "statesJson",
-                () -> TraceStateIntegrity.requireValidStates(JsonUtils.fromJson(
-                        statesJson, new TypeReference<List<TraceStateDto>>() {})));
-        if (states.isEmpty()) {
-            throw new PersistedDataIntegrityException(
-                    "simulation trace", id, "statesJson", "state list is empty");
-        }
-        requireStateMetadata(id, stateCount, steps, requestedSteps);
-        if (states.size() != stateCount) {
-            throw new PersistedDataIntegrityException(
-                    "simulation trace", id, "stateCount",
-                    "state count does not match statesJson");
-        }
-        return states;
-    }
-
     private void requireStateMetadata(Long id, Integer stateCount, int steps, int requestedSteps) {
         if (stateCount == null || stateCount < 1) {
             throw new PersistedDataIntegrityException(
@@ -184,22 +164,6 @@ public class SimulationTraceMapper {
         return JsonUtils.readPersistedJsonRequired(
                 "simulation trace", id, "requestJson", requestJson,
                 () -> JsonUtils.fromJson(requestJson, SimulationRequestDto.class));
-    }
-
-    private List<RuleDto> readFrozenRules(
-            Long id, SimulationRequestDto request, int expectedRuleCount) {
-        return JsonUtils.readPersisted(
-                "simulation trace", id, "requestJson",
-                () -> TraceStateIntegrity.requireFrozenRules(request.getRules(), expectedRuleCount));
-    }
-
-    private List<TraceStateDto> validateRuleEvidence(
-            Long id, List<TraceStateDto> states, List<RuleDto> frozenRules) {
-        return JsonUtils.readPersisted(
-                "simulation trace", id, "statesJson", () -> {
-                    TraceStateIntegrity.requireRuleEvidenceMatchesFrozenRules(states, frozenRules);
-                    return states;
-                });
     }
 
     private void applyPersistedContext(

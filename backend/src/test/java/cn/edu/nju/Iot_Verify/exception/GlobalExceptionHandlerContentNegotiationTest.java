@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.unavailableRedisStore;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -94,7 +95,7 @@ class GlobalExceptionHandlerContentNegotiationTest {
             executor.setMaxPoolSize(1);
             executor.initialize();
             try {
-                return new InteractiveAiExecutionService(executor, null)
+                return new InteractiveAiExecutionService(executor, unavailableRedisStore())
                         .execute(1L, "worker-error-request", () -> {
                             throw new InternalError("Private worker diagnostic");
                         });

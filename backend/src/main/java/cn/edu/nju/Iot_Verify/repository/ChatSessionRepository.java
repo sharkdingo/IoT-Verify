@@ -15,7 +15,6 @@ import java.util.Set;
 
 public interface ChatSessionRepository extends JpaRepository<ChatSessionPo, String>, DatabaseClockRepository {
 
-    List<ChatSessionPo> findByUserIdOrderByUpdatedAtDesc(Long userId);
     List<ChatSessionPo> findTop100ByUserIdOrderByUpdatedAtDesc(Long userId);
     long countByUserId(Long userId);
     Optional<ChatSessionPo> findByIdAndUserId(String id, Long userId);

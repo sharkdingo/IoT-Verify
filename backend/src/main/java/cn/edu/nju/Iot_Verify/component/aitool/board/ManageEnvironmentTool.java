@@ -76,12 +76,7 @@ public class ManageEnvironmentTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "action", "name", "value", "trust", "privacy"));
             String action = requiredText(args, "action").toLowerCase(Locale.ROOT);
@@ -139,7 +134,7 @@ public class ManageEnvironmentTool extends AbstractAiTool {
                 : "Current shared environment inputs returned.");
         response.put("operation", "listed");
         response.put("changesApplied", false);
-        return readOnlySuccessJson(response, "Failed to serialize environment inputs.");
+        return readOnlySuccessJson(response);
     }
 
     private String executeSet(Long userId, JsonNode args) throws ArgValidationException {
@@ -211,7 +206,7 @@ public class ManageEnvironmentTool extends AbstractAiTool {
         response.put("suppliedFields", suppliedFields);
         response.put("unspecifiedFieldsPreserved", List.of("value", "trust", "privacy").stream()
                 .filter(field -> !suppliedFields.contains(field)).toList());
-        return successJson(response, "Environment input updated.");
+        return successJson(response);
     }
 
     /**
@@ -251,7 +246,7 @@ public class ManageEnvironmentTool extends AbstractAiTool {
         response.put("operation", changed ? "defaults_restored" : "unchanged");
         response.put("changesApplied", changed);
         response.put("defaultsRestored", true);
-        return successJson(response, "Environment defaults restored.");
+        return successJson(response);
     }
 
     private Map<String, Object> mutationResponse(List<BoardEnvironmentVariableDto> current,

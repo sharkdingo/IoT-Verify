@@ -5,8 +5,6 @@ import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -54,12 +52,7 @@ public class ListRulesTool extends AbstractAiTool {
 
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("keyword"));
             String keyword = optionalTextArg(args, "keyword", "", 100);
 
@@ -78,7 +71,7 @@ public class ListRulesTool extends AbstractAiTool {
                 return readOnlySuccessJson(Map.of(
                         "message", message,
                         "count", 0
-                ), message);
+                ));
             }
 
             List<Map<String, Object>> presentedRules = rules.stream()
@@ -87,18 +80,12 @@ public class ListRulesTool extends AbstractAiTool {
             return readOnlySuccessJson(Map.of(
                     "count", rules.size(),
                     "rules", presentedRules
-            ), "Rules loaded.");
+            ));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("list_rules busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("list_rules business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("list_rules failed", e);
-            return errorJson("Failed to list rules.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "list_rules", e,
+                    "Failed to list rules.");
         }
     }
 

@@ -3,7 +3,7 @@
 System topology, the front/back boundary, and the backend package layout. Deep dives
 link out to the focused architecture documents.
 
-Verified against code on 2026-10-18. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/`,
+Verified against code on 2026-11-26. Source: `backend/src/main/java/cn/edu/nju/Iot_Verify/`,
 `frontend/src/`.
 
 ---
@@ -83,7 +83,14 @@ the module-root copy — a file created under `resources/` would shadow nothing 
 Key service implementations: `AuthServiceImpl`, `BoardStorageServiceImpl`,
 `VerificationServiceImpl`, `SimulationServiceImpl`, `FuzzServiceImpl`, `FixServiceImpl`, `ChatServiceImpl`,
 `NodeServiceImpl`, `DeviceTemplateServiceImpl`, plus `RedisTokenBlacklistService` and
-the `AbstractAsyncTaskService` base for async verify/simulate tasks.
+the `AbstractAsyncTaskService` base for verification, simulation, and counterexample-search tasks.
+
+`BoardStorageServiceImpl` retains the account lock, transaction, confirmation-token check, and
+journal update for template writes. `BoardTemplateImpact` derives blockers and confirmation
+evidence from the captured inputs without repository access. `TaskLeaseMaintenance` owns the
+shared renewal and recovery sequence. `LocalTaskExecution` owns the queued/running transition
+and cancels the task's own Future. Each service supplies its persistence transitions and
+diagnostics, and counterexample search returns its capacity permit when its local execution retires.
 
 ---
 
@@ -110,10 +117,13 @@ surface.
 Canvas presentation reuses reactive template-alias indexes; the first matching template retains
 precedence. Bundled-icon fallback lookup is indexed once from the static asset inventory. Sparse
 playback builds current/previous device and variable indexes in one historical pass, preserving
-first-match alias order and frozen reading objects. Pan and zoom reuse those indexes. The model
-comparison source reads semantic node fields explicitly so geometry and display-name updates do
-not serialize the scene. Inspector tab totals read collection sizes, while only the active
-inventory formats and filters its rows.
+first-match alias order and frozen reading objects. Pan and zoom reuse those indexes.
+`views/board/useBoardModelComparison.ts` owns the comparison request and its evidence lifetime
+for the displayed scene. It withdraws comparison evidence as soon as the model changes, then
+schedules one read for the latest scene after the synchronous updates settle. Its source reads
+semantic node fields explicitly so geometry and display-name updates do not serialize the scene.
+Inspector tab totals read collection sizes, while only the active inventory formats and
+filters its rows.
 
 The private, lazy `/account` page owns account form drafts and combines profile,
 credential, session, and account-deletion actions. The workspace has one account entry;

@@ -3,6 +3,8 @@ package cn.edu.nju.Iot_Verify.component.aitool.verification;
 import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
 import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
+import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationOutcome;
+import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto;
 import cn.edu.nju.Iot_Verify.dto.verification.SpecResultDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationTaskDto;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
@@ -21,6 +23,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Set;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -219,11 +222,17 @@ class VerificationAsyncToolsTest {
         when(verificationService.getTask(1L, 13L)).thenReturn(VerificationTaskDto.builder()
                 .id(13L).status("RUNNING").progress(50).build());
 
+        var schema = verifyTaskStatusTool.getDefinition().parameters();
+        assertEquals(Set.of("taskId", "waitMs"), schema.properties.keySet());
+        assertEquals(List.of("taskId"), schema.required);
         JsonNode json = objectMapper.readTree(verifyTaskStatusTool.execute("{\"taskId\":13,\"waitMs\":0}"));
 
         assertEquals("RUNNING", json.path("task").path("status").asText());
         assertEquals(50, json.path("progress").asInt());
         assertEquals(50, json.path("task").path("progress").asInt());
+        JsonNode unexpected = objectMapper.readTree(verifyTaskStatusTool.execute(
+                "{\"taskId\":13,\"waitMs\":0,\"unexpected\":true}"));
+        assertEquals("arguments contains unsupported field(s): unexpected.", unexpected.path("error").asText());
         verify(verificationService).getTask(1L, 13L);
         verifyNoMoreInteractions(verificationService);
     }
@@ -279,6 +288,8 @@ class VerificationAsyncToolsTest {
         JsonNode json = objectMapper.readTree(verifyTaskStatusTool.execute("{\"taskId\":13}"));
 
         assertEquals("TASK_STATUS_WAIT_CANCELLED", json.path("errorCode").asText());
+        assertEquals(499, json.path("status").asInt());
+        assertFalse(Thread.currentThread().isInterrupted());
         verify(verificationService).getTask(1L, 13L);
         verifyNoMoreInteractions(verificationService);
     }
@@ -304,7 +315,7 @@ class VerificationAsyncToolsTest {
 
     @Test
     void verifyTaskStatus_rejectsUnboundedOrMalformedWaitBeforeReadingTask() throws Exception {
-        for (String wait : List.of("-1", "10001", "1.5", "\"1000\"")) {
+        for (String wait : List.of("-1", "10001", "1.5", "\"1000\"", "\"soon\"", "null")) {
             JsonNode json = objectMapper.readTree(verifyTaskStatusTool.execute(
                     "{\"taskId\":13,\"waitMs\":" + wait + "}"));
             assertEquals("VALIDATION_ERROR", json.path("errorCode").asText(), wait);
@@ -353,6 +364,10 @@ class VerificationAsyncToolsTest {
 
     @Test
     void taskTools_rejectUnknownFieldsBeforeCallingService() throws Exception {
+        var schema = cancelVerifyTaskTool.getDefinition().parameters();
+        assertEquals(List.of("taskId"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId"), schema.required);
+
         JsonNode status = objectMapper.readTree(verifyTaskStatusTool.execute(
                 "{\"taskId\":12,\"taksId\":12}"));
         JsonNode cancel = objectMapper.readTree(cancelVerifyTaskTool.execute(
@@ -378,35 +393,29 @@ class VerificationAsyncToolsTest {
 
     @Test
     void cancelVerifyTask_invalidTaskId_shouldReturnError() throws Exception {
-        String result = cancelVerifyTaskTool.execute("{\"taskId\":0}");
-        JsonNode json = objectMapper.readTree(result);
-        assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
-        assertEquals(400, json.path("status").asInt());
-        assertTrue(result.contains("must be positive"));
+        for (int invalidTaskId : List.of(0, -1)) {
+            String result = cancelVerifyTaskTool.execute("{\"taskId\":" + invalidTaskId + "}");
+            JsonNode json = objectMapper.readTree(result);
+            assertEquals("VALIDATION_ERROR", json.path("errorCode").asText(), result);
+            assertEquals(400, json.path("status").asInt());
+            assertTrue(result.contains("must be positive"));
+        }
+        verifyNoMoreInteractions(verificationService);
     }
 
     @Test
-    void cancelVerifyTask_whenResponseSerializationFails_shouldReturnAmbiguousMutationResult() throws Exception {
-        ObjectMapper failingMapper = spy(new ObjectMapper());
-        doThrow(new RuntimeException("boom")).when(failingMapper).writeValueAsString(any());
-        when(verificationService.cancelTask(1L, 7L)).thenReturn(
-                cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto.builder()
-                        .taskId(7L)
-                        .cancellationAccepted(true)
-                        .cancellationOutcome(cn.edu.nju.Iot_Verify.dto.model.TaskCancellationOutcome.ACCEPTED)
-                        .taskStatus("CANCELLED")
-                        .executionMayStillBeStopping(true)
-                        .build());
+    void cancelVerifyTask_reportsCompletionWhenTheRunFinishedFirst() throws Exception {
+        when(verificationService.cancelTask(1L, 7L)).thenReturn(TaskCancellationResultDto.builder()
+                .taskId(7L).cancellationOutcome(TaskCancellationOutcome.ALREADY_COMPLETED)
+                .taskStatus("COMPLETED").build());
 
-        CancelVerifyTaskTool fallbackTool = new CancelVerifyTaskTool(verificationService, failingMapper);
-        String result = fallbackTool.execute("{\"taskId\":7}");
-        JsonNode json = objectMapper.readTree(result);
+        JsonNode json = objectMapper.readTree(cancelVerifyTaskTool.execute("{\"taskId\":7}"));
 
-        assertEquals("RESULT_UNAVAILABLE", json.path("resultStatus").asText());
-        assertEquals(false, json.path("resultAvailable").asBoolean());
-        assertTrue(json.path("mutationMayHaveCommitted").asBoolean());
-        assertTrue(json.path("message").asText().contains("refresh current state"));
-        assertTrue(json.path("warning").asText().contains("serialization failed"));
+        assertEquals(7L, json.path("taskId").asLong());
+        assertFalse(json.path("cancellationAccepted").asBoolean());
+        assertEquals("ALREADY_COMPLETED", json.path("cancellationOutcome").asText());
+        assertEquals("COMPLETED", json.path("taskStatus").asText());
+        assertEquals("The task completed before cancellation; inspect its result.", json.path("message").asText());
     }
 
 }

@@ -73,6 +73,9 @@ handle identically everywhere:
 - Redis being unavailable never silently downgrades to a local-only guarantee once a distributed
   attempt has begun; it fails closed.
 
+A stop accepted while the worker publishes its `RUNNING` status prevents the operation from
+starting. The worker releases its admission when it exits.
+
 Per-endpoint status semantics stay with each endpoint's own doc.
 
 ---

@@ -14,8 +14,6 @@ import cn.edu.nju.Iot_Verify.repository.projection.FuzzFindingSummaryProjection;
 import cn.edu.nju.Iot_Verify.repository.projection.FuzzTaskSummaryProjection;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.data.domain.PageRequest;
 
 import java.time.LocalDateTime;
@@ -28,12 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DataJpaTest(properties = {
-        "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
-        "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
-        "spring.jpa.hibernate.ddl-auto=create-drop"
-})
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)
+@H2RepositoryTest
 class FuzzRepositoryTest {
 
     @Autowired private FuzzTaskRepository taskRepository;
@@ -274,7 +267,7 @@ class FuzzRepositoryTest {
         chatSessionRepository.deleteByUserId(71L);
         assertEquals(1, findingRepository.deleteByUserId(71L));
 
-        assertTrue(chatMessageRepository.findBySessionIdOrderByCreatedAtAsc(session.getId()).isEmpty());
+        assertEquals(0L, chatMessageRepository.countBySessionId(session.getId()));
         assertTrue(chatSessionRepository.findByIdAndUserId(session.getId(), 71L).isEmpty());
     }
 

@@ -11,8 +11,6 @@ import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import cn.edu.nju.Iot_Verify.util.SpecificationFormulaPreview;
@@ -65,12 +63,7 @@ public class BoardOverviewTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("detail"));
             boolean detail = booleanArg(args, "detail", true);
 
@@ -172,15 +165,9 @@ public class BoardOverviewTool extends AbstractAiTool {
             return objectMapper.writeValueAsString(overview);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("board_overview busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("board_overview business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("board_overview failed", e);
-            return errorJson("Failed to get board overview. Please retry.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "board_overview", e,
+                    "Failed to get board overview. Please retry.");
         }
     }
 

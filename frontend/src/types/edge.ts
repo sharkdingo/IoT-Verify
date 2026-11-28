@@ -4,8 +4,6 @@ export interface DeviceEdge {
     id: string
     from: string
     to: string
-    fromLabel: string
-    toLabel: string
     fromPos: { x: number; y: number }
     toPos: { x: number; y: number }
     // Rule-derived display metadata. DeviceEdge is a canvas display shape; visible
@@ -17,5 +15,4 @@ export interface DeviceEdge {
     value?: string
     ruleId?: string
     ruleIndex?: number
-    sourceIndex?: number
 }

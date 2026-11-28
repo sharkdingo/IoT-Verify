@@ -26,6 +26,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -54,7 +55,7 @@ class ManageSpecToolTest {
     @BeforeEach
     void setUp() {
         ObjectMapper objectMapper = new ObjectMapper();
-        destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
+        destructiveActionGuard = inMemoryActionGuard(objectMapper);
         reads = new AiToolReadFixture();
         tool = new ManageSpecTool(boardStorageService, objectMapper, destructiveActionGuard, reads.service);
         UserContextHolder.setUserId(1L);
@@ -216,7 +217,7 @@ class ManageSpecToolTest {
         before.setTemplateId("1");
         before.setAConditions(List.of(condition));
         return new BoardSemanticSnapshotDto(
-                List.of(node), List.of(), List.of(), List.of(before), List.of(sensorTemplate()));
+                List.of(node), List.of(), List.of(), List.of(before), List.of(sensorTemplate("Sensor", "temperature", false)));
     }
 
     private String specificationUpdateArgs(SpecificationDto before) throws Exception {
@@ -298,23 +299,10 @@ class ManageSpecToolTest {
         node.setPosition(position);
 
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceLabel":"LivingRoomAC",
-                      "targetType":"state",
-                      "key":"state",
-                      "relation":"=",
-                      "value":"On"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceLabel":"LivingRoomAC", "targetType":"state", "key":"state",
+                "relation":"=", "value":"On"
+                """));
         assertTrue(result.contains("must include an existing deviceId"));
         verify(boardStorageService, never()).addSpec(anyLong(), any());
     }
@@ -332,24 +320,10 @@ class ManageSpecToolTest {
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node1, node2));
         stubSuccessfulSpecAdd();
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"ac_1",
-                      "deviceLabel":"LivingRoomAC",
-                      "targetType":"state",
-                      "key":"state",
-                      "relation":"=",
-                      "value":"On"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"ac_1", "deviceLabel":"LivingRoomAC", "targetType":"state",
+                "key":"state", "relation":"=", "value":"On"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         JsonNode response = new ObjectMapper().readTree(result);
@@ -380,24 +354,10 @@ class ManageSpecToolTest {
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node1, node2));
         stubSuccessfulSpecAdd();
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"ac_1",
-                      "deviceLabel":"KitchenAC",
-                      "targetType":"state",
-                      "key":"state",
-                      "relation":"=",
-                      "value":"On"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"ac_1", "deviceLabel":"KitchenAC", "targetType":"state",
+                "key":"state", "relation":"=", "value":"On"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         ArgumentCaptor<SpecificationDto> captor = ArgumentCaptor.forClass(SpecificationDto.class);
@@ -420,28 +380,12 @@ class ManageSpecToolTest {
      */
     @Test
     void add_variableConditionWithoutVariableSource_shouldBeRejected() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
 
-        String result = tool.execute("""
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"variable",
-                      "key":"temperature",
-                      "relation":">",
-                      "value":"28"
-                    }
-                  ]
-                }
-                """);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"variable", "key":"temperature",
+                "relation":">", "value":"28"
+                """));
 
         assertTrue(result.contains("requires variableSource"),
                 () -> "Expected a variableSource requirement, got " + result);
@@ -450,29 +394,12 @@ class ManageSpecToolTest {
 
     @Test
     void add_variableSourceOnANonVariableTarget_shouldBeRejected() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
 
-        String result = tool.execute("""
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"state",
-                      "variableSource":"environment",
-                      "key":"state",
-                      "relation":"=",
-                      "value":"On"
-                    }
-                  ]
-                }
-                """);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"state", "variableSource":"environment",
+                "key":"state", "relation":"=", "value":"On"
+                """));
 
         assertTrue(result.contains("may use variableSource only with variable"),
                 () -> "Expected a target-type rejection, got " + result);
@@ -481,31 +408,12 @@ class ManageSpecToolTest {
 
     @Test
     void add_withLegacyGeneratedEnvironmentAlias_shouldRejectWhenNoLiteralVariableExists() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"variable",
-                      "variableSource":"environment",
-                      "key":"a_temperature",
-                      "relation":">",
-                      "value":"28"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"variable", "variableSource":"environment",
+                "key":"a_temperature", "relation":">", "value":"28"
+                """));
 
         assertTrue(result.contains("Condition 1 on 'A'"));
         assertFalse(result.contains("Condition index"));
@@ -515,32 +423,13 @@ class ManageSpecToolTest {
 
     @Test
     void add_withActualAPrefixedEnvironmentVariable_shouldTreatKeyLiterally() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("A-prefixed Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(aPrefixedSensorTemplate()));
+        stubSensor(sensorTemplate("A-prefixed Sensor", "a_temperature", false));
         stubSuccessfulSpecAdd();
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"variable",
-                      "variableSource":"environment",
-                      "key":"a_temperature",
-                      "relation":">",
-                      "value":"28"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"variable", "variableSource":"environment",
+                "key":"a_temperature", "relation":">", "value":"28"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         ArgumentCaptor<SpecificationDto> captor = ArgumentCaptor.forClass(SpecificationDto.class);
@@ -555,32 +444,13 @@ class ManageSpecToolTest {
 
     @Test
     void add_withEnvironmentVariable_shouldPersistDeviceRefsAndSharedVariableFormula() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
         stubSuccessfulSpecAdd();
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"variable",
-                      "variableSource":"environment",
-                      "key":"temperature",
-                      "relation":">",
-                      "value":"28"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"variable", "variableSource":"environment",
+                "key":"temperature", "relation":">", "value":"28"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         ArgumentCaptor<SpecificationDto> captor = ArgumentCaptor.forClass(SpecificationDto.class);
@@ -599,24 +469,10 @@ class ManageSpecToolTest {
         node.setLabel("Sensor");
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"trust",
-                      "propertyScope":"variable",
-                      "key":"temperature",
-                      "relation":">",
-                      "value":"trusted"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"trust", "propertyScope":"variable",
+                "key":"temperature", "relation":">", "value":"trusted"
+                """));
 
         assertTrue(result.contains("targetType='trust' only supports =, !=, in, not in"));
         verify(boardStorageService, never()).addSpec(anyLong(), any());
@@ -645,31 +501,12 @@ class ManageSpecToolTest {
 
     @Test
     void add_withGeneratedTrustAlias_shouldRejectWhenNoLiteralVariableExists() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"trust",
-                      "propertyScope":"variable",
-                      "key":"trust_temperature",
-                      "relation":"=",
-                      "value":"untrusted"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"trust", "propertyScope":"variable",
+                "key":"trust_temperature", "relation":"=", "value":"untrusted"
+                """));
 
         assertTrue(result.contains("unknown property variable"));
         verify(boardStorageService, never()).addSpec(anyLong(), any());
@@ -677,32 +514,13 @@ class ManageSpecToolTest {
 
     @Test
     void add_withActualTrustPrefixedVariable_shouldTreatTrustKeyLiterally() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Trust-prefixed Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(trustPrefixedSensorTemplate()));
+        stubSensor(sensorTemplate("Trust-prefixed Sensor", "trust_temperature", true));
         stubSuccessfulSpecAdd();
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"sensor_1",
-                      "targetType":"trust",
-                      "propertyScope":"variable",
-                      "key":"trust_temperature",
-                      "relation":"=",
-                      "value":"untrusted"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"trust", "propertyScope":"variable",
+                "key":"trust_temperature", "relation":"=", "value":"untrusted"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         ArgumentCaptor<SpecificationDto> captor = ArgumentCaptor.forClass(SpecificationDto.class);
@@ -716,28 +534,13 @@ class ManageSpecToolTest {
 
     @Test
     void add_withStateTrustScope_buildsCurrentStateGuardedPreview() {
-        DeviceNodeDto node = new DeviceNodeDto();
-        node.setId("sensor_1");
-        node.setLabel("Sensor");
-        node.setTemplateName("Sensor");
-        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
-        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(sensorTemplate()));
+        stubSensor(sensorTemplate("Sensor", "temperature", false));
         stubSuccessfulSpecAdd();
 
-        String result = tool.execute("""
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[{
-                    "deviceId":"sensor_1",
-                    "targetType":"trust",
-                    "propertyScope":"state",
-                    "key":"Mode",
-                    "relation":"=",
-                    "value":"untrusted"
-                  }]
-                }
-                """);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"sensor_1", "targetType":"trust", "propertyScope":"state",
+                "key":"Mode", "relation":"=", "value":"untrusted"
+                """));
 
         assertTrue(result.contains("not been formally verified"));
         ArgumentCaptor<SpecificationDto> captor = ArgumentCaptor.forClass(SpecificationDto.class);
@@ -792,23 +595,10 @@ class ManageSpecToolTest {
         when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
         when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(airConditionerTemplate()));
 
-        String argsJson = """
-                {
-                  "action":"add",
-                  "name": "Safety requirement", "templateId":"1",
-                  "aConditions":[
-                    {
-                      "deviceId":"ac_1",
-                      "targetType":"state",
-                      "key":"state",
-                      "relation":"=",
-                      "value":"sleeping"
-                    }
-                  ]
-                }
-                """;
-
-        String result = tool.execute(argsJson);
+        String result = tool.execute(safetyCondition("""
+                "deviceId":"ac_1", "targetType":"state", "key":"state",
+                "relation":"=", "value":"sleeping"
+                """));
 
         assertTrue(result.contains("illegal state value"));
         verify(boardStorageService, never()).addSpec(anyLong(), any());
@@ -968,6 +758,22 @@ class ManageSpecToolTest {
         verify(boardStorageService, never()).addSpec(anyLong(), any());
     }
 
+    private String safetyCondition(String conditionFields) {
+        return """
+                {"action":"add", "name":"Safety requirement", "templateId":"1",
+                 "aConditions":[{%s}]}
+                """.formatted(conditionFields);
+    }
+
+    private void stubSensor(DeviceTemplateDto template) {
+        DeviceNodeDto node = new DeviceNodeDto();
+        node.setId("sensor_1");
+        node.setLabel("Sensor");
+        node.setTemplateName(template.getName());
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(node));
+        when(boardStorageService.getDeviceTemplates(1L)).thenReturn(List.of(template));
+    }
+
     private void stubSuccessfulSpecAdd() {
         when(boardStorageService.addSpec(eq(1L), any(SpecificationDto.class))).thenAnswer(invocation -> {
             SpecificationDto spec = invocation.getArgument(1);
@@ -1000,39 +806,18 @@ class ManageSpecToolTest {
         return template;
     }
 
-    private DeviceTemplateDto aPrefixedSensorTemplate() {
+    private DeviceTemplateDto sensorTemplate(String name, String variableName, boolean inside) {
         DeviceTemplateDto template = new DeviceTemplateDto();
-        template.setName("A-prefixed Sensor");
+        template.setName(name);
         DeviceTemplateDto.DeviceManifest manifest = new DeviceTemplateDto.DeviceManifest();
-        manifest.setName("A-prefixed Sensor");
+        manifest.setName(name);
         manifest.setModes(List.of("Mode"));
         manifest.setInitState("on");
         manifest.setWorkingStates(List.of(workingState("on")));
         manifest.setInternalVariables(List.of(
                 DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("a_temperature")
-                        .isInside(false)
-                        .lowerBound(0)
-                        .upperBound(100)
-                        .build()
-        ));
-        manifest.setApis(List.of());
-        template.setManifest(manifest);
-        return template;
-    }
-
-    private DeviceTemplateDto sensorTemplate() {
-        DeviceTemplateDto template = new DeviceTemplateDto();
-        template.setName("Sensor");
-        DeviceTemplateDto.DeviceManifest manifest = new DeviceTemplateDto.DeviceManifest();
-        manifest.setName("Sensor");
-        manifest.setModes(List.of("Mode"));
-        manifest.setInitState("on");
-        manifest.setWorkingStates(List.of(workingState("on")));
-        manifest.setInternalVariables(List.of(
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("temperature")
-                        .isInside(false)
+                        .name(variableName)
+                        .isInside(inside)
                         .lowerBound(0)
                         .upperBound(100)
                         .build()
@@ -1053,27 +838,6 @@ class ManageSpecToolTest {
                 workingState("off;idle"),
                 workingState("on;cool")));
         manifest.setInternalVariables(List.of());
-        manifest.setApis(List.of());
-        template.setManifest(manifest);
-        return template;
-    }
-
-    private DeviceTemplateDto trustPrefixedSensorTemplate() {
-        DeviceTemplateDto template = new DeviceTemplateDto();
-        template.setName("Trust-prefixed Sensor");
-        DeviceTemplateDto.DeviceManifest manifest = new DeviceTemplateDto.DeviceManifest();
-        manifest.setName("Trust-prefixed Sensor");
-        manifest.setModes(List.of("Mode"));
-        manifest.setInitState("on");
-        manifest.setWorkingStates(List.of(workingState("on")));
-        manifest.setInternalVariables(List.of(
-                DeviceTemplateDto.DeviceManifest.InternalVariable.builder()
-                        .name("trust_temperature")
-                        .isInside(true)
-                        .lowerBound(0)
-                        .upperBound(100)
-                        .build()
-        ));
         manifest.setApis(List.of());
         template.setManifest(manifest);
         return template;

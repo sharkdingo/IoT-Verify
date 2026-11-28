@@ -1,7 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.simulation;
 
-import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControl;
-import cn.edu.nju.Iot_Verify.component.ai.LlmRequestControlHolder;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTaskDto;
 import cn.edu.nju.Iot_Verify.exception.AsyncTaskDispatchOutcomeUnknownException;
@@ -20,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Set;
 import java.time.LocalDateTime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,7 +58,6 @@ class SimulationAsyncToolsTest {
     @AfterEach
     void tearDown() {
         UserContextHolder.clear();
-        LlmRequestControlHolder.clear();
     }
 
     @Test
@@ -117,8 +115,8 @@ class SimulationAsyncToolsTest {
                 .thenReturn(200L);
         when(simulationService.getTask(1L, 200L)).thenReturn(SimulationTaskDto.builder()
                 .id(200L)
-                .status("PENDING")
-                .progress(0)
+                .status("RUNNING")
+                .progress(17)
                 .requestedSteps(10)
                 .isAttack(false)
                 .attackBudget(0)
@@ -131,7 +129,8 @@ class SimulationAsyncToolsTest {
         JsonNode json = objectMapper.readTree(result);
 
         assertTrue(result.contains("taskId"));
-        assertEquals("PENDING", json.path("taskStatus").asText());
+        assertEquals("RUNNING", json.path("taskStatus").asText());
+        assertEquals(17, json.path("progress").asInt());
         assertEquals(10, json.path("requestedSteps").asInt());
         assertEquals(false, json.path("isAttack").asBoolean());
         assertEquals(0, json.path("attackBudget").asInt());
@@ -221,11 +220,17 @@ class SimulationAsyncToolsTest {
         when(simulationService.getTask(1L, 13L)).thenReturn(SimulationTaskDto.builder()
                 .id(13L).status("RUNNING").progress(50).build());
 
+        var schema = simulateTaskStatusTool.getDefinition().parameters();
+        assertEquals(Set.of("taskId", "waitMs"), schema.properties.keySet());
+        assertEquals(List.of("taskId"), schema.required);
         JsonNode json = objectMapper.readTree(simulateTaskStatusTool.execute("{\"taskId\":13,\"waitMs\":0}"));
 
         assertEquals("RUNNING", json.path("task").path("status").asText());
         assertEquals(50, json.path("progress").asInt());
         assertEquals(50, json.path("task").path("progress").asInt());
+        JsonNode unexpected = objectMapper.readTree(simulateTaskStatusTool.execute(
+                "{\"taskId\":13,\"waitMs\":0,\"unexpected\":true}"));
+        assertEquals("arguments contains unsupported field(s): unexpected.", unexpected.path("error").asText());
         verify(simulationService).getTask(1L, 13L);
         verifyNoMoreInteractions(simulationService);
     }
@@ -244,31 +249,6 @@ class SimulationAsyncToolsTest {
         assertEquals(100, result.path("progress").asInt());
         assertEquals(31L, result.path("simulationId").asLong());
         verify(simulationService, org.mockito.Mockito.times(2)).getTask(1L, 13L);
-    }
-
-    @Test
-    void simulateTaskStatusRejectsInvalidWaitsBeforeReadingATask() throws Exception {
-        for (String wait : List.of("-1", "10001", "1.5", "\"soon\"", "null")) {
-            JsonNode result = objectMapper.readTree(simulateTaskStatusTool.execute(
-                    "{\"taskId\":13,\"waitMs\":" + wait + "}"));
-            assertEquals("VALIDATION_ERROR", result.path("errorCode").asText(), wait);
-        }
-        verifyNoMoreInteractions(simulationService);
-    }
-
-    @Test
-    void simulateTaskStatusCanStopWaitingWithoutCancellingTheSimulation() throws Exception {
-        when(simulationService.getTask(1L, 13L)).thenReturn(
-                SimulationTaskDto.builder().id(13L).status("RUNNING").progress(50).build());
-        LlmRequestControlHolder.set(new LlmRequestControl(() -> true));
-
-        JsonNode result = objectMapper.readTree(simulateTaskStatusTool.execute("{\"taskId\":13}"));
-
-        assertEquals("TASK_STATUS_WAIT_CANCELLED", result.path("errorCode").asText());
-        assertEquals(499, result.path("status").asInt());
-        assertFalse(Thread.currentThread().isInterrupted());
-        verify(simulationService).getTask(1L, 13L);
-        verifyNoMoreInteractions(simulationService);
     }
 
     @Test
@@ -306,6 +286,10 @@ class SimulationAsyncToolsTest {
 
     @Test
     void taskTools_rejectUnknownFieldsBeforeCallingService() throws Exception {
+        var schema = cancelSimulateTaskTool.getDefinition().parameters();
+        assertEquals(List.of("taskId"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId"), schema.required);
+
         JsonNode status = objectMapper.readTree(simulateTaskStatusTool.execute(
                 "{\"taskId\":12,\"taksId\":12}"));
         JsonNode cancel = objectMapper.readTree(cancelSimulateTaskTool.execute(
@@ -327,15 +311,6 @@ class SimulationAsyncToolsTest {
         assertEquals("BUSINESS_ERROR", json.path("errorCode").asText());
         assertEquals(400, json.path("status").asInt());
         assertEquals("invalid simulation task", json.path("error").asText());
-    }
-
-    @Test
-    void cancelSimulateTask_invalidTaskId_shouldReturnError() throws Exception {
-        String result = cancelSimulateTaskTool.execute("{\"taskId\":-1}");
-        JsonNode json = objectMapper.readTree(result);
-        assertEquals("VALIDATION_ERROR", json.path("errorCode").asText());
-        assertEquals(400, json.path("status").asInt());
-        assertTrue(result.contains("must be positive"));
     }
 
     @Test

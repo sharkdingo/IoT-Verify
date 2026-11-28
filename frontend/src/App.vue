@@ -5,11 +5,17 @@ import { useI18n } from "vue-i18n";
 import { ElConfigProvider } from "element-plus";
 import en from "element-plus/es/locale/lang/en";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
-import type { ChatLogoutPreparation, ChatSessionObservationBaseline, StreamCommand } from "@/types/chat";
+import {
+  isStreamRefreshTarget,
+  type ChatLogoutPreparation,
+  type ChatSessionObservationBaseline,
+  type StreamCommand
+} from "@/types/chat";
 import { useChatStore } from "@/stores/chat";
 import { useAuth } from "@/stores/auth";
 import { getSessionActivity, getSessionList, requestSessionStop } from "@/api/chat";
 import { publishBoardInvalidation } from "@/utils/boardInvalidation";
+import { captureSessionObservations, observeSessionChanges, waitForChatSessionIdle } from "@/utils/chatSessionObservations";
 import AppErrorBoundary from "./components/AppErrorBoundary.vue";
 import AssistantRecoveryPanel from "./components/AssistantRecoveryPanel.vue";
 import { loginRedirectTarget } from "@/router/loginRedirect";
@@ -17,7 +23,7 @@ import { isNavigationInProgress } from "@/router";
 import {
   assistantRefreshEffects,
   assistantStreamInvalidationScope,
-  isAssistantRefreshTarget
+  type AssistantRefreshEffects
 } from "@/views/board/assistantRefresh";
 
 const route = useRoute();
@@ -47,11 +53,7 @@ let chatSessionStateRequestEpoch = 0;
 let hiddenChatStateTimer: number | null = null;
 let hiddenChatStateRefresh: { repeat: boolean } | null = null;
 let assistantSessionStateUserId: number | null = null;
-type HiddenAssistantObservation = {
-  active: boolean;
-  latestTerminalMessageId: number | null;
-};
-let hiddenAssistantObservations = new Map<string, HiddenAssistantObservation>();
+let hiddenAssistantObservations = captureSessionObservations([]);
 let hiddenAssistantObservationsInitialized = false;
 const pendingAssistantReconciliationKeys = new Set<string>();
 let hiddenAssistantReconciliationPromise: Promise<boolean> | null = null;
@@ -125,30 +127,13 @@ const refreshChatSessionState = async () => {
         || hasMountedChat.value
         || authState.user?.userId !== userId || route.meta.public) return;
     const ownedSessions = sessions.filter(session => session.userId === userId);
-    const nextObservations = new Map(ownedSessions.map(session => [session.id, {
-      active: session.active,
-      latestTerminalMessageId: session.latestTerminalMessageId
-    }]));
-    if (hiddenAssistantObservationsInitialized) {
-      nextObservations.forEach((observation, sessionId) => {
-        const previous = hiddenAssistantObservations.get(sessionId);
-        if (observation.latestTerminalMessageId !== null
-            && observation.latestTerminalMessageId !== previous?.latestTerminalMessageId) {
-          pendingAssistantReconciliationKeys.add(
-            `${sessionId}:terminal:${observation.latestTerminalMessageId}`);
-        }
-      });
-    } else {
-      hiddenAssistantObservationsInitialized = true;
-    }
-    hiddenAssistantObservations.forEach((previous, sessionId) => {
-      if (previous.active && nextObservations.get(sessionId)?.active !== true) {
-        const terminalMessageId = nextObservations.get(sessionId)?.latestTerminalMessageId;
-        pendingAssistantReconciliationKeys.add(terminalMessageId === undefined
-          ? `${sessionId}:removed-while-active`
-          : `${sessionId}:terminal:${terminalMessageId ?? 'missing'}`);
-      }
-    });
+    const nextObservations = captureSessionObservations(ownedSessions);
+    const { completed, removed } = observeSessionChanges(
+      hiddenAssistantObservations, nextObservations.values(), hiddenAssistantObservationsInitialized);
+    completed.forEach(({ id, latestTerminalMessageId }) => pendingAssistantReconciliationKeys.add(
+      `${id}:terminal:${latestTerminalMessageId ?? 'missing'}`));
+    removed.forEach(({ id }) => pendingAssistantReconciliationKeys.add(`${id}:removed-while-active`));
+    hiddenAssistantObservationsInitialized = true;
     hiddenAssistantObservations = nextObservations;
     const activeCount = ownedSessions.filter(session => session.active).length;
     chatStore.setActiveCount(activeCount);
@@ -236,7 +221,7 @@ watch(() => chatStore.state.visible, visible => {
     if (assistantSessionStateUserId !== null && hiddenAssistantObservationsInitialized) {
       initialChatSessionObservations.value = {
         userId: assistantSessionStateUserId,
-        sessions: Array.from(hiddenAssistantObservations, ([id, observation]) => ({ id, ...observation })),
+        sessions: Array.from(hiddenAssistantObservations.values()),
         reconciliation: hiddenAssistantReconciliationPromise
       };
     }
@@ -272,20 +257,18 @@ const getBoardChatContext = () => {
   return view.getChatSuggestionContext();
 };
 
-const invokeViewMethod = async (methodName: string): Promise<boolean> => {
+const invokeBoardRefresh = async (
+  methodName: AssistantRefreshEffects['method'],
+  broadcastAfterRefresh: boolean
+): Promise<boolean> => {
+  const userId = broadcastAfterRefresh ? getUser()?.userId : undefined;
   const view = routerViewRef.value;
   if (!view || typeof view[methodName] !== 'function') {
     console.warn(`Current view does not support command method: ${methodName}`);
     return false;
   }
-  return await view[methodName]() !== false;
-};
-
-const invokeBoardRefresh = async (methodName: string): Promise<boolean> => {
-  const userId = getUser()?.userId;
-  const owningView = routerViewRef.value;
-  const refreshed = await invokeViewMethod(methodName);
-  if (refreshed && getUser()?.userId === userId && routerViewRef.value === owningView) {
+  const refreshed = await view[methodName]() !== false;
+  if (refreshed && broadcastAfterRefresh && getUser()?.userId === userId && routerViewRef.value === view) {
     publishBoardInvalidation(userId, 'chat-tool');
   }
   return refreshed;
@@ -293,7 +276,7 @@ const invokeBoardRefresh = async (methodName: string): Promise<boolean> => {
 
 const handleStreamCommandReceived = (command: StreamCommand, userId: number | null) => {
   if (userId === null || getUser()?.userId !== userId || route.meta.public) return;
-  if (command.type !== 'REFRESH_DATA' || !isAssistantRefreshTarget(command.payload?.target)) return;
+  if (command.type !== 'REFRESH_DATA' || !isStreamRefreshTarget(command.payload?.target)) return;
   const { target, assistantAction } = command.payload;
   publishBoardInvalidation(userId, 'chat-tool', assistantStreamInvalidationScope(target, assistantAction));
 };
@@ -302,7 +285,7 @@ const handleSystemCommand = async (cmd: StreamCommand, source?: 'stream'): Promi
   if (cmd.type === 'REFRESH_DATA') {
     const target = cmd.payload?.target;
     // An unknown target is a contract mismatch, not something to guess at.
-    if (!isAssistantRefreshTarget(target)) {
+    if (!isStreamRefreshTarget(target)) {
       if (target) console.warn(`Unsupported REFRESH_DATA target: ${String(target)}`);
       return false;
     }
@@ -319,9 +302,7 @@ const handleSystemCommand = async (cmd: StreamCommand, source?: 'stream'): Promi
       if (broadcastAfterRefresh) publishBoardInvalidation(userId, 'chat-tool');
       return true;
     }
-    return broadcastAfterRefresh
-      ? await invokeBoardRefresh(effects.method)
-      : await invokeViewMethod(effects.method);
+    return await invokeBoardRefresh(effects.method, broadcastAfterRefresh);
   }
 
   return false;
@@ -371,25 +352,13 @@ const prepareChatForLogout = async (): Promise<ChatLogoutPreparation> => {
   }
 
   const deadline = Date.now() + 10_000;
-  for (const sessionId of activeSessionIds) {
-    let idle = false;
-    while (Date.now() < deadline) {
-      if (!ownsPreparation()) return 'outcome-unknown';
-      try {
-        idle = !(await getSessionActivity(sessionId)).active;
-        if (!ownsPreparation()) return 'outcome-unknown';
-        if (idle) break;
-      } catch (error: any) {
-        if (!ownsPreparation()) return 'outcome-unknown';
-        if (error?.response?.status === 404) {
-          idle = true;
-          break;
-        }
-        return 'outcome-unknown';
-      }
-      await new Promise(resolve => window.setTimeout(resolve, 500));
+  try {
+    for (const sessionId of activeSessionIds) {
+      const idle = await waitForChatSessionIdle(() => getSessionActivity(sessionId), ownsPreparation, deadline, 1);
+      if (!ownsPreparation() || !idle) return 'outcome-unknown';
     }
-    if (!idle) return 'outcome-unknown';
+  } catch {
+    return 'outcome-unknown';
   }
 
   const reconciled = await executeHiddenAssistantReconciliation();

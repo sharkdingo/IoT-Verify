@@ -65,12 +65,6 @@ public class DeviceTemplateServiceImpl implements DeviceTemplateService {
             return 0;
         }
 
-        return importDefaultTemplates(userId);
-    }
-
-    @Override
-    @Transactional
-    public int importDefaultTemplates(Long userId) {
         List<DeviceTemplatePo> templates = loadDefaultTemplateEntities(userId);
         templateRepo.saveAllAndFlush(templates);
         log.info("Imported {} default device templates for user {}", templates.size(), userId);

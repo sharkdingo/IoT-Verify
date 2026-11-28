@@ -11,8 +11,8 @@ import { errorDetails } from '@/utils/userMessage'
 import { validateDeviceRuntimeConfig } from '@/utils/deviceRuntime'
 import { materializeRuleRecommendation, materializeSpecificationRecommendationConditions, RecommendationCandidateError } from '@/utils/recommendationMaterialization'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
-import { normalizeModelRelation } from '@/utils/modelRequest'
-import { canonicalStateModeMembership } from '@/utils/stateConditionDomain'
+import { ruleSimilarityReasonKey } from '@/utils/rule'
+import { isDefinitiveMutationRejection, readBoardWriteReceipt as readWriteReceipt } from '@/utils/boardWriteReceipt'
 import type { RuleRecommendation } from '@/types/recommendation'
 import type { RuleForm } from '@/types/rule'
 
@@ -23,62 +23,63 @@ const extract = (start: string, end: string) => {
   if (first < 0 || last < 0) throw new Error(`Missing production function: ${start}`)
   return source.slice(first, last)
 }
-const resetSource = extract('const resetRuleRecommendationResults =', 'function closeResultSurfaces()')
 const handlers = extract('const createDeviceInstanceAt =', 'const openTemplateInstanceDialog =')
-  + extract('const applyRecommendation =', '/* =================================================================================\n * 8.')
+  + extract('const isRuleDuplicateRejection =', 'const handleAddRule =')
+  + extract('const confirmRuleSimilarityReview =', '/* =================================================================================\n * 8.')
+  + extract('const isSpecificationDuplicateRejection =', 'const handleAddSpec =')
   + extract('const applySpecRecommendation =', '// ==== Simulation Logic ====')
   + extract('const recommendationApplyFailures =', 'const reportRecommendationFailure =')
   + extract('const keepAppliedRecommendationAdjustments =', 'const invalidateRecommendationsForSceneChange =')
-  + resetSource + extract('const isDefinitiveMutationRejection =', 'type AsyncTaskStatus =')
+  + extract('const resetRecommendationResults =', 'function closeResultSurfaces()')
+  + extract('const readBoardWriteReceipt =', 'type AsyncTaskStatus =')
   + extract('type RecommendationBatchState =', 'const keepAppliedRecommendationAdjustments =')
-const ruleDuplicateCheck = new Function('rules', 'normalizeModelRelation', 'deviceModeCount', 'canonicalStateModeMembership', transpileModule(
-  extract('const ruleRecommendationTargetTypes =', 'const formatRecommendedRuleDevice =')
-  + extract('const normalizeRuleDuplicateText =', 'const confirmRecommendedRuleSimilarity =')
-  + '\nreturn ruleExists',
-  { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText)
 const rejection = { response: { status: 422, data: { message: 'Value outside domain', data: {
   errors: { 'conditions[0].value': 'Allowed integer range 0..100' }
 } } } }
 const rule: RuleRecommendation = { name: 'Proposed rule', reason: 'Draft',
   conditions: [{ deviceId: 'lamp', deviceName: 'Lamp', attribute: 'on', targetType: 'api' }],
   command: { deviceId: 'lamp', deviceName: 'Lamp', action: 'off' } }
+const noReview = { requiresReview: false }
 const spec = { name: 'Safety requirement', rationale: 'Draft', templateId: '1', aConditions: [{ deviceId: 'lamp', targetType: 'state', key: 'state', relation: '=', value: 'off' }],
   ifConditions: [], thenConditions: [] }
 const device = { templateName: 'Light', suggestedLabel: 'Proposed light', reason: 'Draft', intendedUse: 'Lighting' }
 type Kind = 'rule' | 'spec' | 'device'
-const setup = (error?: unknown, recovered = false, storedRules?: RuleForm[]) => {
+const setup = (error?: unknown, recovered = false) => {
   const owner = { token: 'session-A', active: true, persisted: false }
   const nodes = Vue.ref<any[]>([{ id: 'lamp', templateName: 'Light', label: 'Lamp' }])
-  const rules = Vue.ref(storedRules ?? [])
+  const rules = Vue.ref([])
   const template = { name: 'Light', manifest: { Name: 'Light', Modes: [], APIs: [], InternalVariables: [] } }
   const mutation = { currentItems: [], currentNodes: nodes.value, affectedItem: { id: 'created-rule' },
     affectedDevices: [{ id: 'created-1', label: device.suggestedLabel }], environmentVariables: [], currentSpecifications: [], environmentChanges: [] }
   const write = async () => { if (error) throw error; return mutation }
   const queue = vi.fn((work: () => Promise<unknown>, _options?: unknown) => work())
   const dependencies: Record<string, any> = {
+    isDefinitiveMutationRejection, readWriteReceipt,
     ref: Vue.ref, reactive: Vue.reactive, computed: Vue.computed, errorDetails, validateDeviceRuntimeConfig, REQUEST_LIMITS, materializeRuleRecommendation,
     materializeSpecificationRecommendationConditions, RecommendationCandidateError,
     getToken: () => owner.token, isCurrentSessionToken: (token: string) => token === owner.token,
     boardAuthScopeEpoch: 0, isCurrentBoardAuthScope: () => owner.active,
     ensurePlaybackClosedForMutation: () => true, ensureBoardDataReady: () => true, ensureDeviceRuntimeCapacity: () => true,
     ensureBoardItemCapacity: () => true, ensureNestedItemCapacity: () => true, assertRulesHaveTriggers: () => true,
-    boardApi: { addRule: vi.fn(write), addSpec: vi.fn(write), addNodes: vi.fn(write) },
+    boardApi: { addRule: vi.fn(write), addSpec: vi.fn(write), addNodes: vi.fn(write),
+      checkRuleSimilarity: vi.fn(async () => noReview),
+      checkDuplicateRule: vi.fn(async () => ({ isDuplicate: owner.persisted })),
+      checkRuleSimilarityBatch: vi.fn(async (candidates: RuleForm[]) => candidates.map(() => noReview)) },
     enqueueBoardMutation: queue, commitSemanticScene: vi.fn(),
     focusRuleOnCanvas: vi.fn(), focusCreatedDeviceNode: vi.fn(), nodes, rules, specifications: Vue.ref<any[]>([]),
     isBoardDataReady: Vue.ref(true), isSceneReplacementInProgress: Vue.ref(false),
     isAnyRecommendationRunning: () => false,
     appliedRuleRecommendations: Vue.ref(new Set()), appliedSpecRecommendations: Vue.ref(new Set()), appliedDeviceRecommendations: Vue.ref(new Set()),
     applyingRuleRecommendations: Vue.ref(new Set()), applyingSpecRecommendations: Vue.ref(new Set()), applyingDeviceRecommendations: Vue.ref(new Set()),
-    confirmRecommendedRuleSimilarity: vi.fn().mockResolvedValue(true), confirmChoice: vi.fn().mockResolvedValue(true),
-    ruleExists: storedRules
-      ? ruleDuplicateCheck(rules, normalizeModelRelation, () => 2, canonicalStateModeMembership)
-      : () => owner.persisted,
-    specificationExists: () => false, isSameSpecification: () => owner.persisted,
+    confirmChoice: vi.fn().mockResolvedValue(true), ruleSimilarityReasonKey,
+    specificationExists: () => owner.persisted,
     deviceModeCount: () => undefined,
-    refreshRules: vi.fn(async () => { owner.persisted = recovered; return recovered }),
-    refreshSpecifications: vi.fn(async () => { owner.persisted = recovered; dependencies.specifications.value = recovered ? [{}] : []; return recovered }),
-    refreshDevices: vi.fn(async () => { if (recovered) nodes.value.push({ id: 'created-1', label: device.suggestedLabel }); return recovered }),
-    refreshEnvironmentVariables: vi.fn().mockResolvedValue(recovered), reloadUndoAvailability: vi.fn(),
+    refreshBoardSnapshot: vi.fn(async () => {
+      owner.persisted = recovered
+      dependencies.specifications.value = recovered ? [{}] : []
+      if (recovered) nodes.value.push({ id: 'created-1', label: device.suggestedLabel })
+      return recovered
+    }),
     buildSpecFormula: () => 'G off', buildSpecDeviceRefsFromConditions: () => [], recommendedSpecTemplateLabel: () => 'Never',
     getVisibleDeviceNodes: () => nodes.value, getVisibleCanvasCenterWorld: () => ({ x: 0, y: 0 }),
     getUniqueLabel: (name: string) => name, createDeviceInstanceId: () => 'created-1',
@@ -89,20 +90,33 @@ const setup = (error?: unknown, recovered = false, storedRules?: RuleForm[]) => 
     handleRecommendationApplySceneChange: vi.fn(), invalidateRecommendationsForSceneChange: vi.fn(),
     invalidateRuleRecommendations: vi.fn(), invalidateDeviceRecommendations: vi.fn(),
     invalidateSpecRecommendations: vi.fn(),
-    PollingAbortedError: class extends Error {},
+    ruleRecommendationPanel: { epoch: 0 }, specRecommendationPanel: { epoch: 0 },
+    deviceRecommendationPanel: { epoch: 0 },
+    PollingAbortedError: class extends Error {}, isPollingAbortedError: () => false,
     recommendationFailures: { rule: { message: 'A separate generation failure' } }
   }
-  for (const match of resetSource.matchAll(/(\w+)\.value/g)) {
-    if (match[1] !== 'recommendationBatch' && !(match[1] in dependencies)) dependencies[match[1]] = Vue.ref([])
+  for (const kind of ['rule', 'spec', 'device'] as const) {
+    Object.assign(dependencies, {
+      [`${kind}Recommendations`]: Vue.ref([]),
+      [`${kind}RecommendationMessage`]: Vue.ref(''),
+      [`${kind}RecommendationFilteredCount`]: Vue.ref(0),
+      [`${kind}RecommendationFilteredItems`]: Vue.ref([]),
+      [`${kind}RecommendationAdjustedItems`]: Vue.ref([]),
+      [`${kind}RecommendationRawCandidateCount`]: Vue.ref(0),
+      [`${kind}RecommendationInspectedCount`]: Vue.ref(0),
+      [`${kind}RecommendationTruncatedCount`]: Vue.ref(0),
+      [`${kind}RecommendationIsAppliedConfirmation`]: Vue.ref(false),
+      [`${kind}RecommendationRequested`]: Vue.ref(false)
+    })
   }
-  const declarations = 'let ruleRecommendationRequestEpoch = 0, specRecommendationRequestEpoch = 0, deviceRecommendationRequestEpoch = 0, recommendationSceneGeneration = 0;\n'
+  const declarations = 'let recommendationSceneGeneration = 0;\n'
   const create = new Function(...Object.keys(dependencies), transpileModule(declarations + handlers + `\nreturn {
     applyRecommendation, applySpecRecommendation, applyDeviceRecommendation, createDeviceInstanceAt,
-    recommendationApplyFailures, resetRuleRecommendationResults, resetDeviceRecommendationResults, resetSpecRecommendationResults,
+    recommendationApplyFailures, resetRecommendationResults,
     preserveAppliedRecommendationAfterSceneChange, sceneGeneration: () => recommendationSceneGeneration,
     applyAllRecommendations, recommendationBatch, isRecommendationBatchLocked, recommendationBatchBlockedReason,
     batch: kind => recommendationBatches[kind] ?? null,
-    retire: () => { ruleRecommendationRequestEpoch++; specRecommendationRequestEpoch++; deviceRecommendationRequestEpoch++; },
+    retire: () => { ruleRecommendationPanel.epoch++; specRecommendationPanel.epoch++; deviceRecommendationPanel.epoch++; },
     changeScene: () => { recommendationSceneGeneration++; }
   }`, { compilerOptions: { target: ScriptTarget.ES2022 } }).outputText)
   return { ...dependencies, ...create(...Object.values(dependencies)), owner, template, queue }
@@ -143,6 +157,10 @@ describe('production recommendation confirmation and candidate retirement', () =
       recommendations.value = count === 1 ? [candidate] : [{ name: 'Earlier draft' }, candidate, { name: 'Later draft' }]
       const applied = recommendations.value[appliedIndex]
       const name = kind === 'rule' ? 'Rule' : kind === 'spec' ? 'Spec' : 'Device'
+      const adjustedItems = state[`${kind}RecommendationAdjustedItems`]
+      if (count === 3) adjustedItems.value = [
+        { index: 1, label: 'Earlier adjustment' }, { index: 2, label: 'Applied adjustment' }, { label: 'Batch adjustment' }
+      ]
       state[`applying${name}Recommendations`].value.add(appliedIndex)
       state.preserveAppliedRecommendationAfterSceneChange(kind, appliedIndex)
       expect(recommendations.value).toEqual([applied])
@@ -150,6 +168,9 @@ describe('production recommendation confirmation and candidate retirement', () =
       expect([...state[`applied${name}Recommendations`].value]).toEqual([0])
       expect(state[`applying${name}Recommendations`].value.size).toBe(0)
       expect(state[`${kind}RecommendationIsAppliedConfirmation`].value).toBe(true)
+      if (count === 3) expect(adjustedItems.value).toEqual(kind === 'spec' ? [] : [
+        { index: 1, label: 'Applied adjustment' }, { label: 'Batch adjustment' }
+      ])
       expect(state.sceneGeneration()).toBe(1)
       const panels = { rule: state.invalidateRuleRecommendations, device: state.invalidateDeviceRecommendations,
         spec: state.invalidateSpecRecommendations }
@@ -222,28 +243,11 @@ describe('one-click recommendation application', () => {
       return state
     }
 
-    it(`${kind}: applies the current batch sequentially and keeps every confirmed card`, async () => {
-      const state = prepare()
-      expect(state.applyAllRecommendations).toBeTypeOf('function')
-      await state.applyAllRecommendations(kind)
-      expect(writeFor(state, kind)).toHaveBeenCalledTimes(3)
-      if (kind === 'rule') expect(state.focusRuleOnCanvas).not.toHaveBeenCalled()
-      if (kind === 'device') {
-        const positions = state.boardApi.addNodes.mock.calls.map(([nodes]: any[]) => nodes[0].position)
-        expect(positions[1].x - positions[0].x).toBeGreaterThanOrEqual(state.DEFAULT_NODE_WIDTH)
-        expect(positions[2].x - positions[1].x).toBeGreaterThanOrEqual(state.DEFAULT_NODE_WIDTH)
-      }
-      expect(state[`${kind}Recommendations`].value).toHaveLength(3)
-      expect(state.batch(kind)).toMatchObject({ kind, running: false, applied: 3, total: 3 })
-      await state.applyAllRecommendations(kind)
-      expect(writeFor(state, kind)).toHaveBeenCalledTimes(3)
-    })
-
-    it.each(kind === 'rule' ? [rejection, new Error('Disconnected')] : [new Error('Disconnected')])(`${kind}: stops on a rejected or unknown second write`, async error => {
+    it(`${kind}: stops on an unknown second write when recovery finds no commit`, async () => {
       const state = prepare()
       expect(state.applyAllRecommendations).toBeTypeOf('function')
       const write = writeFor(state, kind).getMockImplementation()!
-      writeFor(state, kind).mockImplementationOnce(write).mockRejectedValueOnce(error)
+      writeFor(state, kind).mockImplementationOnce(write).mockRejectedValueOnce(new Error('Disconnected'))
       await state.applyAllRecommendations(kind)
       expect(writeFor(state, kind)).toHaveBeenCalledTimes(2)
       expect(state.batch(kind)).toMatchObject({ running: false, applied: 1, total: 3 })
@@ -254,39 +258,12 @@ describe('one-click recommendation application', () => {
 
     if (kind === 'rule') it('stops when the user declines a rule similarity confirmation', async () => {
       const state = prepare()
-      state.confirmRecommendedRuleSimilarity.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+      state.boardApi.checkRuleSimilarityBatch.mockResolvedValueOnce([noReview, { requiresReview: true }, noReview])
+      state.confirmChoice.mockResolvedValueOnce(false)
       await state.applyAllRecommendations(kind)
       expect(writeFor(state, kind)).toHaveBeenCalledOnce()
       expect(state.batch(kind)).toMatchObject({ running: false, applied: 1, total: 3 })
       expect(state.recommendationApplyFailures.rule).toEqual({})
-    })
-
-    it(`${kind}: disables repeated submissions and restores availability on regeneration`, async () => {
-      const state = prepare()
-      let release!: () => void
-      const write = writeFor(state, kind).getMockImplementation()!
-      writeFor(state, kind).mockImplementationOnce(async () => {
-        await new Promise<void>(resolve => { release = resolve })
-        return write()
-      })
-      const start = source.indexOf(`<div v-if="${kind}Recommendations.length > 1"`)
-      const end = source.indexOf('<div\n              v-for=', start)
-      const render = new Function('Vue', compile(source.slice(start, end), { mode: 'function', prefixIdentifiers: true }).code)(Vue)
-      const wrapper = mount({ setup: () => state, render })
-      const button = wrapper.get(`[data-testid="apply-all-${kind}-recommendations"]`)
-      await button.trigger('click')
-      await flushPromises()
-      expect(button.attributes('disabled')).toBeDefined()
-      expect(button.attributes('aria-busy')).toBe('true')
-      await state.applyAllRecommendations(kind)
-      expect(writeFor(state, kind)).toHaveBeenCalledOnce()
-      release()
-      await flushPromises()
-      expect(state.batch(kind)).toMatchObject({ running: false, applied: 3 })
-      const suffix = kind === 'rule' ? 'Rule' : kind === 'device' ? 'Device' : 'Spec'
-      state[`reset${suffix}RecommendationResults`]()
-      expect(state.batch(kind)).toBeNull()
-      wrapper.unmount()
     })
 
     it.each(kind === 'rule' ? ['scene', 'account'] : ['account'])(`${kind}: does not continue after %s changes during a write`, async change => {
@@ -314,7 +291,8 @@ describe('one-click recommendation application', () => {
 
     if (kind === 'rule') it('does not submit a rule after its confirmation outlives the session', async () => {
       const state = prepare()
-      state.confirmRecommendedRuleSimilarity.mockImplementation(async () => {
+      state.boardApi.checkRuleSimilarityBatch.mockResolvedValueOnce([{ requiresReview: true }, noReview, noReview])
+      state.confirmChoice.mockImplementationOnce(async () => {
         state.owner.token = 'another-session'
         return true
       })
@@ -326,30 +304,44 @@ describe('one-click recommendation application', () => {
     if (kind === 'device') it('keeps an earlier completed batch locked when a different batch is cancelled', async () => {
       const state = prepare()
       await state.applyAllRecommendations('device')
-      state.resetRuleRecommendationResults()
+      state.resetRecommendationResults('rule')
       state.ruleRecommendations.value = [rule, structuredClone(rule)]
-      state.confirmRecommendedRuleSimilarity.mockResolvedValue(false)
+      state.boardApi.checkRuleSimilarityBatch.mockResolvedValueOnce([{ requiresReview: true }, noReview])
+      state.confirmChoice.mockResolvedValueOnce(false)
       await state.applyAllRecommendations('rule')
       expect(state.isRecommendationBatchLocked('device')).toBe(true)
       expect(state.recommendationBatchBlockedReason('device')).toBe('app.recommendationBatchComplete')
       expect(state.recommendationBatchBlockedReason('rule')).toBe('app.recommendationBatchStopped')
     })
   }
+
+  it('does not dispatch any rule write when the read-only preflight response is lost', async () => {
+    const state = setup()
+    state.ruleRecommendations.value = [rule, rule]
+    state.boardApi.checkRuleSimilarityBatch.mockRejectedValueOnce(new Error('Response lost'))
+
+    await state.applyAllRecommendations('rule')
+
+    expect(state.boardApi.addRule).not.toHaveBeenCalled()
+    expect(state.refreshBoardSnapshot).not.toHaveBeenCalled()
+    expect(state.recommendationApplyFailures.rule[0]).toMatchObject({ outcomeUnknown: false })
+  })
 })
 
 describe('candidate apply failure ownership in production Board paths', () => {
-  it('blocks an equivalent multi-mode rule recommendation before requesting similarity or writing', async () => {
+  it('blocks a server exact match without prompting to apply anyway', async () => {
     const candidate = (value: string): RuleRecommendation => ({
       ...rule,
       conditions: [...rule.conditions, { deviceId: 'lamp', deviceName: 'Lamp',
         attribute: 'state', targetType: 'state', relation: 'in', value }]
     })
-    const state = setup(undefined, false, [materializeRuleRecommendation(candidate('idle;_, _;warm'), 'saved')])
+    const state = setup()
+    state.boardApi.checkRuleSimilarity.mockResolvedValueOnce({ reasonCode: 'EXACT_MATCH', requiresReview: true })
 
     await state.applyRecommendation(candidate(';warm | idle;'), 0)
 
     expect(state.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.duplicateRuleExists')
-    expect(state.confirmRecommendedRuleSimilarity).not.toHaveBeenCalled()
+    expect(state.confirmChoice).not.toHaveBeenCalled()
     expect(state.boardApi.addRule).not.toHaveBeenCalled()
 
     await state.applyRecommendation(candidate(';warm | Idle;'), 0)
@@ -378,7 +370,7 @@ describe('candidate apply failure ownership in production Board paths', () => {
       const state = setup(new Error('Lost response'))
       await submit(state, kind)
       expect(state.recommendationApplyFailures[kind][0].outcomeUnknown).toBe(true)
-      expect(state.reloadUndoAvailability).toHaveBeenCalledOnce()
+      expect(state.refreshBoardSnapshot).toHaveBeenCalledOnce()
       expect(state[`applied${kind === 'rule' ? 'Rule' : kind === 'spec' ? 'Spec' : 'Device'}Recommendations`].value.size).toBe(0)
       const wrapper = renderCandidateAction(state, kind)
       expect(wrapper.get('button').attributes('disabled')).toBeDefined()
@@ -402,12 +394,24 @@ describe('candidate apply failure ownership in production Board paths', () => {
       expect(state.recommendationApplyFailures[kind][0]).toBeUndefined()
       expect(state.notifyError).not.toHaveBeenCalled()
     })
-    it(`${kind}: a read-confirmed create remains applied instead of becoming a retryable failure`, async () => {
+    it(`${kind}: reflects recovery without enabling another dispatch`, async () => {
       const state = setup(new Error('Lost response'), true)
       await submit(state, kind)
-      expect(state.recommendationApplyFailures[kind][0]).toBeUndefined()
-      expect(state[`applied${kind === 'rule' ? 'Rule' : kind === 'spec' ? 'Spec' : 'Device'}Recommendations`].value.has(0)).toBe(true)
-      expect(state.notifyBlocked).toHaveBeenCalledOnce()
+      if (kind !== 'spec') {
+        expect(state.recommendationApplyFailures[kind][0]).toMatchObject({ outcomeUnknown: true,
+          message: kind === 'rule' ? 'app.ruleCreateOutcomeRefreshed' : 'app.deviceCreateOutcomeRefreshed' })
+        expect(state[kind === 'rule' ? 'appliedRuleRecommendations' : 'appliedDeviceRecommendations'].value.has(0)).toBe(false)
+        await submit(state, kind)
+        expect(writeFor(state, kind)).toHaveBeenCalledOnce()
+      } else {
+        state.specRecommendations.value = [spec]
+        state.preserveAppliedRecommendationAfterSceneChange('spec', 0)
+        expect(state.recommendationApplyFailures.spec[0]).toMatchObject({ outcomeUnknown: true, message: 'app.specCreateOutcomeRefreshed' })
+        expect(state.appliedSpecRecommendations.value.has(0)).toBe(false)
+        expect(state.specRecommendationIsAppliedConfirmation.value).toBe(false)
+        await submit(state, kind)
+        expect(writeFor(state, kind)).toHaveBeenCalledOnce()
+      }
     })
     it(`${kind}: a current successful create gives visible state without a redundant receipt`, async () => {
       const state = setup()
@@ -437,18 +441,21 @@ describe('candidate apply failure ownership in production Board paths', () => {
       expect(state.notifySuccess).not.toHaveBeenCalled()
       expect(state.notifyError).not.toHaveBeenCalled()
     })
-    it(`${kind}: resetting the generation clears candidate failures`, async () => {
+    it(`${kind}: resets candidate failures while a generation outcome stays unconfirmed`, async () => {
       const state = setup(rejection)
       await submit(state, kind)
-      const reset = kind === 'rule' ? state.resetRuleRecommendationResults : kind === 'spec'
-        ? state.resetSpecRecommendationResults : state.resetDeviceRecommendationResults
-      reset()
+      const unconfirmed = { outcomeUnknown: true, message: 'Generation did not confirm its outcome' }
+      state.recommendationFailures[kind] = unconfirmed
+      state.resetRecommendationResults(kind)
       expect(Object.keys(state.recommendationApplyFailures[kind])).toHaveLength(0)
+      expect(state.recommendationFailures[kind]).toBe(unconfirmed)
     })
   }
-  it('ordinary device creation still reports its own failure when it has no candidate owner', async () => {
+  it('returns a rejected receipt without claiming a recovery read or publishing caller feedback', async () => {
     const state = setup(rejection)
-    await expect(state.createDeviceInstanceAt(state.template, { x: 0, y: 0 }, 'New lamp')).rejects.toBe(rejection)
-    expect(state.notifyError).toHaveBeenCalledOnce()
+    await expect(state.createDeviceInstanceAt(state.template, () => ({ x: 0, y: 0 }), 'New lamp'))
+      .resolves.toEqual({ status: 'rejected', error: rejection })
+    expect(state.refreshBoardSnapshot).not.toHaveBeenCalled()
+    expect(state.notifyError).not.toHaveBeenCalled()
   })
 })

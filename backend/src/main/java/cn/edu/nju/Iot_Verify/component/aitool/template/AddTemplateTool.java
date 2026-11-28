@@ -100,12 +100,7 @@ public class AddTemplateTool extends AbstractAiTool {
 
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of("name", "manifest"));
             String name = requiredTextField(args, "name", "arguments");
 
@@ -145,7 +140,7 @@ public class AddTemplateTool extends AbstractAiTool {
                     "message", "Template added successfully.",
                     "operation", "created",
                     "template", saved
-            ), "Template added successfully.");
+            ));
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

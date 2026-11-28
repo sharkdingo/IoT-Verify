@@ -14,7 +14,7 @@ All paths are relative to the server root. Response representations and authenti
 follow [overview.md](overview.md). SSE streams and successful SMV downloads are direct
 responses rather than JSON envelopes.
 
-Verified against code on 2026-10-26.
+Verified against code on 2026-11-27.
 
 ---
 
@@ -75,6 +75,7 @@ Verified against code on 2026-10-26.
 | POST | `/api/board/devices/recommend` | AI device recommendations | [board.md](board.md) |
 | POST | `/api/board/rules/check-duplicate` | Deterministic duplicate-rule check used before saving a rule | [board.md](board.md) |
 | POST | `/api/board/rules/check-similarity` | Explicit AI rule-similarity check available from `RuleBuilder` | [board.md](board.md) |
+| POST | `/api/board/rules/check-similarity/batch` | Batch AI similarity check for new rules | [board.md](board.md#recommendation-duplicate-check-and-ai-similarity-check) |
 | POST | `/api/board/specs/recommend` | AI specification recommendations | [board.md](board.md) |
 | POST | `/api/board/scenario/recommend` | AI importable scene-draft recommendation | [board.md](board.md) |
 | GET | `/api/board/recommendations/{requestId}` | Read the server-observed stage of an active or just-finished standalone recommendation | [board.md](board.md) |

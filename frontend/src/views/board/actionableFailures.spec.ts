@@ -5,9 +5,12 @@ import { computed, h, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { baseParse, type ElementNode } from '@vue/compiler-dom'
 import { describe, expect, it, vi } from 'vitest'
-import FailureDetails from '@/components/FailureDetails.vue'
+import RecommendationRequestControls from '@/components/RecommendationRequestControls.vue'
 import { errorDetails, technicalErrorLines, localizedErrorMessage } from '@/utils/userMessage'
 import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
+import { planRecommendationRecoveryAfterStatusFailure } from '@/utils/recommendationRequestRecovery'
+import { runTrackedBoardMutation } from '@/views/Board.vue'
+import { readBoardWriteReceipt as readWriteReceipt } from '@/utils/boardWriteReceipt'
 import i18n from '@/assets/i18n'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
@@ -29,6 +32,40 @@ const rejection = (reasonCode?: string) => ({ response: { status: 409, data: {
 } } })
 
 describe('scene rejection diagnostics', () => {
+  it('keeps recovered history and blocks a duplicate unconfirmed scene clear', async () => {
+    const preview = { impactToken: 'reviewed-state', templates: [], editHistoryEntryCount: 1 }
+    const write = vi.fn().mockRejectedValue(new Error('Lost response'))
+    const ports = {
+      boardApi: { previewBoardReplacement: vi.fn().mockResolvedValue(preview), clearBoardScene: write },
+      isImportingScene: ref(false), isClearingScene: ref(false), isSceneReplacementInProgress: ref(false), hasAssistantWork: ref(false),
+      ensurePlaybackClosedForMutation: () => true, ensureBoardDataReady: () => true, waitForPendingBoardMutations: vi.fn(),
+      captureBoardRunOwner: () => () => true, boardAuthScopeEpoch: 0,
+      getCurrentRecommendationSceneFingerprint: () => 'same scene', runTrackedBoardMutation, readWriteReceipt,
+      enqueueBoardMutation: (work: () => Promise<unknown>) => work(),
+      summarizeTemplateUsage: () => ({ used: 0, usedCustom: 0, custom: 0 }),
+      confirmDestructive: vi.fn().mockResolvedValue(true),
+      refreshBoardSnapshot: vi.fn().mockResolvedValue(true),
+      invalidateForFullSceneReplacement: vi.fn(), markVerificationResultStale: vi.fn(),
+      getVisibleDeviceNodes: () => [],
+      environmentVariables: ref([]), rules: ref([]), specifications: ref([]),
+      unconfirmedBoardReplacementTokens: new Set<string>(),
+      readBoardReplacementStalePreview: () => null, notifyBlocked: vi.fn(), notifySuccess: vi.fn(), t: (key: string) => key
+    }
+    for (const helper of ['readBoardWriteReceipt', 'canReviewBoardReplacement', 'readBoardReplacementReceipt']) {
+      Object.assign(ports, { [helper]: bind(helper, ports) })
+    }
+    const submit = bind('clearScene', ports)
+    await submit()
+    await submit()
+
+    expect(ports.invalidateForFullSceneReplacement).not.toHaveBeenCalled()
+    expect(write).toHaveBeenCalledOnce()
+    expect(ports.refreshBoardSnapshot).toHaveBeenCalledOnce()
+    expect(ports.confirmDestructive).toHaveBeenCalledOnce()
+    expect(ports.notifySuccess).not.toHaveBeenCalled()
+    expect(ports.notifyBlocked).toHaveBeenLastCalledWith('app.sceneReplacementPreviewUnconfirmed')
+  })
+
   it.each([
     ['DUPLICATE_RULE', '完全相同的规则', '触发条件'],
     ['DUPLICATE_SPECIFICATION', '完全相同的规约', '检查条件'],
@@ -163,6 +200,7 @@ describe('scene file selection ownership', () => {
     const notifyError = vi.fn()
     const confirmDestructive = vi.fn()
     const pending = bind('importScene', {
+      captureBoardRunOwner: () => () => true,
       ensurePlaybackClosedForMutation: () => true, isSceneReplacementInProgress: ref(false),
       hasAssistantWork: ref(false), isImportingScene: ref(false),
       waitForPendingBoardMutations: async () => {}, ensureBoardDataReady: () => true,
@@ -173,7 +211,7 @@ describe('scene file selection ownership', () => {
     await Promise.resolve()
     admitted = false
     reject(new Error('old preview failed'))
-    expect(await pending).toBe(false)
+    await pending
     expect(notifyError).not.toHaveBeenCalled()
     expect(confirmDestructive).not.toHaveBeenCalled()
   })
@@ -225,18 +263,22 @@ describe('persistent failure presentation', () => {
     bind('reportRecommendationFailure', { recommendationFailures: failures, errorDetails, t,
       extractRecommendationErrorMessage: (error: unknown, fallback: string) => localizedErrorMessage(error, fallback, 'zh-CN')
     })(kind, { response: { status: 503, data: { message: 'AI endpoint unavailable' } } }, '获取推荐失败')
-    const state: Record<string, unknown> = { recommendationFailures: failures, t,
-      [`isRecommending${suffix}`]: false, [`${prefix}RecommendationRequested`]: true,
-      [`${prefix}Recommendations`]: [], recommendedScenarioScene: null, scenarioRecommendationResult: null }
-    const failure = find(`<div v-if="recommendationFailures.${kind}"`).loc.source
+    const state: Record<string, unknown> = { kind, recommendationFailures: failures, t,
+      [`isRecommending${suffix}`]: false, [`${prefix}RecommendationRequested`]: true, [`${prefix}Recommendations`]: [] }
     const empty = find(`<div v-if="!isRecommending${suffix} && ${prefix}RecommendationRequested`).loc.source
-    const wrapper = mount({ template: `${failure}${empty}`, components: { FailureDetails }, setup: () => state })
-    expect(wrapper.find(`[data-testid="${kind}-recommendation-error"]`).text()).toContain('获取推荐失败')
-    expect(wrapper.text()).toContain('AI endpoint unavailable')
-    expect(wrapper.text()).toContain(t('app.recommendationFailureNextStep'))
-    expect(wrapper.get('[data-testid="failure-cause"]').text()).toBe('AI endpoint unavailable')
-    expect(wrapper.text()).not.toContain(t('app.noRecommendationsAvailable'))
-    wrapper.unmount()
+    const wrapper = mount({
+      template: `<RecommendationRequestControls :kind="kind" requirement="" :action-disabled="false"
+        :request-pending="false" :action-label="t('app.generateRecommendations')" :failure="recommendationFailures[kind]" />${empty}`,
+      components: { RecommendationRequestControls },
+      setup: () => state
+    }, { global: { plugins: [i18n] } })
+    try {
+      expect(wrapper.get(`[data-testid="${kind}-recommendation-error"]`).text()).toContain('获取推荐失败')
+      expect(wrapper.text()).toContain('AI endpoint unavailable')
+      expect(wrapper.text()).toContain(t('app.recommendationFailureNextStep'))
+      expect(wrapper.get('[data-testid="failure-cause"]').text()).toBe('AI endpoint unavailable')
+      expect(wrapper.text()).not.toContain(t('app.noRecommendationsAvailable'))
+    } finally { wrapper.unmount() }
   })
 
   it('keeps an unknown request distinct while recovery still owns the request', () => {
@@ -249,54 +291,155 @@ describe('persistent failure presentation', () => {
     expect(failure.details).toContain('network disconnected')
   })
 
+  it('releases the foreground after a lost POST and keeps stopping the original request', () => {
+    const panel = { kind: 'rule', requestId: ref('request-1'), running: ref(true) }
+    const stop = vi.fn()
+    const failures = {}
+    const report = bind('reportRecommendationFailure', { recommendationFailures: failures, errorDetails, t })
+    const markUnknown = bind('markRecommendationOutcomeUnknown', {
+      recommendationFailures: failures, reportRecommendationFailure: report
+    })
+    bind('beginUnknownRecommendationRecovery', {
+      markRecommendationOutcomeUnknown: markUnknown,
+      recommendationOutcomeUnknownWarnings: new Set(), notifyBlocked: vi.fn(), t,
+      stopActiveRecommendation: stop
+    })(panel, 'request-1', new Error('network disconnected'))
+
+    expect(panel.running.value).toBe(false)
+    expect(panel.requestId.value).toBe('request-1')
+    expect(stop).toHaveBeenCalledExactlyOnceWith(panel, { showMessage: false })
+  })
+
   it.each([true, false])('updates an uncertain card only for its current request owner (%s)', current => {
     const failure = { outcomeUnknown: true, message: '正在确认', suggestion: '等待', details: ['network disconnected'] }
     const request = ref(current ? 'request-1' : 'request-2')
-    const running = vi.fn()
-    const recoveries = new Map([['rule', { requestId: 'request-1', requestIdRef: request,
-      abortControllerRef: ref(null), controller: null, setRunning: running }]])
+    const panel = { requestId: request, abortController: ref(null), running: ref(true) }
+    const recoveries = new Map([['rule', { requestId: 'request-1', panel, controller: null }]])
     bind('releaseRecommendationTracking', {
       recommendationStopRecoveries: recoveries, recommendationFailures: { rule: failure }, t,
       recommendationRequestOwners: new Map(), recommendationOutcomeUnknownWarnings: new Set(),
-      recommendationProgressRequestId: ref(null),
       requestIdAfterTerminalSettlement: (owned: string, finished: string) => owned === finished ? null : owned,
       recordRecommendationTerminalEvidence: vi.fn()
     })('rule', 'request-1')
     expect(failure.outcomeUnknown).toBe(!current)
     expect(failure.message).toContain(current ? '请求结束' : '正在确认')
     expect(request.value).toBe(current ? null : 'request-2')
+    expect(panel.running.value).toBe(!current)
     expect(failure.details).toEqual(['network disconnected'])
+  })
+
+  it('retains the stopping request when its POST returns before the worker finishes', () => {
+    const requestId = 'request-stopping'
+    const controller = new AbortController()
+    const panel = { kind: 'rule', requestId: ref<string | null>(requestId),
+      abortController: ref(controller), running: ref(true) }
+    const recovery = { requestId, cancellationAccepted: false, postResponseReceived: false }
+    const recoveries = new Map([['rule', recovery]])
+    const release = vi.fn(() => {
+      recoveries.delete('rule')
+      panel.requestId.value = null
+      panel.running.value = false
+    })
+    bind('settleRecommendationPost', {
+      recommendationStopRecoveries: recoveries, releaseRecommendationTracking: release
+    })(panel, requestId, controller)
+
+    expect(panel.running.value).toBe(true)
+    expect(panel.requestId.value).toBe(requestId)
+    expect(recovery.postResponseReceived).toBe(true)
+  })
+
+  it.each([
+    { postReturned: true, cancellationAccepted: false, settles: true },
+    { postReturned: false, cancellationAccepted: false, settles: false },
+    { postReturned: true, cancellationAccepted: true, settles: false }
+  ])('uses a missing status only with a prior POST response and no accepted stop ($postReturned, $cancellationAccepted)',
+    async ({ postReturned, cancellationAccepted, settles }) => {
+      const requestId = 'request-stopping'
+      const recovery = { requestId, cancellationAccepted, postResponseReceived: postReturned,
+        retryNotBeforeMs: 0, consecutiveStatusFailures: 0, ownerAuthToken: 'test-owner' }
+      const release = vi.fn()
+      await bind('refreshRecommendationProgress', {
+        boardLifecycleDisposed: false, recommendationProgressInFlightId: null,
+        recommendationStopRecoveries: new Map([['rule', recovery]]),
+        getRecommendationRequestOwner: () => ({ authToken: 'test-owner' }),
+        cancelRecommendationAsOwner: async () => false,
+        readRecommendationStatusAsOwner: async () => {
+          recovery.postResponseReceived = true
+          throw { response: { status: 404 } }
+        },
+        releaseRecommendationTracking: release,
+        planRecommendationRecoveryAfterStatusFailure
+      })({ kind: 'rule', requestId: ref(requestId) })
+
+      if (settles) expect(release).toHaveBeenCalledExactlyOnceWith('rule', requestId, { terminalEvidence: 'post-terminal' })
+      else {
+        expect(release).not.toHaveBeenCalled()
+        expect(recovery.consecutiveStatusFailures).toBe(1)
+      }
+    })
+
+  it('keeps checking the original request after repeated missing status makes the stop outcome unknown', async () => {
+    const requestId = 'request-1'
+    const panel = { kind: 'rule', requestId: ref(requestId), running: ref(true) }
+    const recovery = { requestId, cancellationAccepted: false, postResponseReceived: false,
+      retryNotBeforeMs: 0, consecutiveStatusFailures: 0, ownerAuthToken: 'test-owner' }
+    const cancel = vi.fn().mockResolvedValue(false)
+    const read = vi.fn().mockRejectedValue({ response: { status: 404 } })
+    const release = vi.fn()
+    const accepted = vi.fn()
+    const report = vi.fn()
+    const refresh = bind('refreshRecommendationProgress', {
+      boardLifecycleDisposed: false, recommendationProgressInFlightId: null,
+      recommendationStopRecoveries: new Map([['rule', recovery]]),
+      getRecommendationRequestOwner: () => ({ authToken: 'test-owner' }),
+      cancelRecommendationAsOwner: cancel, readRecommendationStatusAsOwner: read,
+      acceptRecommendationCancellation: accepted, releaseRecommendationTracking: release,
+      planRecommendationRecoveryAfterStatusFailure,
+      markRecommendationOutcomeUnknown: bind('markRecommendationOutcomeUnknown', {
+        recommendationFailures: {}, reportRecommendationFailure: report
+      })
+    })
+    for (let attempt = 0; attempt < 7; attempt++) await refresh(panel, true)
+
+    expect(panel.running.value).toBe(false)
+    expect(panel.requestId.value).toBe(requestId)
+    expect(read.mock.calls).toEqual(Array.from({ length: 7 }, () => [requestId, 'test-owner']))
+    expect(accepted).not.toHaveBeenCalled()
+    expect(release).not.toHaveBeenCalled()
+    expect(report).toHaveBeenCalledWith('rule', undefined, '', true)
   })
 
   it.each([false, true])('does not repopulate a replaced scene with an old request error (%s)', stale => {
     let reject!: (error: Error) => void
     const post = new Promise((_resolve, fail) => { reject = fail })
     const beginRecovery = vi.fn()
-    const ports: Record<string, any> = {
-      isRecommendationRequestActive: () => false, isRecommendingRules: ref(false),
-      ruleRecommendationRequestId: ref(null), isSceneReplacementInProgress: ref(false),
-      ensureBoardDataReady: () => true, canGenerateRecommendations: () => true,
-      resetRuleRecommendationResults: vi.fn(),
-      captureRecommendationRequestOwner: () => ({ userId: 1, authToken: 'test-owner' }),
-      ruleRecommendationRequested: ref(false), ruleRecommendations: ref([]), ruleRecommendationRequestEpoch: 0,
-      recommendationSceneGeneration: 0, appliedRuleRecommendations: ref(new Set()), applyingRuleRecommendations: ref(new Set()),
-      ruleRecommendationAbortController: ref(null), recommendationRequestOwners: new Map(),
-      recommendationProgressRequestId: ref(null), recommendationFailures: {},
-      recommendationApplyFailures: { rule: {}, device: {}, spec: {} },
-      crypto: { randomUUID: () => 'request-1' },
-      ruleRecommendationFilters: { userRequirement: '' }, locale: ref('zh-CN'),
-      rulesApi: { recommendRules: () => post }, isRecommendationPostOutcomeUnknown: () => true,
-      ruleRecommendationPanel: { kind: 'rule' }, beginUnknownRecommendationRecovery: beginRecovery,
-      settleRecommendationPost: vi.fn()
+    const panel = {
+      kind: 'rule', running: ref(false), requested: ref(false), epoch: 0,
+      requestId: ref<string | null>(null), abortController: ref<AbortController | null>(null)
     }
-    for (const suffix of ['Message', 'FilteredCount', 'FilteredItems', 'AdjustedItems', 'RawCandidateCount',
-      'InspectedCount', 'TruncatedCount', 'IsAppliedConfirmation']) ports[`ruleRecommendation${suffix}`] = ref(null)
-    const pending = bind('fetchRuleRecommendations', ports)()
-    if (stale) { ports.recommendationSceneGeneration++; ports.ruleRecommendationRequestEpoch++ }
+    const ports: Record<string, any> = {
+      isRecommendationRequestActive: () => false, isSceneReplacementInProgress: ref(false),
+      ensureBoardDataReady: () => true, canGenerateRecommendations: () => true,
+      boardLifecycleDisposed: false, currentAuthUserId: ref(1),
+      captureRecommendationRequestOwner: () => ({ userId: 1, authToken: 'test-owner' }),
+      recommendationSceneGeneration: 0, recommendationRequestOwners: new Map(),
+      crypto: { randomUUID: () => 'request-1' },
+      isRecommendationPostOutcomeUnknown: () => true, beginUnknownRecommendationRecovery: beginRecovery,
+      settleRecommendationPost: vi.fn(), resetRecommendationResults: vi.fn()
+    }
+    const pending = bind('generateRecommendations', ports)({
+      panel, requiredKeys: ['nodes', 'templates', 'rules'],
+      request: () => post, adopt: vi.fn(), failureMessageKey: 'app.failedToFetchRuleRecommendations'
+    })
+    if (stale) { ports.recommendationSceneGeneration++; panel.epoch++ }
     const error = new Error('network disconnected')
     reject(error)
     return pending.then(() => {
-      expect(beginRecovery).toHaveBeenCalledExactlyOnceWith(ports.ruleRecommendationPanel, 'request-1', stale ? undefined : error)
+      expect(beginRecovery).toHaveBeenCalledExactlyOnceWith(panel, 'request-1', stale ? undefined : error)
+      expect(panel.requestId.value).toBe('request-1')
+      expect(panel.running.value).toBe(true)
+      expect(ports.settleRecommendationPost).not.toHaveBeenCalled()
     })
   })
 })

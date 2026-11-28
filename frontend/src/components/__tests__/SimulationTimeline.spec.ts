@@ -1,115 +1,22 @@
 // @vitest-environment jsdom
-import { mount } from '@vue/test-utils'
+import { mount, type ComponentMountingOptions } from '@vue/test-utils'
+import { effectScope, nextTick, ref, watch } from 'vue'
 import { createI18n } from 'vue-i18n'
 import { i18n as appI18n } from '@/assets/i18n'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import SimulationTimeline from '../SimulationTimeline.vue'
+import { usePlaybackCursor } from '@/views/board/usePlaybackCursor'
 import type { TraceState } from '@/types/verify'
 import type { ModelSemantics } from '@/types/modelSemantics'
+import { formatModelTokenBySource } from '@/utils/modelTokenDisplay'
 
 const i18n = createI18n({
   legacy: false,
   locale: 'en',
+  fallbackLocale: 'en',
   messages: {
-    en: {
-      app: {
-        ...appI18n.global.getLocaleMessage('en').app,
-        close: 'Close',
-        exit: 'Exit',
-        exitTimeline: 'Exit playback and return to the canvas',
-        unknown: 'Unknown',
-        state: 'State',
-        mode: 'Mode',
-        trust: 'Source label',
-        privacy: 'Sensitivity label',
-        ruleNumber: 'Rule {number}',
-        stepChanges: 'Step changes',
-        playbackControls: 'Playback controls',
-        playbackViews: 'Playback terminal views',
-        playbackTimeline: 'Timeline',
-        playbackRunInfo: 'Run info',
-        playbackNavigationHint: 'Click or drag the timeline to seek.',
-        showHelpFor: 'Help for {topic}',
-        completeModel: 'Complete model',
-        incompleteModel: 'Incomplete model',
-        playbackDeviceReadings: 'Device states and reported values',
-        playbackActualEnvironment: 'Actual home environment',
-        playbackUntrustedSources: 'Untrusted source labels: {labels}',
-        playbackPrivateValues: 'Private-data labels: {labels}',
-        hidePlaybackPanel: 'Hide playback terminal',
-        playbackPreviousWindow: 'Previous group of states',
-        playbackNextWindow: 'Next group of states',
-        playbackStateWindow: 'States {start}–{end} / {total}',
-        playbackInitialState: 'Initial',
-        viewSimulationRunDetails: 'View run details',
-        runScopeAndSnapshot: 'Run Scope and Submission Snapshot',
-        simulationStoppedBeforeRequestedSteps: 'Only {actual} of {requested} transitions were returned',
-        modelSemanticsUnavailable: 'Model semantics unavailable',
-        environmentEvolutionIncluded: 'Shared environment evolution and local stutter semantics',
-        labelPropagationScopeSummary: 'Labels propagate only on automation commands',
-        attackExactSelectionShort: '{count} explicit points',
-        attackExhaustiveSelectionShort: 'Exhaustive up to {count} points',
-        attackExactSelectionDetail: 'Explicit points ({count}): {points}',
-        attackExhaustiveSelectionDetail: 'Exhaustive up to {count} of {total} points',
-        attackDevicePoint: 'device {id}',
-        attackAutomationLinkPoint: 'rule link #{id}',
-        modelRunSnapshotTitle: 'Frozen Submission Snapshot',
-        modelRunSnapshotSummary: 'Captured {time}: {devices} devices, {rules} rules, {specs} specs, {variables} variables, {templates} templates',
-        runBoardInputUnchanged: 'Current input matches',
-        runBoardInputChanged: 'Current input changed',
-        playbackBoardInputChanged: 'Current input changed; replay uses the saved run scene',
-        runBoardComparisonUnavailable: 'Comparison unavailable',
-        runBoardNotCompared: 'Current board not compared',
-        runBoardInputUnchangedShort: 'Current input matches',
-        runBoardInputChangedShort: 'Current input changed',
-        runBoardComparisonUnavailableShort: 'Comparison unavailable',
-        runBoardNotComparedShort: 'Current board not compared',
-        traceVisualization: {
-          modelTracePlayback: 'Model Trace Playback',
-          modelTraceNotPrediction: 'Model execution, not a physical prediction',
-          simulationAttackContext: 'Attack budget {count} of {total} ({devices} devices + {links} links)',
-          simulationNoAttackContext: 'No attack behavior modeled',
-          privacyPropagationNotModeled: 'Privacy propagation not modeled',
-          playbackSnapshotReadOnly: 'Saved read-only run snapshot',
-          modelIncompletePlayback: 'Incomplete model: {rules} rules omitted',
-          initialModelState: 'Initial model state',
-          rulesAppliedToReachState: 'Rules that produced this state',
-          noRulesApplied: 'No automation rule drove this step',
-          historicalRuleNotOnCurrentBoard: 'Historical rule is no longer on this board',
-          devicesInCurrentState: 'Devices in this state',
-          historicalDeviceNotOnCurrentBoard: 'Historical device is no longer on this board',
-          runtimeCompromisedPoints: 'Current compromised points',
-          compromisedAutomationLinks: 'Compromised automation links in this branch',
-          securityLabels: 'Source and sensitivity labels',
-          compromisedAutomationLinkHint: 'Command does not reach the target',
-          attackScenario: 'Attack scenario',
-          attackBudget: 'budget',
-          privacyPropagationEnabled: 'Privacy propagation modeled',
-          state: 'State {index}',
-          compromisedPointCount: 'Current Compromised Points',
-          attackedBang: 'Attacked',
-          attacked: 'Attacked',
-          compromised: 'Compromised',
-          includesUntrustedSource: 'Includes untrusted source',
-          includesPrivateData: 'Includes private-data label',
-          untrustedLabelDetails: 'Untrusted source labels: {labels}',
-          privateLabelDetails: 'Private-data labels: {labels}',
-          stop: 'Stop',
-          pause: 'Pause',
-          play: 'Play',
-          jumpToState: 'Jump to state',
-          previousState: 'Previous state',
-          nextState: 'Next state',
-          stateLabel: 'State',
-          stateDetails: 'State details',
-          transitionNumber: 'State after transition {index}',
-          environmentVariables: 'Environment variables',
-          changed: 'Changed',
-          deviceBecameCompromised: 'Device became compromised',
-          deviceNoLongerCompromised: 'Device is no longer compromised'
-        }
-      }
-    }
+    en: appI18n.global.getLocaleMessage('en'),
+    'zh-CN': appI18n.global.getLocaleMessage('zh-CN')
   }
 })
 
@@ -168,8 +75,34 @@ const states = (prefix: string): TraceState[] => [
   }
 ]
 
+type TimelineMountOptions = Omit<ComponentMountingOptions<typeof SimulationTimeline>, 'props'> & {
+  props: Omit<InstanceType<typeof SimulationTimeline>['$props'], 'selectedStateIndex' | 'playing'>
+}
+
+const mountTimeline = (options: TimelineMountOptions) => {
+  const scope = effectScope()
+  const cursor = scope.run(() => usePlaybackCursor(ref(options.props.states.length)))!
+  onTestFinished(() => scope.stop())
+  const wrapper = mount(SimulationTimeline, {
+    ...options,
+    props: {
+      ...options.props,
+      selectedStateIndex: cursor.selectedStateIndex.value,
+      playing: cursor.isPlaying.value,
+      onSeek: cursor.seek,
+      onTogglePlay: cursor.toggle,
+      onScrubStart: cursor.stop
+    }
+  })
+  scope.run(() => watch([cursor.selectedStateIndex, cursor.isPlaying], ([selectedStateIndex, playing]) => {
+    void wrapper.setProps({ selectedStateIndex, playing })
+  }))
+  return wrapper
+}
+
 describe('SimulationTimeline', () => {
   beforeEach(() => {
+    i18n.global.locale.value = 'en'
     Element.prototype.scrollIntoView = vi.fn()
   })
 
@@ -177,15 +110,29 @@ describe('SimulationTimeline', () => {
     vi.useRealTimers()
   })
 
+  it('renders the Board-selected step and sends seek intent without selecting a step locally', async () => {
+    const wrapper = mount(SimulationTimeline, {
+      props: { states: states('controlled'), modelSemantics: consistentSemantics,
+        selectedStateIndex: 1, playing: false },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
+    })
+    try {
+      const timeline = wrapper.get('[data-testid="simulation-timeline"]')
+      expect(timeline.attributes('data-selected-state-index')).toBe('1')
+      await wrapper.get('button[aria-label="Next state"]').trigger('click')
+      expect(wrapper.emitted('seek')).toEqual([[2]])
+      expect(timeline.attributes('data-selected-state-index')).toBe('1')
+    } finally { wrapper.unmount() }
+  })
+
   it('keeps playing when the terminal is hidden without clearing the selected state', async () => {
     vi.useFakeTimers()
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, states: states('hidden'), modelSemantics: consistentSemantics },
+    const wrapper = mountTimeline({
+      props: { states: states('hidden'), modelSemantics: consistentSemantics },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
     await wrapper.get('[data-testid="simulation-timeline-play"]').trigger('click')
     await wrapper.setProps({ panelOpen: false })
-    expect(wrapper.emitted('highlight-state')?.some(([state]) => state === null)).not.toBe(true)
     await vi.advanceTimersByTimeAsync(1500)
     expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('1')
     expect(wrapper.get('[data-testid="simulation-timeline-play"]').attributes('aria-label')).toBe('Pause')
@@ -194,8 +141,8 @@ describe('SimulationTimeline', () => {
 
   it('pauses while editing a state number and restores an unfinished entry on blur', async () => {
     vi.useFakeTimers()
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, states: states('draft'), modelSemantics: consistentSemantics },
+    const wrapper = mountTimeline({
+      props: { states: states('draft'), modelSemantics: consistentSemantics },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
     try {
@@ -212,33 +159,34 @@ describe('SimulationTimeline', () => {
   })
 
   it('keeps saved-scene drift guidance across replay views', async () => {
-    const locale = 'en'
-    const previousLocale = appI18n.global.locale.value
-    appI18n.global.locale.value = locale
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, states: states('history'), modelSemantics: consistentSemantics, boardComparison: 'CHANGED' },
-      global: { plugins: [appI18n], stubs: { Teleport: true } }
+    const wrapper = mountTimeline({
+      props: { states: states('history'), modelSemantics: consistentSemantics, boardComparison: 'CHANGED' },
+      global: { plugins: [i18n], stubs: { Teleport: true } }
     })
     try {
       for (const view of ['changes', 'details', 'run']) {
         await wrapper.get(`[data-testid="simulation-timeline-${view}-tab"]`).trigger('click')
         const warning = wrapper.get('[data-testid="simulation-board-drift-warning"]')
         expect(warning.isVisible()).toBe(true)
-        expect(warning.text()).toMatch(locale === 'en' ? /replay uses the scene saved for this run/i : /回放.*本次运行保存的场景/)
+        expect(warning.text()).toMatch(/replay uses the scene saved for this run/i)
         expect(warning.text()).not.toMatch(/rerun|重新运行/i)
       }
       await wrapper.setProps({ boardComparison: 'SEMANTICS_CHANGED' })
-      expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text())
-        .toMatch(locale === 'en' ? /modeling version/ : /建模版本/)
+      expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text()).toMatch(/modeling version/)
+      i18n.global.locale.value = 'zh-CN'
+      await nextTick()
+      expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text()).toMatch(/建模版本/)
+      await wrapper.setProps({ boardComparison: 'CHANGED' })
+      expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text()).toMatch(/回放.*本次运行保存的场景/)
       await wrapper.setProps({ boardComparison: 'UNCHANGED' })
       expect(wrapper.find('[data-testid="simulation-board-drift-warning"]').exists()).toBe(false)
-    } finally { wrapper.unmount(); appI18n.global.locale.value = previousLocale }
+    } finally { wrapper.unmount() }
   })
 
   it.each(['marker', 'keyboard', 'next', 'number'])('pauses autoplay when seeking with %s', async method => {
     vi.useFakeTimers()
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, states: states('seek'), modelSemantics: consistentSemantics },
+    const wrapper = mountTimeline({
+      props: { states: states('seek'), modelSemantics: consistentSemantics },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
@@ -260,33 +208,10 @@ describe('SimulationTimeline', () => {
     wrapper.unmount()
   })
 
-  it('resets playback focus to the first state whenever it opens', async () => {
-    const wrapper = mount(SimulationTimeline, {
-      props: {
-        visible: true,
-        modelSemantics: consistentSemantics,
-        states: states('first')
-      },
-      global: {
-        plugins: [i18n], stubs: { Teleport: true }
-      }
-    })
-
-    await wrapper.get('[data-testid="simulation-timeline-state-2"]').trigger('click')
-    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('2')
-
-    await wrapper.setProps({ visible: false })
-    await wrapper.setProps({ states: states('second'), visible: true })
-
-    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('0')
-    const highlightEvents = wrapper.emitted('highlight-state') || []
-    expect(highlightEvents.at(-1)?.[0]).toMatchObject({ selectedStateIndex: 0 })
-  })
-
   it('keeps playback and the selected state while switching terminal tabs', async () => {
     vi.useFakeTimers()
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('tabs') },
+    const wrapper = mountTimeline({
+      props: { modelSemantics: consistentSemantics, states: states('tabs') },
       slots: { changes: '<p data-testid="test-changes">Before and after values</p>' },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
@@ -298,7 +223,6 @@ describe('SimulationTimeline', () => {
     expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('1')
     await wrapper.get('[data-testid="simulation-timeline-changes-tab"]').trigger('click')
     expect(wrapper.get('[data-testid="simulation-timeline-state-1"]').attributes('aria-current')).toBe('step')
-    expect(wrapper.emitted('highlight-state')?.some(event => event[0] === null)).toBe(false)
     wrapper.unmount()
   })
 
@@ -313,40 +237,20 @@ describe('SimulationTimeline', () => {
      * checked something else. This one asserts the warning's *absence*, so a fixture that silently stops
      * satisfying the predicate fails here instead of quietly restoring that condition everywhere.
      */
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('semantics') },
+    const wrapper = mountTimeline({
+      props: { modelSemantics: consistentSemantics, states: states('semantics') },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
     expect(wrapper.text(), 'a consistent manifest is not a reason to warn')
-      .not.toContain('Model semantics unavailable')
+      .not.toContain('Attack and label-propagation scope cannot be confirmed')
     // Paired with a positive assertion so the check cannot pass by rendering nothing at all.
     expect(wrapper.text()).toContain('Model Trace Playback')
   })
 
-  it('resets to the first state when a same-length run replaces the visible run', async () => {
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('first') },
-      global: { plugins: [i18n], stubs: { Teleport: true } }
-    })
-
-    await wrapper.get('[data-testid="simulation-timeline-state-2"]').trigger('click')
-    await wrapper.setProps({ states: states('replacement') })
-
-    expect(wrapper.get('[data-testid="simulation-timeline"]').attributes('data-selected-state-index')).toBe('0')
-    expect((wrapper.emitted('highlight-state') || []).at(-1)?.[0]).toMatchObject({
-      selectedStateIndex: 0,
-      states: expect.arrayContaining([
-        expect.objectContaining({ devices: expect.arrayContaining([
-          expect.objectContaining({ deviceId: 'replacement_sensor' })
-        ]) })
-      ])
-    })
-  })
-
   it('returns the control to Play as soon as the final state is displayed', async () => {
     vi.useFakeTimers()
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
+    const wrapper = mountTimeline({
+      props: { modelSemantics: consistentSemantics, states: states('playback') },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
@@ -358,8 +262,8 @@ describe('SimulationTimeline', () => {
   })
 
   it('renders run information as a terminal view without opening another surface', async () => {
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('details') },
+    const wrapper = mountTimeline({
+      props: { modelSemantics: consistentSemantics, states: states('details') },
       slots: { run: '<p data-testid="run-content">Saved run diagnostics</p>' },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
@@ -367,12 +271,11 @@ describe('SimulationTimeline', () => {
     await wrapper.get('[data-testid="simulation-timeline-run-tab"]').trigger('click')
     expect(wrapper.get('[data-testid="run-content"]').isVisible()).toBe(true)
     expect(wrapper.get('[data-testid="simulation-timeline-track"]').isVisible()).toBe(true)
-    expect(wrapper.emitted('highlight-state')).toBeUndefined()
   })
 
   it('keeps model coverage in run information while incomplete-model warnings stay visible', async () => {
-    const wrapper = mount(SimulationTimeline, {
-      props: { visible: true, modelComplete: undefined, modelSemantics: consistentSemantics, states: states('coverage') },
+    const wrapper = mountTimeline({
+      props: { modelComplete: undefined, modelSemantics: consistentSemantics, states: states('coverage') },
       slots: { run: '<p data-testid="coverage-run-content">Model generation diagnostics</p>' },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
@@ -385,14 +288,13 @@ describe('SimulationTimeline', () => {
     await wrapper.setProps({ modelComplete: false })
     expect(wrapper.find('button[aria-label="Incomplete model"]').exists()).toBe(false)
     await wrapper.get('[data-testid="simulation-timeline-changes-tab"]').trigger('click')
-    expect(wrapper.get('[data-testid="simulation-timeline-incomplete-warning"]').text()).toContain('rules omitted')
+    expect(wrapper.get('[data-testid="simulation-timeline-incomplete-warning"]').text()).toContain('does not represent the complete board')
     wrapper.unmount()
   })
 
   it('keeps a shortened simulation horizon visible during playback', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: states('short'),
         actualSteps: 2,
@@ -402,13 +304,12 @@ describe('SimulationTimeline', () => {
     })
 
     expect(wrapper.get('[data-testid="simulation-timeline-short-horizon-warning"]').text())
-      .toContain('2 of 6')
+      .toContain('Only 2 steps were parsed out of 6 requested')
   })
 
   it('shows compromised-point count only from runtime global variables', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: [
           {
@@ -431,9 +332,8 @@ describe('SimulationTimeline', () => {
   })
 
   it('does not infer attack mechanisms when persisted model semantics are unavailable', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: states('legacy'),
         isAttack: true,
@@ -443,16 +343,16 @@ describe('SimulationTimeline', () => {
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
-    expect(wrapper.text()).toContain('Model semantics unavailable')
-    expect(wrapper.text()).not.toContain('Attack budget 2 of')
-    expect(wrapper.text()).not.toContain('Privacy propagation modeled')
+    expect(wrapper.text()).toContain('Attack and label-propagation scope cannot be confirmed')
+    expect(wrapper.text()).not.toMatch(/(?:attack|compromise) budget\s*2/i)
+    expect(wrapper.text()).not.toContain('Sensitivity-label propagation modeled')
+    expect(wrapper.find('[data-testid="simulation-runtime-attack"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="simulation-timeline-track"]').exists()).toBe(true)
   })
 
   it('does not treat an environment variable named attackBudget as attack count', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: [
           {
@@ -470,13 +370,12 @@ describe('SimulationTimeline', () => {
     })
 
     expect(wrapper.text()).toContain('attackBudget')
-    expect(wrapper.text()).not.toContain('Current compromised points: 9')
+    expect(wrapper.find('[data-testid="simulation-runtime-attack"]').exists()).toBe(false)
   })
 
   it('does not render an invalid historical compromised-point count as NaN', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: [{
           stateIndex: 1,
@@ -490,13 +389,12 @@ describe('SimulationTimeline', () => {
     })
 
     expect(wrapper.text()).not.toContain('NaN')
-    expect(wrapper.text()).not.toContain('Current compromised points:')
+    expect(wrapper.find('[data-testid="simulation-runtime-attack"]').exists()).toBe(false)
   })
 
   it('shows model scope, completeness, and exact triggered-rule history', async () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: states('history'),
         modelComplete: false,
@@ -509,7 +407,7 @@ describe('SimulationTimeline', () => {
 
     expect(wrapper.text()).not.toContain('Model execution, not a physical prediction')
     expect(wrapper.get('[data-testid="simulation-timeline-incomplete-warning"]').text())
-      .toContain('2 rules omitted')
+      .toContain('2 rule(s) were omitted')
     // The frozen-snapshot counts are deliberately NOT here any more: the run-details dialog owns
     // them, and repeating them on an overlay whose subject is the canvas behind it cost permanent
     // height for a fact a reader needs once. What must survive is the help affordance itself —
@@ -517,24 +415,21 @@ describe('SimulationTimeline', () => {
     expect(wrapper.get('[data-testid="simulation-timeline-snapshot-notice"]')
       .attributes('aria-label')).toContain('Playback controls')
     expect(wrapper.text(), 'the counts must not return to this surface')
-      .not.toContain('3 devices, 2 rules, 0 specs')
+      .not.toMatch(/\d+ devices, \d+ rules, \d+ (?:specs|specifications)/)
     // This surface warns only when the board HAS drifted; the full four-way verdict (including
     // "unchanged") belongs to the run-details dialog, which carries `simulation-board-comparison`.
     // A timeline that also announced "unchanged" would spend permanent height saying nothing happened.
     expect(wrapper.get('[data-testid="simulation-board-drift-warning"]').text())
-      .toContain('Current input changed')
+      .toContain('model differs from the current Board model')
 
     await wrapper.get('[data-testid="simulation-timeline-state-1"]').trigger('click')
     expect(wrapper.find('[data-testid="simulation-timeline-triggered-rules"]').exists()).toBe(false)
-    const highlighted = wrapper.emitted('highlight-state')!.at(-1)![0] as { selectedStateIndex: number; states: TraceState[] }
-    expect(highlighted.selectedStateIndex).toBe(1)
-    expect(highlighted.states[1].triggeredRules).toEqual(expect.arrayContaining([expect.objectContaining({ ruleLabel: 'history activation' })]))
+    expect(wrapper.emitted('seek')).toEqual([[1]])
   })
 
   it('keeps historical devices visible and marks state changes in the saved snapshot', async () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         currentDeviceIds: ['current_sensor'],
         states: [
@@ -581,13 +476,12 @@ describe('SimulationTimeline', () => {
     expect(devices.text()).toContain('unlocked')
     expect(devices.text()).not.toContain('idle -> active')
     expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('Compromised')
-    expect(devices.text()).toContain('Historical device is no longer on this board')
+    expect(devices.text()).toContain('Device no longer on the current board')
   })
 
   it('shows trust and privacy facts from the selected historical state', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: [{
           stateIndex: 1,
@@ -610,11 +504,12 @@ describe('SimulationTimeline', () => {
     })
 
     const security = wrapper.get('[data-testid="playback-state-security"]')
-    expect(security.text()).toContain('Untrusted source labels: motion')
-    expect(security.text()).toContain('Private-data labels: video')
+    expect(security.text()).toContain('Untrusted sources: motion')
+    expect(security.text()).toContain('Sensitive data: video')
   })
 
   it('formats bundled playback tokens at the display boundary without mutating saved states', () => {
+    i18n.global.locale.value = 'zh-CN'
     const savedStates: TraceState[] = [{
       stateIndex: 1,
       triggeredRules: [],
@@ -633,44 +528,29 @@ describe('SimulationTimeline', () => {
       envVariables: [{ name: 'weather', value: 'sunny', modelTokenSource: 'BUNDLED' }]
     }]
     const canonicalSnapshot = structuredClone(savedStates)
-    const translations: Record<string, string> = {
-      MachineState: '设备状态',
-      on: '开启',
-      weather: '天气',
-      sunny: '晴朗',
-      photo: '照片'
-    }
-    const formatToken = (_device: TraceState['devices'][number], value: unknown) =>
-      translations[String(value)] || String(value ?? '')
-    const formatEnvironmentToken = (_name: string, value: unknown) =>
-      translations[String(value)] || String(value ?? '')
-
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: savedStates,
         currentDeviceIds: ['camera_1'],
-        formatDeviceModelToken: formatToken,
-        formatEnvironmentModelToken: formatEnvironmentToken
+        formatDeviceModelToken: (device, value) => formatModelTokenBySource(device.modelTokenSource, value, i18n.global.t),
+        formatEnvironmentModelToken: (_name, value) => formatModelTokenBySource('BUNDLED', value, i18n.global.t)
       },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 
     const devices = wrapper.get('[data-testid="playback-state-devices"]')
-    expect(devices.text()).toContain('开启')
-    expect(devices.text()).toContain('设备状态')
-    expect(devices.text()).toContain('天气晴朗')
+    expect(devices.findAll('dt, dd').map(row => row.text())).toEqual(['设备状态', '开启', '天气', '晴'])
     expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('设备状态: 开启')
     expect(wrapper.get('[data-testid="playback-state-security"]').text()).toContain('照片')
-    expect(wrapper.get('[data-testid="playback-state-environment"]').text()).toContain('天气晴朗')
+    const environment = wrapper.get('[data-testid="playback-state-environment"]')
+    expect(environment.findAll('dt, dd').map(row => row.text())).toEqual(['天气', '晴'])
     expect(savedStates).toEqual(canonicalSnapshot)
   })
 
   it('names a compromised automation link without exposing its generated index', () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         currentRuleIds: ['rule-1'],
         states: [{
@@ -689,9 +569,8 @@ describe('SimulationTimeline', () => {
   })
 
   it('shows the selected environment value without repeating the change in state details', async () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       props: {
-        visible: true,
         modelSemantics: consistentSemantics,
         states: ['23', '0'].map((value, index): TraceState => ({
           stateIndex: index + 1,
@@ -716,9 +595,9 @@ describe('SimulationTimeline', () => {
   })
 
   it('keeps navigation separate from execution records and full state values', async () => {
-    const wrapper = mount(SimulationTimeline, {
+    const wrapper = mountTimeline({
       attachTo: document.body,
-      props: { visible: true, modelSemantics: consistentSemantics, states: states('playback') },
+      props: { modelSemantics: consistentSemantics, states: states('playback') },
       global: { plugins: [i18n], stubs: { Teleport: true } }
     })
 

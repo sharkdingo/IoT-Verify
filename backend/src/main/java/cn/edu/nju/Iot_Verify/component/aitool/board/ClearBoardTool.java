@@ -69,8 +69,7 @@ public class ClearBoardTool extends AbstractAiTool {
                 return readOnlySuccessJson(Map.of(
                         "message", "The Board and its edit history are already empty; no changes were made.",
                         "operation", "unchanged",
-                        "requiresUserConfirmation", false),
-                        "Board already empty.");
+                        "requiresUserConfirmation", false));
             }
             String domainImpactToken = trimToNull(preview.getImpactToken());
             if (domainImpactToken == null) {
@@ -82,8 +81,7 @@ public class ClearBoardTool extends AbstractAiTool {
                 String token = destructiveActionGuard.issue(
                         userId, getName(), TARGET_KEY,
                         "Whole Board", snapshot, domainImpactToken);
-                return readOnlySuccessJson(previewResponse(preview, token),
-                        "Board clear preview prepared; no changes were made.");
+                return readOnlySuccessJson(previewResponse(preview, token));
             }
 
             String suppliedToken = requiredTextField(args, "impactToken", "arguments");
@@ -111,9 +109,7 @@ public class ClearBoardTool extends AbstractAiTool {
             response.put("removedRuleCount", preview.getRuleCount());
             response.put("removedSpecificationCount", preview.getSpecificationCount());
             response.put("clearedEditHistoryEntryCount", preview.getEditHistoryEntryCount());
-            return successJson(response, "Board cleared.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return successJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

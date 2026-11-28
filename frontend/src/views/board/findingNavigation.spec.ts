@@ -11,7 +11,7 @@ import i18n from '@/assets/i18n'
 import type { AvailableFuzzingRunSummary } from '@/types/fuzzing'
 import type { Specification } from '@/types/spec'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
-import { createLatestBoardRequestGuard, fuzzingFindingBelongsToRun } from '../Board.vue'
+import { fuzzingFindingBelongsToRun } from '../Board.vue'
 import { applyBoardRunTarget, hasUnusableBoardRunParams, isSameBoardRunTarget, parseBoardRunTarget } from './runDeepLink'
 
 const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
@@ -81,20 +81,19 @@ const fixture = async () => {
     deepLinkTarget: computed(() => parseBoardRunTarget(router.currentRoute.value.query)),
     appliedDeepLinkTarget: { kind: 'exploration', runId: 10 }, pendingHistoryRunTarget: null,
     staleDeepLink: ref(false),
-    deepLinkLoadRequests: createLatestBoardRequestGuard(), historyDetailRequests,
+    historyDetailRequests, captureBoardRunOwner: () => () => true,
     applyBoardRunTarget, hasUnusableBoardRunParams, isSameBoardRunTarget, isBoardDataReady: ref(true),
     isOpeningAccount: ref(false), boardLifecycleDisposed: false, boardMutationAdmissionEpoch: 0,
     ensureHistoricalPlaybackUiAdmission: () => true,
-    revalidateHistoricalPlaybackAfterLoad: async (token: any) => historyDetailRequests.isCurrent(token),
+    revalidateHistoricalPlaybackAfterLoad: async (isCurrent: () => boolean) => isCurrent(),
     fuzzingApi: { getFinding: vi.fn().mockResolvedValue(replay), getRun: vi.fn() },
     fuzzingFindingBelongsToRun, fuzzingResult: ref(run),
-    activeFuzzingFinding: ref(null), savedTraces: ref([]),
-    closeResultSurfaces: () => historyDetailRequests.invalidate(), closePlaybackForNavigation: vi.fn(), closeHistoryPanel: vi.fn(),
-    closeFuzzingResult: vi.fn(), openTraceAnimationAt: vi.fn(), goToState: vi.fn(),
+    closeResultSurfaces: () => historyDetailRequests.invalidate(), closePlayback: vi.fn(), closeHistoryPanel: vi.fn(),
+    closeFuzzingResult: vi.fn(), startPlayback: vi.fn(),
     openFuzzingRun: vi.fn(), notifyBlocked: vi.fn(), notifyError: vi.fn(), t: (key: string) => key
   }
-  for (const name of ['isCurrentDeepLinkLoad', 'navigateToRunTarget', 'openRunTarget', 'applyDeepLinkTarget',
-    'loadDeepLinkTarget', 'syncBoardToDeepLink', 'reportUnusableDeepLink', 'selectAndPlayFuzzingFinding',
+  for (const name of ['navigateToRunTarget', 'openRunTarget', 'applyDeepLinkTarget',
+    'loadDeepLinkTarget', 'syncBoardToDeepLink', 'reportUnusableDeepLink', 'playHistoricalResult', 'selectAndPlayFuzzingFinding',
     'openFuzzingFinding', 'openFuzzingFindingFromHistory', 'openAccount']) {
     ports[name] = bind(name, ports)
   }
@@ -127,8 +126,9 @@ describe('exploration finding navigation', () => {
     expect(state.fuzzingApi.getFinding).toHaveBeenCalledExactlyOnceWith(11)
     expect(state.fuzzingApi.getRun).not.toHaveBeenCalled()
     expect(state.openFuzzingRun).not.toHaveBeenCalled()
-    expect(state.savedTraces.value[0].playbackScene).toEqual(replay.playbackScene)
-    expect(state.goToState).toHaveBeenCalledWith(1)
+    expect(state.startPlayback).toHaveBeenCalledExactlyOnceWith({
+      kind: 'fuzzing', finding: replay.finding, trace: expect.objectContaining({ playbackScene: replay.playbackScene })
+    }, replay.finding.firstViolationStep)
     const returnTo = state.route.fullPath
     state.openAccount()
     await flushPromises()
@@ -145,7 +145,7 @@ describe('exploration finding navigation', () => {
     state.router.back()
     await flushPromises()
     expect(state.route.query).toEqual({ run: 'exploration:10', keep: 'yes' })
-    expect(state.openFuzzingRun).toHaveBeenCalledExactlyOnceWith(10, expect.any(Object))
+    expect(state.openFuzzingRun).toHaveBeenCalledExactlyOnceWith(10, expect.any(Function))
   })
 
   it('rejects a finding from another parent before rendering its frozen evidence', async () => {
@@ -155,8 +155,7 @@ describe('exploration finding navigation', () => {
     await flushPromises()
     expect(state.route.query).toEqual({ keep: 'yes' })
     expect(state.staleDeepLink.value).toBe(true)
-    expect(state.savedTraces.value).toEqual([])
-    expect(state.openTraceAnimationAt).not.toHaveBeenCalled()
+    expect(state.startPlayback).not.toHaveBeenCalled()
   })
 
   it('keeps an older finding response from replacing a newer URL target', async () => {
@@ -170,7 +169,8 @@ describe('exploration finding navigation', () => {
     settle(replay)
     await earlier
     expect(state.route.query.finding).toBe('12')
-    expect(state.activeFuzzingFinding.value.id).toBe(12)
-    expect(state.openTraceAnimationAt).toHaveBeenCalledOnce()
+    expect(state.startPlayback).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      kind: 'fuzzing', finding: expect.objectContaining({ id: 12 })
+    }), replay.finding.firstViolationStep)
   })
 })

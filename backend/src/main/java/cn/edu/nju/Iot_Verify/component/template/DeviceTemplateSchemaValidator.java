@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.template;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvRelationUtils;
 import cn.edu.nju.Iot_Verify.dto.RequestLimits;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
@@ -30,6 +31,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.cleanEnumLiteral;
 
 @Component
 @RequiredArgsConstructor
@@ -190,36 +193,11 @@ public class DeviceTemplateSchemaValidator {
 
     /** Whether the second state change can satisfy the first API's one-step event predicate. */
     private boolean signalMayObserveChange(JsonNode signalApi, JsonNode stateChange, int modeCount) {
-        List<String> signalStarts = stateParts(signalApi.path("StartState").asText(""), modeCount);
-        List<String> signalEnds = stateParts(signalApi.path("EndState").asText(""), modeCount);
-        List<String> changeStarts = stateParts(stateChange.path("StartState").asText(""), modeCount);
-        List<String> changeEnds = stateParts(stateChange.path("EndState").asText(""), modeCount);
-        boolean observedChangePossible = false;
-
-        for (int i = 0; i < modeCount; i++) {
-            String signalStart = signalStarts.get(i);
-            String changeStart = changeStarts.get(i);
-            if (!signalStart.isEmpty() && !changeStart.isEmpty() && !signalStart.equals(changeStart)) {
-                return false;
-            }
-
-            String signalEnd = signalEnds.get(i);
-            if (signalEnd.isEmpty()) continue;
-            String changeEnd = changeEnds.get(i);
-            if (!changeEnd.isEmpty()) {
-                if (!signalEnd.equals(changeEnd)) return false;
-                String fixedStart = !signalStart.isEmpty() ? signalStart : changeStart;
-                if (fixedStart.isEmpty() || !fixedStart.equals(signalEnd)) {
-                    observedChangePossible = true;
-                }
-            } else {
-                String fixedStart = !signalStart.isEmpty() ? signalStart : changeStart;
-                if (!fixedStart.isEmpty() && !fixedStart.equals(signalEnd)) {
-                    return false;
-                }
-            }
-        }
-        return observedChangePossible;
+        return ManifestConditionSemantics.signalMayObserveChange(
+                stateParts(signalApi.path("StartState").asText(""), modeCount),
+                stateParts(signalApi.path("EndState").asText(""), modeCount),
+                stateParts(stateChange.path("StartState").asText(""), modeCount),
+                stateParts(stateChange.path("EndState").asText(""), modeCount));
     }
 
     private List<String> stateParts(String state, int modeCount) {
@@ -262,7 +240,7 @@ public class DeviceTemplateSchemaValidator {
                 Set<String> normalized = new java.util.LinkedHashSet<>();
                 for (JsonNode value : values) {
                     String raw = value.asText();
-                    String modelValue = normalizeModelLiteral(raw);
+                    String modelValue = cleanEnumLiteral(raw);
                     if (modelValue.isEmpty()) {
                         throw new BadRequestException("Template '" + templateName + "': " + kind + " '"
                                 + name + "' contains an empty enum value after model normalization.");
@@ -396,11 +374,11 @@ public class DeviceTemplateSchemaValidator {
                                       String variableName,
                                       String rawValue,
                                       JsonNode domain) {
-        String value = normalizeModelLiteral(rawValue);
+        String value = cleanEnumLiteral(rawValue);
         JsonNode values = domain.path("Values");
         if (values.isArray() && !values.isEmpty()) {
             for (JsonNode allowed : values) {
-                if (value.equals(normalizeModelLiteral(allowed.asText()))) {
+                if (value.equals(cleanEnumLiteral(allowed.asText()))) {
                     return;
                 }
             }
@@ -521,7 +499,7 @@ public class DeviceTemplateSchemaValidator {
                 for (JsonNode state : workingStates) {
                     String[] components = state.path("Name").asText("").split(";", -1);
                     if (modeIndex < components.length) {
-                        String value = normalizeModelLiteral(components[modeIndex]);
+                        String value = cleanEnumLiteral(components[modeIndex]);
                         if (!value.isEmpty()) {
                             values.add(value);
                         }
@@ -540,7 +518,7 @@ public class DeviceTemplateSchemaValidator {
                 JsonNode values = variable.path("Values");
                 if (values.isArray() && !values.isEmpty()) {
                     Set<String> allowed = new java.util.LinkedHashSet<>();
-                    values.forEach(value -> allowed.add(normalizeModelLiteral(value.asText())));
+                    values.forEach(value -> allowed.add(cleanEnumLiteral(value.asText())));
                     domains.putIfAbsent(name, TriggerDomain.enumerated("enum variable", allowed));
                 } else if (variable.path("LowerBound").isIntegralNumber()
                         && variable.path("UpperBound").isIntegralNumber()) {
@@ -560,7 +538,7 @@ public class DeviceTemplateSchemaValidator {
                                            JsonNode trigger,
                                            Map<String, TriggerDomain> domains) {
         String attribute = trigger.path("Attribute").asText();
-        String relation = normalizeTriggerRelation(trigger.path("Relation").asText());
+        String relation = SmvRelationUtils.normalizeTriggerRelation(trigger.path("Relation").asText());
         String rawValue = trigger.path("Value").asText();
         TriggerDomain domain = domains.get(attribute);
         if (domain == null) {
@@ -589,7 +567,7 @@ public class DeviceTemplateSchemaValidator {
                     + transitionName + "' uses ordering relation '" + trigger.path("Relation").asText()
                     + "' on " + domain.kind() + " '" + attribute + "'. Use = or !=.");
         }
-        String value = normalizeModelLiteral(rawValue);
+        String value = cleanEnumLiteral(rawValue);
         if ("boolean variable".equals(domain.kind())) {
             value = value.toUpperCase(Locale.ROOT);
         }
@@ -598,22 +576,6 @@ public class DeviceTemplateSchemaValidator {
                     + transitionName + "' compares '" + attribute + "' with unknown value '"
                     + rawValue + "'. Allowed values: " + domain.values() + ".");
         }
-    }
-
-    private String normalizeTriggerRelation(String relation) {
-        return switch (relation == null ? "" : relation.trim().toUpperCase(Locale.ROOT)) {
-            case "=", "==", "EQ" -> "=";
-            case "!=", "NEQ" -> "!=";
-            case ">", "GT" -> ">";
-            case ">=", "GTE" -> ">=";
-            case "<", "LT" -> "<";
-            case "<=", "LTE" -> "<=";
-            default -> relation;
-        };
-    }
-
-    private String normalizeModelLiteral(String value) {
-        return value == null ? "" : value.trim().replace(" ", "");
     }
 
     private record TriggerDomain(String kind,
@@ -807,7 +769,7 @@ public class DeviceTemplateSchemaValidator {
     }
 
     private String normalizeStateComponent(String value) {
-        return value == null ? "" : value.trim().replace(" ", "").toLowerCase(Locale.ROOT);
+        return cleanEnumLiteral(value).toLowerCase(Locale.ROOT);
     }
 
     private record StateLabelDeclaration(String fullState,

@@ -1,31 +1,35 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { computed, effectScope, nextTick, reactive, ref, watch } from 'vue'
+import { flushPromises } from '@vue/test-utils'
 import { transpileModule, ScriptTarget } from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createLatestBoardRequestGuard, reconcileBoardNodeSnapshot } from '../Board.vue'
+import { reconcileBoardNodeSnapshot } from '../Board.vue'
+import { useBoardModelComparison } from './useBoardModelComparison'
+import { createBoardSemanticCommit } from './semanticCommit'
 import { compareModelSnapshot } from '@/utils/modelComparison'
+import type { DeviceTemplate } from '@/types/device'
+import type { ModelEnvironmentVariable } from '@/types/model'
 import type { ModelRunSnapshot, RunBoardComparison } from '@/types/modelSemantics'
 import { errorDetails } from '@/utils/userMessage'
 
 const board = readFileSync(join(__dirname, '../Board.vue'), 'utf8')
-const start = board.indexOf('const currentBoardModelFingerprints =')
-const end = board.indexOf('const fuzzingBoardComparison =', start)
 const snapshotStart = board.indexOf('const adoptBoardSnapshot =')
 const snapshotEnd = board.indexOf('let boardForegroundRefreshPromise', snapshotStart)
-if ([start, end, snapshotStart, snapshotEnd].some(index => index < 0)) {
-  throw new Error('Board fingerprint or snapshot refresh state is missing')
+const commitStart = board.indexOf('const commitSemanticScene =')
+const commitEnd = board.indexOf('type VerificationResultView', commitStart)
+if ([snapshotStart, snapshotEnd].some(index => index < 0)) {
+  throw new Error('Board snapshot refresh is missing')
 }
-const createState = new Function('ref', 'computed', 'watch', 'nodes', 'rules', 'specifications',
-  'environmentVariables', 'deviceTemplates', 'createLatestBoardRequestGuard', 'boardApi',
-  'boardLifecycleDisposed', 'boardAuthScopeEpoch', 'allBoardDataKeys', 'boardDataLoadState',
+const createSnapshotLoader = new Function('nodes', 'rules', 'specifications',
+  'environmentVariables', 'deviceTemplates', 'boardApi', 'boardAuthScopeEpoch', 'allBoardDataKeys', 'boardDataLoadState',
   'templatesLoading', 'isCurrentBoardAuthScope', 'replaceNodesFromServer', 'reconcileDanglingBoardFocus',
   'syncRuleDerivedEdges', 'syncBoardUndoAvailability', 'hydratedBoardAuthScopeEpoch', 'boardSnapshotError', 'errorDetails',
-  transpileModule(`${board.slice(start, end)}
+  'adoptBoardComparisonSnapshot', 'invalidateCurrentBoardModelFingerprints', 'hasHydratedBoardSnapshot',
+  'createBoardSemanticCommit', 'currentAuthUserId', 'boardOwnerUserId', 'markVerificationResultStale',
+  transpileModule(`${board.slice(commitStart, commitEnd)}
     ${board.slice(snapshotStart, snapshotEnd)}
-    return { scope: currentBoardModelFingerprints, loading: loadingCurrentBoardModelFingerprints,
-      refresh: refreshCurrentBoardModelFingerprints, invalidate: invalidateCurrentBoardModelFingerprints,
-      refreshSnapshot: refreshBoardSnapshot }`, {
+    return refreshBoardSnapshot`, {
     compilerOptions: { target: ScriptTarget.ES2022 }
   }).outputText)
 
@@ -33,26 +37,58 @@ const scopes: ReturnType<typeof effectScope>[] = []
 afterEach(() => scopes.splice(0).forEach(scope => scope.stop()))
 
 const fingerprintState = () => {
-  const nodes = ref([{ id: 'ac', templateName: 'AirConditioner', label: 'AC',
+  const nodes = ref([{ id: 'ac', templateName: 'AirConditioner', label: 'AC', state: 'Working',
     width: 160, height: 120, position: { x: 10, y: 10 } }])
+  const rules = ref([])
+  const specifications = ref([])
+  const environmentVariables = ref<ModelEnvironmentVariable[]>([])
+  const deviceTemplates = ref<DeviceTemplate[]>([])
+  const readScene = () => ({ nodes: nodes.value, rules: rules.value, specifications: specifications.value,
+    environmentVariables: environmentVariables.value, deviceTemplates: deviceTemplates.value })
   const comparison = (hex = 'a') => ({
     fingerprints: models(hex),
-    scene: { nodes: nodes.value, deviceTemplates: [], environmentVariables: [], rules: [], specifications: [] }
+    scene: readScene()
   })
   const getModelFingerprints = vi.fn().mockImplementation(async () => comparison())
   const getSnapshot = vi.fn()
   const dataKeys = ['templates', 'nodes', 'environment', 'rules', 'specs']
   const loadState = reactive(Object.fromEntries(dataKeys.map(key => [key, 'ready'])))
   const syncBoardUndoAvailability = vi.fn()
+  const currentAuthUserId = ref(1)
   const scope = effectScope()
   scopes.push(scope)
-  const state = scope.run(() => createState(ref, computed, watch, nodes, ref([]), ref([]),
-    ref([]), ref([]), createLatestBoardRequestGuard, { getModelFingerprints, getSnapshot }, false,
+  const state = scope.run(() => useBoardModelComparison(readScene, getModelFingerprints, () => true))!
+  const refreshSnapshot = createSnapshotLoader(nodes, rules, specifications,
+    environmentVariables, deviceTemplates, { getSnapshot },
     0, dataKeys, loadState, ref(false), (epoch: number) => epoch === 0,
     vi.fn((loaded: typeof nodes.value) => { nodes.value = loaded }), vi.fn(), vi.fn(),
-    syncBoardUndoAvailability, 0, ref(null), errorDetails))!
-  return { ...state, nodes, comparison, getModelFingerprints, getSnapshot, loadState, syncBoardUndoAvailability }
+    syncBoardUndoAvailability, ref(0), ref(null), errorDetails, state.adoptSnapshot, state.invalidate, ref(true),
+    createBoardSemanticCommit, currentAuthUserId, 1, vi.fn())
+  return { ...state, scope: state.fingerprints, dispose: () => scope.stop(),
+    refreshSnapshot, nodes, environmentVariables, deviceTemplates,
+    comparison, getModelFingerprints, getSnapshot, loadState, syncBoardUndoAvailability, currentAuthUserId }
 }
+
+it('does not dispatch a snapshot read from the previous account view', async () => {
+  const state = fingerprintState()
+  state.currentAuthUserId.value = 2
+  expect(await state.refreshSnapshot()).toBe(false)
+  expect(state.getSnapshot).not.toHaveBeenCalled()
+})
+
+it('discards a late snapshot after the Board account changes', async () => {
+  const state = fingerprintState()
+  let settle!: () => void
+  state.getSnapshot.mockImplementation(() => new Promise(resolve => {
+    settle = () => resolve({ nodes: [], rules: [], specifications: [], environmentVariables: [], deviceTemplates: [] })
+  }))
+  const pending = state.refreshSnapshot()
+  state.currentAuthUserId.value = 2
+  settle()
+  expect(await pending).toBe(false)
+  expect(state.nodes.value[0]?.id).toBe('ac')
+  expect(state.syncBoardUndoAvailability).not.toHaveBeenCalled()
+})
 
 const models = (hex: string) => ({ verification: hex.repeat(64), simulation: hex.repeat(64), modelSemanticsVersion: 1 })
 
@@ -79,6 +115,19 @@ const resultStalenessState = () => {
 }
 
 describe('Board current model fingerprints', () => {
+  it('does not publish comparison evidence after the owner has been disposed', async () => {
+    const state = fingerprintState()
+    let resolve!: (value: ReturnType<typeof state.comparison>) => void
+    state.getModelFingerprints.mockReturnValueOnce(new Promise(done => { resolve = done }))
+    const pending = state.refresh()
+    state.dispose()
+    resolve(state.comparison())
+
+    await expect(pending).resolves.toBeNull()
+    expect(state.scope.value).toBeNull()
+    expect(state.loading.value).toBe(false)
+  })
+
   it('does not use another tab’s newer model to confirm the displayed scene', async () => {
     const state = fingerprintState()
     const displayed = { deviceTemplates: [], nodes: state.nodes.value,
@@ -109,6 +158,44 @@ describe('Board current model fingerprints', () => {
     expect(state.scope.value).toEqual(models('a'))
   })
 
+  it('matches the same model when the template catalog and environment arrive in a different order', async () => {
+    const state = fingerprintState()
+    state.deviceTemplates.value = [
+      { id: 1, name: 'AirConditioner', manifest: { Name: 'AirConditioner' }, defaultTemplate: true },
+      { id: 2, name: 'Alarm', manifest: { Name: 'Alarm' }, defaultTemplate: true }
+    ]
+    state.environmentVariables.value = [
+      { name: 'temperature', value: '24', trust: 'trusted', privacy: 'public' },
+      { name: 'humidity', value: '50', trust: 'trusted', privacy: 'public' }
+    ]
+    const comparison = state.comparison()
+    state.getModelFingerprints.mockResolvedValueOnce({
+      ...comparison,
+      scene: {
+        ...comparison.scene,
+        deviceTemplates: [...comparison.scene.deviceTemplates].reverse(),
+        environmentVariables: [...comparison.scene.environmentVariables].reverse()
+      }
+    })
+
+    await expect(state.refresh()).resolves.toEqual(models('a'))
+  })
+
+  it('requests fresh evidence once when the displayed source changes and reverts in the same tick', async () => {
+    const state = fingerprintState()
+    await state.refresh()
+    state.getModelFingerprints.mockClear()
+
+    state.nodes.value[0]!.state = 'Off'
+    state.nodes.value[0]!.state = 'Working'
+    expect(state.scope.value).toBeNull()
+
+    await flushPromises()
+
+    expect(state.getModelFingerprints).toHaveBeenCalledOnce()
+    expect(state.scope.value).toEqual(models('a'))
+  })
+
   it('reads fingerprints once and adopts the edit history from the same snapshot', async () => {
     const state = fingerprintState()
     const editHistory = { canUndo: true, canRedo: false, editHistoryRevision: '31:1:0' }
@@ -121,6 +208,55 @@ describe('Board current model fingerprints', () => {
     expect(state.getModelFingerprints).toHaveBeenCalledOnce()
     expect(state.syncBoardUndoAvailability).toHaveBeenCalledExactlyOnceWith(editHistory)
     expect(state.scope.value).toEqual(models('a'))
+  })
+
+  it('reuses the confirmed comparison after an unchanged snapshot with a newer undo revision', async () => {
+    const state = fingerprintState()
+    await state.refresh()
+    state.getModelFingerprints.mockClear()
+    const editHistory = { canUndo: true, canRedo: false, editHistoryRevision: '32:1:0' }
+    state.getSnapshot.mockResolvedValueOnce({ ...state.comparison().scene, editHistory })
+
+    expect(await state.refreshSnapshot()).toBe(true)
+    await flushPromises()
+
+    expect(state.getSnapshot).toHaveBeenCalledOnce()
+    expect(state.getModelFingerprints).not.toHaveBeenCalled()
+    expect(state.scope.value).toEqual(models('a'))
+    expect(state.syncBoardUndoAvailability).toHaveBeenCalledExactlyOnceWith(editHistory)
+  })
+
+  it('compares a multi-collection snapshot only after all its collections have been installed', async () => {
+    const state = fingerprintState()
+    const next = {
+      ...state.comparison().scene,
+      nodes: [{ ...state.nodes.value[0], state: 'Off' }],
+      environmentVariables: [{ name: 'room', value: '22', trust: 'trusted', privacy: 'public' }],
+      deviceTemplates: [{ id: 1, name: 'AirConditioner', manifest: { Name: 'AirConditioner' }, defaultTemplate: true }]
+    }
+    let finishComparison!: (value: { scene: typeof next; fingerprints: ReturnType<typeof models> }) => void
+    const read = new Promise<{ scene: typeof next; fingerprints: ReturnType<typeof models> }>(resolve => {
+      finishComparison = resolve
+    })
+    state.getModelFingerprints.mockReturnValueOnce(read)
+    state.getSnapshot.mockResolvedValueOnce({ ...next,
+      editHistory: { canUndo: true, canRedo: false, editHistoryRevision: '32:1:0' } })
+    const serialize = vi.spyOn(JSON, 'stringify')
+    try {
+      expect(await state.refreshSnapshot()).toBe(true)
+      const serializedModels = serialize.mock.calls.filter(([value]) => value
+        && typeof value === 'object' && 'devices' in value && 'deviceTemplates' in value)
+      expect(serializedModels.map(([value]) => value)).toEqual([expect.objectContaining({
+        devices: [expect.objectContaining({ state: 'Off' })],
+        environmentVariables: next.environmentVariables, deviceTemplates: next.deviceTemplates
+      })])
+      expect(state.getModelFingerprints).toHaveBeenCalledOnce()
+    } finally {
+      serialize.mockRestore()
+      finishComparison({ scene: next, fingerprints: models('b') })
+    }
+    await flushPromises()
+    expect(state.scope.value).toEqual(models('b'))
   })
 
   it('updates an already-rendered unknown scope when the current fingerprint arrives', async () => {
@@ -211,7 +347,7 @@ describe('Board current model fingerprints', () => {
     }
   })
 
-  it.each(['success', 'failure'] as const)('preserves loading for the post-watcher request when an invalidated fingerprint %s settles', async outcome => {
+  it.each(['success', 'failure'] as const)('preserves loading for the deferred scene refresh when an invalidated fingerprint %s settles', async outcome => {
     const state = fingerprintState()
     let resolveOlder!: (value: ReturnType<typeof state.comparison>) => void
     let rejectOlder!: (error: Error) => void
@@ -358,7 +494,7 @@ describe('Board current model fingerprints', () => {
       state.getModelFingerprints.mockImplementationOnce(async () => state.comparison('b'))
       state.nodes.value = reconcileBoardNodeSnapshot(state.nodes.value, runtimeChanged, new Map(), new Set())
       expect(state.scope.value).toBeNull()
-      await nextTick()
+      await flushPromises()
       expect(state.scope.value).toEqual(models('b'))
       expect(state.getModelFingerprints).toHaveBeenCalledOnce()
     } finally {
@@ -380,7 +516,7 @@ describe('Board current model fingerprints', () => {
     state.getModelFingerprints.mockImplementationOnce(async () => state.comparison('b'))
     Object.assign(state.nodes.value[0], { [field as string]: value })
     expect(state.scope.value).toBeNull()
-    await nextTick()
+    await flushPromises()
     expect(state.scope.value).toEqual(models('b'))
     expect(state.getModelFingerprints).toHaveBeenCalledTimes(2)
   })

@@ -14,6 +14,7 @@ import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.exception.BadRequestException;
+import cn.edu.nju.Iot_Verify.exception.BoardContentConflictException;
 import cn.edu.nju.Iot_Verify.exception.ConflictException;
 import cn.edu.nju.Iot_Verify.exception.UnauthorizedException;
 import cn.edu.nju.Iot_Verify.exception.ResourceNotFoundException;
@@ -21,18 +22,14 @@ import cn.edu.nju.Iot_Verify.exception.ValidationException;
 import cn.edu.nju.Iot_Verify.po.BoardEditJournalPo;
 import cn.edu.nju.Iot_Verify.po.BoardEditOperation;
 import cn.edu.nju.Iot_Verify.po.BoardEnvironmentVariablePo;
+import cn.edu.nju.Iot_Verify.po.DeviceNodeId;
 import cn.edu.nju.Iot_Verify.po.DeviceNodePo;
 import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
 import cn.edu.nju.Iot_Verify.po.RulePo;
-import cn.edu.nju.Iot_Verify.po.UserPo;
 import cn.edu.nju.Iot_Verify.repository.*;
 import cn.edu.nju.Iot_Verify.service.impl.BoardStorageServiceImpl;
 import cn.edu.nju.Iot_Verify.util.ModelFingerprint;
 import cn.edu.nju.Iot_Verify.util.mapper.BoardDataConverter;
-import cn.edu.nju.Iot_Verify.util.mapper.DeviceNodeMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.DeviceTemplateMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.RuleMapper;
-import cn.edu.nju.Iot_Verify.util.mapper.SpecificationMapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -58,8 +55,10 @@ import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.sql.DataSource;
 
+import static cn.edu.nju.Iot_Verify.service.board.BoardEditUndoFixtures.newRule;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -142,65 +141,16 @@ class BoardEditUndoIntegrationTest {
     @BeforeEach
     void setUp() {
         relaxJsonColumnsForH2();
-        // Match Spring's configured mapper: DTOs carry LocalDateTime, which the bare mapper
-        // cannot write.
-        journal = new BoardEditJournal(journalRepo,
-                new ObjectMapper().registerModule(new JavaTimeModule()));
+        journal = BoardEditUndoFixtures.newJournal(journalRepo);
         service = serviceWithJournal(journal);
-        userId = createUser("13800138001", "undo-owner");
-        otherUserId = createUser("13800138002", "undo-other");
-        seedDevice(userId);
+        userId = BoardEditUndoFixtures.createUser(users, "13800138001", "undo-owner");
+        otherUserId = BoardEditUndoFixtures.createUser(users, "13800138002", "undo-other");
+        BoardEditUndoFixtures.seedLightBoard(templates, nodes, environments, userId);
     }
 
     private BoardStorageServiceImpl serviceWithJournal(BoardEditJournal editJournal) {
-        return new BoardStorageServiceImpl(
-                nodes, environments, specs, rules, null, templates, null,
-                new TransactionTemplate(transactionManager), null,
-                new SpecificationMapper(), new RuleMapper(), new DeviceNodeMapper(), null,
-                new DeviceTemplateMapper(), null, users, editJournal);
-    }
-
-    private Long createUser(String phone, String username) {
-        UserPo user = new UserPo();
-        user.setPhone(phone);
-        user.setUsername(username);
-        user.setPassword("hashed");
-        user.setCreatedAt(java.time.LocalDateTime.now());
-        return users.saveAndFlush(user).getId();
-    }
-
-    /**
-     * A rule needs a device to reference, and a device needs its template manifest. The shipped
-     * Light manifest is reused so this fixture cannot drift from the real validation rules.
-     */
-    private void seedDevice(Long owner) {
-        String manifest;
-        try (var stream = getClass().getResourceAsStream("/deviceTemplate/Light.json")) {
-            manifest = new String(java.util.Objects.requireNonNull(stream).readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            throw new IllegalStateException("Light device template fixture is unavailable", e);
-        }
-        templates.saveAndFlush(DeviceTemplatePo.builder()
-                .userId(owner)
-                .name("Light")
-                .defaultTemplate(true)
-                .manifestJson(manifest)
-                .build());
-        nodes.saveAndFlush(DeviceNodePo.builder()
-                .id("light-1")
-                .userId(owner)
-                .templateName("Light")
-                .label("Light 1")
-                .posX(0.0).posY(0.0).state("on").width(176).height(128)
-                .build());
-        environments.saveAndFlush(BoardEnvironmentVariablePo.builder()
-                .userId(owner)
-                .name("illuminance")
-                .value("10")
-                .trust("untrusted")
-                .privacy("public")
-                .build());
+        return BoardEditUndoFixtures.boardService(
+                nodes, environments, specs, rules, templates, users, transactionManager, editJournal);
     }
 
     private DeviceNodeDto newDevice(String id, String label, double x) {
@@ -281,9 +231,9 @@ class BoardEditUndoIntegrationTest {
         assertEquals("DEVICE", entry.getEntityType().name());
         assertEquals("CREATE", entry.getOperation().name());
         assertTrue(service.undoLastEdit(userId).isApplied());
-        assertFalse(nodes.existsByUserIdAndId(userId, "ai-light"));
+        assertFalse(nodes.existsById(new DeviceNodeId("ai-light", userId)));
         assertTrue(service.redoLastUndoneEdit(userId).isApplied());
-        assertTrue(nodes.existsByUserIdAndId(userId, "ai-light"));
+        assertTrue(nodes.existsById(new DeviceNodeId("ai-light", userId)));
     }
 
     @Test
@@ -476,7 +426,7 @@ class BoardEditUndoIntegrationTest {
         journalRepo.saveAndFlush(entry);
 
         assertThrows(ConflictException.class, () -> service.undoLastEdit(userId));
-        assertTrue(nodes.existsByUserIdAndId(userId, "ai-light"));
+        assertTrue(nodes.existsById(new DeviceNodeId("ai-light", userId)));
         assertTrue(journal.availability(userId).canUndo(),
                 "an invalid transition must leave the entry retryable");
     }
@@ -565,7 +515,7 @@ class BoardEditUndoIntegrationTest {
         service.updateNodeLayout(userId, "light-1", changed);
 
         assertFalse(service.redoLastUndoneEdit(userId).isApplied());
-        assertTrue(nodes.existsByUserIdAndId(userId, "light-1"));
+        assertTrue(nodes.existsById(new DeviceNodeId("light-1", userId)));
         assertFalse(journal.availability(userId).canRedo(),
                 "a new edit after undo must discard the abandoned redo branch");
         assertTrue(journal.availability(userId).canUndo(), "the new layout edit must be undoable");
@@ -967,6 +917,31 @@ class BoardEditUndoIntegrationTest {
     }
 
     @Test
+    void affectOnlySharedVariableAllowsALabelSpecificationButRejectsAValueRead() {
+        SpecificationDto label = newSpec("on");
+        SpecConditionDto labelCondition = label.getAConditions().get(0);
+        labelCondition.setTargetType("trust");
+        labelCondition.setPropertyScope("variable");
+        labelCondition.setKey("illuminance");
+        labelCondition.setValue("trusted");
+        var saved = assertDoesNotThrow(() -> service.addSpec(userId, label)).getAffectedItem();
+        assertEquals("trust", saved.getAConditions().get(0).getTargetType());
+
+        SpecificationDto reading = newSpec("off");
+        SpecConditionDto readCondition = reading.getAConditions().get(0);
+        readCondition.setTargetType("variable");
+        readCondition.setKey("illuminance");
+        readCondition.setVariableSource("reported");
+        readCondition.setValue("10");
+        ValidationException error = assertThrows(ValidationException.class, () -> service.addSpec(userId, reading));
+
+        assertEquals("Unknown internal or environment variable for specification: illuminance",
+                error.getErrors().get("specs[1].aConditions[0].key"));
+        assertEquals(List.of(saved), service.getSpecs(userId));
+        assertEquals(1, journalRepo.countByUserId(userId));
+    }
+
+    @Test
     void editingAnUnresolvedSpecificationCanSupplyItsMissingVariableSourceButUndoCannotRestoreIt() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         DeviceTemplatePo template = templates.findByUserId(userId).get(0);
@@ -1079,32 +1054,19 @@ class BoardEditUndoIntegrationTest {
         }
     }
 
-    /** A minimal rule that passes board validation against the Light template. */
-    private RuleDto newRule(String text) {
-        return newRule(text, "on", "off");
-    }
+    @Test
+    void replacingABoardKeepsSubmittedSpecificationOrderInTheReceiptAndDatabase() {
+        var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(service.getNodes(userId),
+                service.getEnvironmentVariables(userId), List.of(), List.of(newSpec("on"), newSpec("off")));
+        batch.setTemplateSnapshots(service.getDeviceTemplates(userId));
+        batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
 
-    /**
-     * A rule distinguished by its trigger and action, not just its text: the board rejects two
-     * semantically identical rules, so tests holding several rules at once must vary these.
-     */
-    private RuleDto newRule(String text, String triggerState, String action) {
-        RuleDto.Condition trigger = new RuleDto.Condition();
-        trigger.setDeviceName("light-1");
-        trigger.setTargetType("state");
-        trigger.setAttribute("state");
-        trigger.setRelation("=");
-        trigger.setValue(triggerState);
+        var saved = service.saveBoardBatch(userId, batch);
 
-        RuleDto.Command command = new RuleDto.Command();
-        command.setDeviceName("light-1");
-        command.setAction(action);
-
-        RuleDto rule = new RuleDto();
-        rule.setConditions(List.of(trigger));
-        rule.setCommand(command);
-        rule.setRuleString(text);
-        return rule;
+        List<String> submittedOrder = List.of("spec-on", "spec-off");
+        assertEquals(submittedOrder, saved.getSpecs().stream().map(SpecificationDto::getId).toList());
+        assertEquals(submittedOrder, specIdsInOrder());
+        assertEquals(List.of(0, 1), specs.findByUserId(userId).stream().map(row -> row.getListOrder()).toList());
     }
 
     @Test
@@ -1158,7 +1120,8 @@ class BoardEditUndoIntegrationTest {
     void addingARuleRecordsTheJournalEntryInTheSameCommit() {
         CollectionMutationResultDto<RuleDto> created = service.addRule(userId, newRule("r1"));
 
-        assertEquals(1, journalRepo.countByUserIdAndUndoneFalse(userId));
+        assertEquals(1, journalRepo.findByUserIdOrderBySequenceAsc(userId).stream()
+                .filter(entry -> !entry.isUndone()).count());
         // The mutation itself reports availability, so the client never has to guess.
         assertEquals(Boolean.TRUE, created.getCanUndo());
         assertEquals(Boolean.FALSE, created.getCanRedo());
@@ -1182,8 +1145,7 @@ class BoardEditUndoIntegrationTest {
     }
 
     /**
-     * Unlike the two tests above, this one is not blocked by H2's JSON handling: the guard refuses
-     * before {@code insertWithId} runs, so no JSON column is ever written.
+     * The ownership guard rejects the reversal before {@code insertWithId} writes a row.
      */
     @Test
     void undoRefusesWhenAnotherAccountNowHoldsTheDeletedRulesId() {
@@ -1225,23 +1187,21 @@ class BoardEditUndoIntegrationTest {
 
     @Test
     void aRuleAddedAfterDeletionsSortsLastAndItsJournalledPositionMatches() {
-        // Deleting a rule does not renumber the survivors, so `execution_order` has gaps. Setting a new
-        // rule's order to the list *count* then places it before an existing rule — and execution order
-        // decides which rule wins when guards overlap, so this is semantic rather than cosmetic. Two
-        // deletions are needed: with one, the id tiebreak hides it.
-        // The Light template offers only on/off, so two semantically distinct rules is the maximum on
-        // one device. Deleting the first leaves the survivor at execution_order 1 with 0 free, so an
-        // added rule taking the list count (1) collides with it — and the id tiebreak then decides.
+        // Two deleted slots make a count-based append sort before the survivor.
         Long first = service.addRule(userId, newRule("r1", "on", "off")).getAffectedItem().getId();
         Long second = service.addRule(userId, newRule("r2", "off", "on")).getAffectedItem().getId();
+        Long survivor = service.addRule(userId, newRule("r3", "on", "on")).getAffectedItem().getId();
         service.removeRuleIfUnchanged(userId, first, ruleById(first));
+        service.removeRuleIfUnchanged(userId, second, ruleById(second));
 
-        Long added = service.addRule(userId, newRule("r3", "on", "off")).getAffectedItem().getId();
+        var created = service.addRule(userId, newRule("r4", "on", "off"));
+        Long added = created.getAffectedItem().getId();
+        List<Long> expectedOrder = List.of(survivor, added);
+        assertEquals(expectedOrder, created.getCurrentItems().stream().map(RuleDto::getId).toList(),
+                "the create receipt must put the new rule after the surviving rule");
+        assertEquals(expectedOrder, ruleIdsInOrder());
+        assertEquals(3, rules.findById(added).orElseThrow().getExecutionOrder());
 
-        assertEquals(List.of(second, added), ruleIdsInOrder(),
-                "a newly added rule must sort after the rules already on the board");
-        // The CREATE entry must describe the position the create actually produced, or undo-then-redo
-        // reconstructs a different board than the create did.
         BoardEditJournalPo entry = journal.nextToUndo(userId).orElseThrow();
         assertEquals(String.valueOf(added), entry.getEntityKey());
         assertEquals(1, entry.getEntityOrder(),
@@ -1255,10 +1215,7 @@ class BoardEditUndoIntegrationTest {
     }
 
     private RuleDto persistedRuleWithHistoricTime(Long ruleId) {
-        RulePo stored = rules.findById(ruleId).orElseThrow();
-        stored.setCreatedAt(LocalDateTime.of(2001, 2, 3, 4, 5, 6));
-        rules.saveAndFlush(stored);
-        entityManager.clear();
+        BoardEditUndoFixtures.persistHistoricRuleTimestamp(rules, entityManager, ruleId);
         return ruleById(ruleId);
     }
 
@@ -1637,15 +1594,20 @@ class BoardEditUndoIntegrationTest {
         service.addRule(userId, newRule("original"));
         var originalRules = service.getRules(userId);
         SpecificationDto first = newSpec("on");
-        SpecificationDto second = newSpec("off");
-        second.setId(first.getId());
+        SpecificationDto semanticDuplicate = newSpec("on");
+        semanticDuplicate.setId("spec-semantic-duplicate");
+        SpecificationDto idDuplicate = newSpec("off");
+        idDuplicate.setId(first.getId());
         var batch = new cn.edu.nju.Iot_Verify.dto.board.BoardBatchDto(
-                service.getNodes(userId), service.getEnvironmentVariables(userId), List.of(), List.of(first, second));
+                service.getNodes(userId), service.getEnvironmentVariables(userId),
+                List.of(), List.of(first, semanticDuplicate, idDuplicate));
         batch.setTemplateSnapshots(service.getDeviceTemplates(userId));
         batch.setImpactToken(service.previewBoardReplacement(userId).getImpactToken());
         long historyCount = journalRepo.countByUserId(userId);
 
-        assertThrows(ConflictException.class, () -> service.saveBoardBatch(userId, batch));
+        BoardContentConflictException conflict = assertThrows(
+                BoardContentConflictException.class, () -> service.saveBoardBatch(userId, batch));
+        assertEquals(Set.of("specs[2].id"), conflict.getErrors().keySet());
 
         assertEquals(originalRules, service.getRules(userId));
         assertTrue(service.getSpecs(userId).isEmpty());

@@ -1,9 +1,10 @@
 import api from '@/api/http'
+import { unpack } from './resultEnvelope'
 import type { ChatTaskMemory } from '@/types/chat'
 
 export const getTaskMemory = async (sessionId: string, signal?: AbortSignal): Promise<ChatTaskMemory> => {
   const response = await api.get(`/chat/sessions/${encodeURIComponent(sessionId)}/memory`, { signal })
-  const value = response.data.data
+  const value = unpack<ChatTaskMemory>(response)
   if (!value || !['CURRENT', 'PARTIAL', 'UNAVAILABLE'].includes(value.status)
     || !Number.isSafeInteger(value.throughMessageId) || value.throughMessageId < 0
     || typeof value.sceneChanged !== 'boolean' || !Array.isArray(value.items) || value.items.length > 24

@@ -1,18 +1,13 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator.module;
 
 import cn.edu.nju.Iot_Verify.util.NaturalChangeRateParser;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.assumeAvailableNusmvPath;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.module.RateSemanticsTestSupport.transitionCandidates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -29,18 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class NaturalChangeRateIntervalSoundnessTest {
 
-    /** The transition shape the generator emits for a numeric variable with a declared interval. */
-    private static String transitionCandidates(String rateDeclaration, String varRef,
-                                               int lower, int upper) {
-        return NaturalChangeRateParser.parse(rateDeclaration).admissibleDeltas().stream()
-                .map(delta -> {
-                    String shifted = delta == 0 ? varRef
-                            : delta > 0 ? varRef + " + " + delta
-                            : varRef + " - " + Math.abs(delta);
-                    return "max(" + lower + ", min(" + upper + ", " + shifted + "))";
-                })
-                .collect(Collectors.joining(", "));
-    }
+    private static final RateSemanticsTestSupport NUSMV = new RateSemanticsTestSupport("ncr-soundness", 120);
 
     @Test
     void aWideIntervalAdmitsEveryInteriorStepNotOnlyItsEndpoints() {
@@ -53,9 +37,7 @@ class NaturalChangeRateIntervalSoundnessTest {
 
     @Test
     void nusmvNoLongerProvesAnUnreachableClaimForAnIntervalThatPermitsTheStep() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this soundness check");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this soundness check");
 
         String model = """
                 MODULE main
@@ -69,7 +51,7 @@ class NaturalChangeRateIntervalSoundnessTest {
                 CTLSPEC AG (v >= 0 & v <= 10)
                 """.formatted(transitionCandidates("[-3, 3]", "v", 0, 10));
 
-        List<String> results = runNusmv(nusmv, model);
+        List<String> results = NUSMV.runNusmv(nusmv, model);
 
         // The declaration permits +1 and +2, so neither "cannot become 6" nor "cannot become 7"
         // may be provable. Before the fix both were reported true.
@@ -88,9 +70,7 @@ class NaturalChangeRateIntervalSoundnessTest {
 
     @Test
     void theMedicBaselineIntervalIsUnchangedByExhaustiveModelling() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this soundness check");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this soundness check");
 
         // [-1, 1] has no interior, so the endpoint model and the exhaustive model coincide. This is
         // the regression guard for MEDIC's exact baseline.
@@ -108,7 +88,7 @@ class NaturalChangeRateIntervalSoundnessTest {
                 CTLSPEC AG (v = 5 -> AX (v != 6))
                 """.formatted(transitionCandidates("[-1, 1]", "v", 0, 10));
 
-        List<String> results = runNusmv(nusmv, model);
+        List<String> results = NUSMV.runNusmv(nusmv, model);
 
         // +2 remains genuinely impossible in one step under [-1, 1]; +1 remains possible.
         assertTrue(results.stream().anyMatch(line ->
@@ -130,9 +110,7 @@ class NaturalChangeRateIntervalSoundnessTest {
      */
     @Test
     void anIntervalExcludingZeroForcesTheChangeAndInvertsBothVerdicts() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this soundness check");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this soundness check");
 
         assertEquals(List.of(-4, -3, -2),
                 NaturalChangeRateParser.parse("[-4, -2]").admissibleDeltas());
@@ -140,7 +118,7 @@ class NaturalChangeRateIntervalSoundnessTest {
         String faithful = "MODULE main\nVAR\n  level : 0..10;\nASSIGN\n  init(level) := 10;\n"
                 + "  next(level) := {" + transitionCandidates("[-4, -2]", "level", 0, 10) + "};\n"
                 + "CTLSPEC AF (level = 0)\nCTLSPEC EG (level = 10)\n";
-        List<String> faithfulResults = runNusmv(nusmv, faithful);
+        List<String> faithfulResults = NUSMV.runNusmv(nusmv, faithful);
         assertTrue(faithfulResults.stream().anyMatch(line ->
                         line.contains("AF level = 0") && line.contains("is true")),
                 () -> "a mandatory drain must empty the tank: " + faithfulResults);
@@ -154,7 +132,7 @@ class NaturalChangeRateIntervalSoundnessTest {
                 + "  next(level) := {max(0, min(10, level - 4)), max(0, min(10, level - 3)), "
                 + "max(0, min(10, level - 2)), max(0, min(10, level))};\n"
                 + "CTLSPEC AF (level = 0)\nCTLSPEC EG (level = 10)\n";
-        List<String> stutterResults = runNusmv(nusmv, withStutter);
+        List<String> stutterResults = NUSMV.runNusmv(nusmv, withStutter);
         assertTrue(stutterResults.stream().anyMatch(line ->
                         line.contains("AF level = 0") && line.contains("is false")),
                 () -> "an injected stutter must be shown to break the mandatory drain: "
@@ -166,31 +144,6 @@ class NaturalChangeRateIntervalSoundnessTest {
         // "may drain 2-4, or hold" is [-4, 0]: strictly weaker, and it says so on its face.
         assertEquals(List.of(-4, -3, -2, -1, 0),
                 NaturalChangeRateParser.parse("[-4, 0]").admissibleDeltas());
-        assertFalse(NaturalChangeRateParser.parse("[-4, 0]").isStatic());
-    }
-
-    private static List<String> runNusmv(String nusmv, String model) throws Exception {
-        Path modelFile = Files.createTempFile("ncr-soundness", ".smv");
-        try {
-            Files.writeString(modelFile, model);
-            Process process = new ProcessBuilder(nusmv, modelFile.toAbsolutePath().toString())
-                    .redirectErrorStream(true)
-                    .start();
-            List<String> specLines = new ArrayList<>();
-            try (var reader = process.inputReader()) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.contains("specification")) {
-                        specLines.add(line);
-                    }
-                }
-            }
-            assertTrue(process.waitFor(120, TimeUnit.SECONDS), "NuSMV did not terminate");
-            assertFalse(specLines.isEmpty(), "NuSMV reported no specification results");
-            return specLines;
-        } finally {
-            Files.deleteIfExists(modelFile);
-        }
     }
 
     /**
@@ -202,9 +155,7 @@ class NaturalChangeRateIntervalSoundnessTest {
      */
     @Test
     void aDeviceAlreadyActingMovesTheEnvironmentOnTheFirstStep() throws Exception {
-        String nusmv = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmv != null && Files.exists(Path.of(nusmv)),
-                "NuSMV executable is required for this soundness check");
+        String nusmv = assumeAvailableNusmvPath("NuSMV executable is required for this soundness check");
 
         String lagging = """
                 MODULE AC
@@ -244,20 +195,11 @@ class NaturalChangeRateIntervalSoundnessTest {
                 CTLSPEC AG (a_temperature = 30 -> AX (a_temperature <= 27))
                 """;
 
-        assertTrue(runNusmv(nusmv, lagging).stream()
+        assertTrue(NUSMV.runNusmv(nusmv, lagging).stream()
                         .anyMatch(line -> line.contains("is false")),
                 "a stored rate must be shown to lag, otherwise this test proves nothing");
-        assertTrue(runNusmv(nusmv, contemporaneous).stream()
+        assertTrue(NUSMV.runNusmv(nusmv, contemporaneous).stream()
                         .anyMatch(line -> line.contains("is true")),
                 "a DEFINE rate must apply the device effect in the same step");
-    }
-
-    private static String resolveNusmvPath() {
-        String env = System.getenv("NUSMV_PATH");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
-        return Files.exists(bundled) ? bundled.toString() : "NuSMV";
     }
 }

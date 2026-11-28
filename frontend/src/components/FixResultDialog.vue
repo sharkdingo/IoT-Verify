@@ -19,6 +19,7 @@ import type {
   FaultLocalizationResult,
   FaultRule,
   FixApplyResult,
+  FixBoardApplyOutcome,
   FixResult,
   FixStrategyAttempt,
   FixStrategyAttemptStatus,
@@ -37,13 +38,12 @@ const props = defineProps<{
   traceId: number
   violatedSpecId?: string
   violatedSpecName?: string
-  applyOnBoard: (write: () => Promise<FixApplyResult | null>) => Promise<FixApplyResult | null>
+  applyOnBoard: (traceId: number, write: () => Promise<FixApplyResult | null>) => Promise<FixBoardApplyOutcome>
 }>()
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
   'applied': [traceId: number]
-  'outcome-uncertain': []
   'reverify': []
   'model-semantics-changed': [traceId: number]
 }>()
@@ -659,12 +659,10 @@ const fetchFixSuggestions = async (strategy: FixStrategyName = selectedStrategy.
         reportStrategyError(strategy, fixResponseErrorKey(error, 'app.failedToLoadFixSuggestions'), error)
       }
     }
-    if (outcomeUnknown) beginUnknownFixRecovery(requestId)
   } finally {
-    if (postSettledWithTerminalEvidence && activeFixRequestId.value === requestId) {
-      clearActiveFixTracking(requestId, 'post-terminal')
-    } else if (activeFixRequestId.value === requestId) {
-      beginUnknownFixRecovery(requestId)
+    if (activeFixRequestId.value === requestId) {
+      if (postSettledWithTerminalEvidence) clearActiveFixTracking(requestId, 'post-terminal')
+      else beginUnknownFixRecovery(requestId)
     }
     if (activeFixRequestId.value !== requestId) {
       if (activeFixRequestId.value === null
@@ -771,12 +769,12 @@ const applyFix = async (suggestion: FixSuggestion) => {
   const preferredRanges = suggestion.strategy === 'parameter' ? lastPreferredRangeSelections.value : undefined
   applyingFix.value = true
   try {
-    const result = await props.applyOnBoard(async () => {
+    const outcome = await props.applyOnBoard(traceId, async () => {
       if (!ownsApply() || !ownsDialog() || currentSuggestion.value !== suggestion || !templateSnapshotAllowsApply.value) return null
       return boardApi.applyFix(traceId, suggestion, preferredRanges)
     })
-    if (!result || !ownsApply()) return
-    emit('applied', traceId)
+    if (!outcome || !ownsApply()) return
+    if (outcome !== 'unconfirmed') emit('applied', traceId)
     if (ownsDialog()) emit('update:visible', false)
   } catch (error: any) {
     if (!ownsApply()) return
@@ -799,14 +797,6 @@ const applyFix = async (suggestion: FixSuggestion) => {
       return
     }
     console.error('Failed to apply fix:', error)
-    const definitiveRejection = Number.isFinite(status)
-      && ((status >= 400 && status < 500)
-        || (status === 503 && reasonCode === 'FIX_APPLY_PREFLIGHT_UNAVAILABLE'))
-    if (!definitiveRejection) {
-      emit('outcome-uncertain')
-      if (ownsDialog()) emit('update:visible', false)
-      return
-    }
     if (!ownsDialog()) return
     // Drift, stale targets, and service-unavailable preflight failures occur before the write.
     const messageKey = fixApplyErrorKey(error)

@@ -58,7 +58,7 @@ class FixSuggestionTokenServiceTest {
         List<RuleDto> rules = IntStream.range(0, 6)
                 .mapToObj(index -> RuleDto.builder().ruleString("Rule " + index).build())
                 .toList();
-        List<RuleDto> applied = FixStrategyApplier.apply("remove", trusted, rules, Map.of());
+        List<RuleDto> applied = FixStrategyApplier.apply("remove", trusted, rules, Map.of(), Map.of());
 
         assertEquals(List.of("Rule 0", "Rule 1", "Rule 3", "Rule 5"),
                 applied.stream().map(RuleDto::getRuleString).toList());
@@ -182,7 +182,7 @@ class FixSuggestionTokenServiceTest {
                         .build())
                 .toList();
         List<RuleDto> applied = FixStrategyApplier.apply(
-                "parameter", trusted, rules, Map.of());
+                "parameter", trusted, rules, Map.of(), Map.of());
 
         assertEquals("30", applied.get(0).getConditions().get(0).getValue());
         assertEquals("25", applied.get(4).getConditions().get(2).getValue());
@@ -258,8 +258,8 @@ class FixSuggestionTokenServiceTest {
                         .build())
                 .toList();
         List<RuleDto> applied = FixStrategyApplier.apply(
-                "condition", trusted, rules, Map.of(),
-                Map.of("sensor_2", "node_sensor_2", "sensor_3", "node_sensor_3"));
+                "condition", trusted, rules,
+                Map.of("sensor_2", "node_sensor_2", "sensor_3", "node_sensor_3"), Map.of());
 
         assertEquals(2, applied.get(1).getConditions().size());
         assertEquals("node_sensor_3", applied.get(1).getConditions().get(1).getDeviceName());

@@ -1,26 +1,10 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator;
 
-import cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport;
 import cn.edu.nju.Iot_Verify.component.nusmv.executor.NusmvExecutor;
-import cn.edu.nju.Iot_Verify.component.nusmv.fixer.RuleFixer;
-import cn.edu.nju.Iot_Verify.component.nusmv.fixer.localize.FaultLocalizer;
-import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ConditionAdjustStrategy;
 import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.FixStrategyApplier;
-import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.ParameterAdjustStrategy;
-import cn.edu.nju.Iot_Verify.component.nusmv.fixer.strategy.RemoveRulesFixStrategy;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvDeviceModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvMainModuleBuilder;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWriter;
-import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
 import cn.edu.nju.Iot_Verify.component.nusmv.parser.SmvTraceParser;
-import cn.edu.nju.Iot_Verify.component.template.DeviceTemplateSchemaValidator;
-import cn.edu.nju.Iot_Verify.configure.FixConfig;
-import cn.edu.nju.Iot_Verify.configure.NusmvConfig;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
-import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
-import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackScenarioDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FaultRuleDto;
 import cn.edu.nju.Iot_Verify.dto.fix.FixResultDto;
@@ -30,12 +14,10 @@ import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDeviceDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceStateDto;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceVariableDto;
-import cn.edu.nju.Iot_Verify.po.DeviceTemplatePo;
-import cn.edu.nju.Iot_Verify.service.DeviceTemplateService;
 import cn.edu.nju.Iot_Verify.util.TraceStateIntegrity;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -44,16 +26,19 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
+import static cn.edu.nju.Iot_Verify.component.board.PortableSceneTestImport.importRules;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.USER_ID;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.allStrategyFixer;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.assumeAvailableNusmvPath;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.buildExecutor;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readDevices;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readEnvironment;
+import static cn.edu.nju.Iot_Verify.component.nusmv.generator.FormalCheckTestSupport.readSpecs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Real-NuSMV regression for the away-mode presentation scene ("nobody home, door unlocked").
@@ -63,7 +48,6 @@ import static org.mockito.Mockito.when;
  */
 class AwayModeUnlockSceneNusmvTest {
 
-    private static final long USER_ID = 1L;
     private static final Path SCENE_PATH =
             Path.of("..", "docs", "examples", "default-away-mode-unlock-scene.json");
 
@@ -78,9 +62,7 @@ class AwayModeUnlockSceneNusmvTest {
      */
     @Test
     void awayModeUnlockScene_rejectsRemovalThatDisablesTheResponseTrigger() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this demo-scene regression test");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this demo-scene regression test");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
@@ -93,7 +75,7 @@ class AwayModeUnlockSceneNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "awayMode");
 
         SmvGenerator.GenerateResult baselineModel = generator.generateWithEnvironment(
@@ -180,7 +162,7 @@ class AwayModeUnlockSceneNusmvTest {
         FixResultDto fixResult = allStrategyFixer(generator, executor, 240_000).fix(
                 901L, specs.get(violatedIndex).getId(), states, rules, devices, environment, specs,
                 baselineModel.deviceSmvMap(), USER_ID, AttackScenarioDto.none(), true,
-                List.of("parameter", "condition", "remove"), 20, Map.of());
+                List.of("parameter", "condition", "remove"), 20, Map.of(), () -> { });
         assertFalse(fixResult.isFixable(), "a repair must preserve the formerly reachable response trigger");
 
         // Localization lists every rule that fired in the trace, so all three are candidates here
@@ -269,9 +251,7 @@ class AwayModeUnlockSceneNusmvTest {
      */
     @Test
     void awayModeUnlockScene_addingAnAutoLockRuleEarnsTheResponsePropertyInsteadOfEmptyingIt() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this demo-scene regression test");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this demo-scene regression test");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
@@ -297,7 +277,7 @@ class AwayModeUnlockSceneNusmvTest {
                 .build();
         List<RuleDto> withAutoLock = new ArrayList<>();
         withAutoLock.add(autoLock);
-        withAutoLock.addAll(readRules(scene));
+        withAutoLock.addAll(importRules(scene));
 
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
                 USER_ID, devices, environment, withAutoLock, specs,
@@ -344,9 +324,7 @@ class AwayModeUnlockSceneNusmvTest {
      */
     @Test
     void awayModeUnlockScene_presentsNoVacuouslySatisfiedProperty() throws Exception {
-        String nusmvPath = resolveNusmvPath();
-        Assumptions.assumeTrue(nusmvPath != null && Files.exists(Path.of(nusmvPath)),
-                "NuSMV executable is required for this demo-scene regression test");
+        String nusmvPath = assumeAvailableNusmvPath("NuSMV executable is required for this demo-scene regression test");
 
         ObjectMapper objectMapper = new ObjectMapper();
         JsonNode scene = objectMapper.readTree(Files.readString(SCENE_PATH));
@@ -354,7 +332,7 @@ class AwayModeUnlockSceneNusmvTest {
         NusmvExecutor executor = buildExecutor(nusmvPath);
         List<DeviceVerificationDto> devices = readDevices(scene);
         List<BoardEnvironmentVariableDto> environment = readEnvironment(scene);
-        List<RuleDto> rules = readRules(scene);
+        List<RuleDto> rules = importRules(scene);
         List<SpecificationDto> specs = readSpecs(scene, devices, "reachability");
 
         SmvGenerator.GenerateResult model = generator.generateWithEnvironment(
@@ -425,127 +403,11 @@ class AwayModeUnlockSceneNusmvTest {
         }
     }
 
-    private RuleFixer allStrategyFixer(SmvGenerator generator, NusmvExecutor executor, int timeoutMs) {
-        FixConfig fixConfig = new FixConfig();
-        fixConfig.setFixTimeoutMs(timeoutMs);
-        fixConfig.setMaxRefineAttempts(20);
-        fixConfig.setMaxCandidatesPerRule(5);
-        return new RuleFixer(
-                new FaultLocalizer(),
-                List.of(new ParameterAdjustStrategy(generator, executor, fixConfig),
-                        new ConditionAdjustStrategy(generator, executor, fixConfig),
-                        new RemoveRulesFixStrategy(generator, executor)),
-                fixConfig);
-    }
-
     private SmvGenerator buildGenerator(ObjectMapper objectMapper, JsonNode scene) {
-        Map<String, String> manifests = new java.util.LinkedHashMap<>();
-        for (JsonNode template : scene.path("templates")) {
-            try {
-                manifests.put(template.path("name").asText(),
-                        objectMapper.writeValueAsString(template.path("manifest")));
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
+        try {
+            return FormalCheckTestSupport.buildGenerator(objectMapper, scene);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
         }
-        SmvModelValidator modelValidator = new SmvModelValidator();
-        DeviceTemplateService templateService = mock(DeviceTemplateService.class);
-        when(templateService.findTemplateByName(anyLong(), anyString())).thenAnswer(invocation -> {
-            String templateName = invocation.getArgument(1, String.class);
-            String manifest = manifests.get(templateName);
-            return manifest == null ? Optional.empty() : Optional.of(DeviceTemplatePo.builder()
-                    .id(100L).userId(USER_ID).name(templateName)
-                    .manifestJson(manifest).defaultTemplate(true).build());
-        });
-        DeviceSmvDataFactory factory = new DeviceSmvDataFactory(
-                objectMapper, templateService, modelValidator,
-                new DeviceTemplateSchemaValidator(objectMapper));
-        return new SmvGenerator(factory, new SmvDeviceModuleBuilder(), new SmvRuleCommentWriter(),
-                new SmvMainModuleBuilder(), new SmvSpecificationBuilder(), modelValidator);
-    }
-
-    private NusmvExecutor buildExecutor(String nusmvPath) {
-        NusmvConfig config = new NusmvConfig();
-        config.setPath(nusmvPath);
-        config.setCommandPrefix("");
-        config.setTimeoutMs(120_000);
-        config.setMaxConcurrent(2);
-        config.setAcquirePermitTimeoutMs(10_000);
-        return new NusmvExecutor(config);
-    }
-
-    private List<DeviceVerificationDto> readDevices(JsonNode scene) {
-        List<DeviceVerificationDto> devices = new ArrayList<>();
-        for (JsonNode row : scene.path("devices")) {
-            DeviceVerificationDto device = new DeviceVerificationDto();
-            device.setVarName(row.path("id").asText());
-            device.setDeviceLabel(row.path("label").asText());
-            device.setTemplateName(row.path("templateName").asText());
-            device.setState(textOrNull(row, "state"));
-            device.setCurrentStateTrust(textOrNull(row, "currentStateTrust"));
-            device.setCurrentStatePrivacy(textOrNull(row, "currentStatePrivacy"));
-            device.setVariables(readVariables(row.path("variables")));
-            device.setPrivacies(readPrivacies(row.path("privacies")));
-            devices.add(device);
-        }
-        return devices;
-    }
-
-    private List<BoardEnvironmentVariableDto> readEnvironment(JsonNode scene) {
-        List<BoardEnvironmentVariableDto> environment = new ArrayList<>();
-        for (JsonNode row : scene.path("environmentVariables")) {
-            environment.add(new BoardEnvironmentVariableDto(
-                    row.path("name").asText(), row.path("value").asText(),
-                    row.path("trust").asText(), row.path("privacy").asText()));
-        }
-        return environment;
-    }
-
-    private List<RuleDto> readRules(JsonNode scene) {
-        return PortableSceneTestImport.importRules(scene);
-    }
-
-    private List<SpecificationDto> readSpecs(
-            JsonNode scene, List<DeviceVerificationDto> devices, String idPrefix) {
-        Map<String, String> labelsById = devices.stream().collect(java.util.stream.Collectors.toMap(
-                DeviceVerificationDto::getVarName, DeviceVerificationDto::getDeviceLabel));
-        return PortableSceneTestImport.importSpecs(scene, idPrefix, labelsById);
-    }
-
-    private List<VariableStateDto> readVariables(JsonNode rows) {
-        List<VariableStateDto> variables = new ArrayList<>();
-        if (!rows.isArray()) {
-            return variables;
-        }
-        for (JsonNode row : rows) {
-            variables.add(new VariableStateDto(row.path("name").asText(),
-                    row.path("value").asText(), textOrNull(row, "trust")));
-        }
-        return variables;
-    }
-
-    private List<PrivacyStateDto> readPrivacies(JsonNode rows) {
-        List<PrivacyStateDto> privacies = new ArrayList<>();
-        if (!rows.isArray()) {
-            return privacies;
-        }
-        for (JsonNode row : rows) {
-            privacies.add(new PrivacyStateDto(row.path("name").asText(), row.path("privacy").asText()));
-        }
-        return privacies;
-    }
-
-    private String textOrNull(JsonNode row, String field) {
-        JsonNode value = row.get(field);
-        return value == null || value.isNull() || value.asText().isBlank() ? null : value.asText();
-    }
-
-    private static String resolveNusmvPath() {
-        String env = System.getenv("NUSMV_PATH");
-        if (env != null && !env.isBlank()) {
-            return env;
-        }
-        Path bundled = Path.of("D:/NuSMV/NuSMV-2.7.1-win64/NuSMV-2.7.1-win64/bin/NuSMV.exe");
-        return Files.exists(bundled) ? bundled.toString() : "NuSMV";
     }
 }

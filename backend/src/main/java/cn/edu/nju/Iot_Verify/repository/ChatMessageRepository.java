@@ -15,8 +15,6 @@ import java.util.List;
 import java.util.Optional;
 
 public interface ChatMessageRepository extends JpaRepository<ChatMessagePo, Long> {
-    // Full session history for frontend timeline.
-    List<ChatMessagePo> findBySessionIdOrderByCreatedAtAsc(String sessionId);
     List<ChatMessagePo> findBySessionIdOrderByIdDesc(String sessionId, Pageable pageable);
     List<ChatMessagePo> findBySessionIdAndIdLessThanOrderByIdDesc(
             String sessionId, Long id, Pageable pageable);

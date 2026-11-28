@@ -63,8 +63,6 @@ public class FuzzMapper {
     private static final long MAX_RUN_METADATA_BYTES = FuzzMetadataPolicy.MAX_RUN_METADATA_BYTES;
     private static final int MAX_ELIGIBILITY_LABEL_CHARS = FuzzMetadataPolicy.MAX_ELIGIBILITY_LABEL_CHARS;
     private static final int MAX_ELIGIBILITY_REASON_CHARS = FuzzMetadataPolicy.MAX_ELIGIBILITY_REASON_CHARS;
-    private static final int MAX_STABLE_CODE_CHARS = FuzzMetadataPolicy.MAX_STABLE_CODE_CHARS;
-    private static final Pattern STABLE_CODE = Pattern.compile("^[A-Z][A-Z0-9_]*$");
     private static final Pattern MODEL_FINGERPRINT = Pattern.compile("^[0-9a-f]{64}$");
 
     private final ModelFingerprint modelFingerprint;
@@ -75,62 +73,10 @@ public class FuzzMapper {
         this.validator = Objects.requireNonNull(validator, "validator");
     }
 
-    public FuzzTaskDto toTaskDto(FuzzTaskPo task) {
-        if (task == null) return null;
-        validateTaskLifecycle(task);
-        return FuzzTaskDto.builder()
-                .id(task.getId())
-                .initiator(task.getInitiator())
-                .status(statusName(task))
-                .progress(task.getProgress())
-                .progressStage(task.getProgressStage())
-                .createdAt(task.getCreatedAt())
-                .startedAt(task.getStartedAt())
-                .completedAt(task.getCompletedAt())
-                .processingTimeMs(task.getProcessingTimeMs())
-                .errorMessage(task.getErrorMessage())
-                .runId(runId(task))
-                .outcome(task.getOutcome())
-                .explorationMode(explorationMode(task))
-                .modelSnapshot(readModelSnapshot(task))
-                .maxIterations(task.getMaxIterations())
-                .pathLength(task.getPathLength())
-                .populationSize(task.getPopulationSize())
-                .seed(task.getSeed())
-                .targetSpecIds(readTargetSpecIds(task))
-                .build();
-    }
-
-    public FuzzTaskSummaryDto toTaskSummaryDto(FuzzTaskPo task) {
-        if (task == null) return null;
-        validateTaskLifecycle(task);
-        return FuzzTaskSummaryDto.builder()
-                .id(task.getId())
-                .initiator(task.getInitiator())
-                .status(statusName(task))
-                .progress(task.getProgress())
-                .progressStage(task.getProgressStage())
-                .createdAt(task.getCreatedAt())
-                .startedAt(task.getStartedAt())
-                .completedAt(task.getCompletedAt())
-                .processingTimeMs(task.getProcessingTimeMs())
-                .errorMessage(task.getErrorMessage())
-                .runId(runId(task))
-                .outcome(task.getOutcome())
-                .explorationMode(explorationMode(task))
-                .modelSnapshot(readModelSnapshot(task))
-                .maxIterations(task.getMaxIterations())
-                .pathLength(task.getPathLength())
-                .populationSize(task.getPopulationSize())
-                .seed(task.getSeed())
-                .targetSpecIds(readTargetSpecIds(task))
-                .build();
-    }
-
     /** Maps a closed list projection without touching the frozen input LONGTEXT. */
     public FuzzTaskSummaryDto toTaskSummaryDtoProjection(FuzzTaskSummaryProjection task) {
         if (task == null) return null;
-        validateTaskSummaryProjection(task);
+        List<String> targetSpecIds = validateTaskSummaryProjection(task);
         return FuzzTaskSummaryDto.builder()
                 .id(task.getId())
                 .initiator(task.getInitiator())
@@ -145,19 +91,19 @@ public class FuzzMapper {
                 .runId(runId(task))
                 .outcome(task.getOutcome())
                 .explorationMode(explorationMode(task))
-                .modelSnapshot(readModelSnapshot(task))
+                .modelSnapshot(readModelSnapshot(task.getId(), task.getModelSnapshotJson()))
                 .maxIterations(task.getMaxIterations())
                 .pathLength(task.getPathLength())
                 .populationSize(task.getPopulationSize())
                 .seed(task.getSeed())
-                .targetSpecIds(readTargetSpecIds(task))
+                .targetSpecIds(targetSpecIds)
                 .build();
     }
 
     /** Maps task detail from the same bounded projection used by polling lists. */
     public FuzzTaskDto toTaskDtoProjection(FuzzTaskSummaryProjection task) {
         if (task == null) return null;
-        validateTaskSummaryProjection(task);
+        List<String> targetSpecIds = validateTaskSummaryProjection(task);
         return FuzzTaskDto.builder()
                 .id(task.getId())
                 .initiator(task.getInitiator())
@@ -172,12 +118,12 @@ public class FuzzMapper {
                 .runId(runId(task))
                 .outcome(task.getOutcome())
                 .explorationMode(explorationMode(task))
-                .modelSnapshot(readModelSnapshot(task))
+                .modelSnapshot(readModelSnapshot(task.getId(), task.getModelSnapshotJson()))
                 .maxIterations(task.getMaxIterations())
                 .pathLength(task.getPathLength())
                 .populationSize(task.getPopulationSize())
                 .seed(task.getSeed())
-                .targetSpecIds(readTargetSpecIds(task))
+                .targetSpecIds(targetSpecIds)
                 .build();
     }
 
@@ -213,37 +159,6 @@ public class FuzzMapper {
                 .build();
     }
 
-    public FuzzRunSummaryDto toRunSummaryDto(FuzzTaskPo task, List<FuzzFindingPo> findings) {
-        PersistedRunWithFindings validated = readAndValidateRun(task, findings);
-        PersistedRunData data = validated.data();
-        return FuzzRunSummaryDto.builder()
-                .id(task.getId())
-                .initiator(task.getInitiator())
-                .outcome(task.getOutcome())
-                .explorationMode(explorationMode(task))
-                .effectiveSeed(task.getEffectiveSeed())
-                .iterations(task.getIterations())
-                .generatedPaths(task.getGeneratedPaths())
-                .elapsedMs(task.getElapsedMs())
-                .modelSnapshot(data.modelSnapshot())
-                .eligibility(data.eligibility())
-                .eligibleSpecifications(data.eligibleSpecifications())
-                .modelTokenSourcesByDeviceId(data.modelTokenSourcesByDeviceId())
-                .limitations(data.limitations())
-                .createdAt(task.getCreatedAt())
-                .completedAt(task.getCompletedAt())
-                .findingCount(task.getFindingCount())
-                .maxIterations(task.getMaxIterations())
-                .pathLength(task.getPathLength())
-                .populationSize(task.getPopulationSize())
-                .findings(findings == null ? List.of() : findings.stream()
-                        .map(finding -> toFindingSummaryDto(
-                                finding, validated.findingsById().get(finding.getId())))
-                        .toList())
-                .dataAvailable(true)
-                .build();
-    }
-
     /**
      * Maps a run-list projection. Lists validate bounded metadata and finding
      * ownership/identity; full model-input and trace evidence is validated when
@@ -252,8 +167,7 @@ public class FuzzMapper {
     public FuzzRunSummaryDto toRunSummaryDtoFromTaskProjection(
             FuzzTaskSummaryProjection task, List<FuzzFindingSummaryProjection> findings,
             FuzzSpecificationPresentationProjection presentation) {
-        ProjectedRunContext context = readAndValidateProjectedRunContext(task, findings);
-        ProjectedRunData data = context.data();
+        ProjectedRunData data = readAndValidateProjectedRunData(task, findings);
         Map<String, SpecificationDto> specifications = readProjectedSpecifications(
                 task, presentation, data.modelSnapshot(), data.eligibility());
         Map<String, ModelTokenSource> tokenSources = readProjectedTokenSources(
@@ -301,11 +215,6 @@ public class FuzzMapper {
                 .build();
     }
 
-    public FuzzFindingDto toFindingDto(FuzzFindingPo finding) {
-        if (finding == null) return null;
-        return toFindingDto(finding, readAndValidateFinding(finding));
-    }
-
     public FuzzFindingDto toFindingDto(
             FuzzTaskPo task, FuzzFindingPo finding, long actualFindingCount) {
         if (finding == null) return null;
@@ -327,15 +236,15 @@ public class FuzzMapper {
     private ValidatedFindingReplay validateFindingReplay(
             FuzzTaskPo task, FuzzFindingPo finding, long actualFindingCount) {
         validateTaskLifecycle(task);
-        if (task == null
-                || finding.getId() == null
+        if (finding.getId() == null
                 || !Objects.equals(task.getId(), finding.getFuzzTaskId())
                 || !Objects.equals(task.getUserId(), finding.getUserId())) {
             throw new PersistedDataIntegrityException(
-                    "FuzzTask", task == null ? null : task.getId(), "findings",
+                    "FuzzTask", task.getId(), "findings",
                     "finding ownership does not match the run");
         }
-        PersistedRunContext context = readAndValidateRunContext(task, actualFindingCount);
+        validateRunFindingCount(task, actualFindingCount);
+        PersistedRunContext context = readAndValidateRunContext(task);
         PersistedFindingData data = readAndValidateFinding(finding);
         validateFindingAgainstRun(
                 task,
@@ -361,34 +270,8 @@ public class FuzzMapper {
                 .build();
     }
 
-    public FuzzFindingSummaryDto toFindingSummaryDto(FuzzFindingPo finding) {
-        if (finding == null) return null;
-        return toFindingSummaryDto(finding, readAndValidateFinding(finding));
-    }
-
-    private FuzzFindingSummaryDto toFindingSummaryDto(
-            FuzzFindingPo finding, PersistedFindingData data) {
-        return FuzzFindingSummaryDto.builder()
-                .id(finding.getId())
-                .fuzzTaskId(finding.getFuzzTaskId())
-                .violatedSpecId(finding.getViolatedSpecId())
-                .violatedSpec(data.specification())
-                .specificationLabel(specificationLabel(data.specification()))
-                .firstViolationStep(finding.getFirstViolationStep())
-                .seed(finding.getSeed())
-                .createdAt(finding.getCreatedAt())
-                .stateCount(data.states().size())
-                .build();
-    }
-
-    public FuzzFindingSummaryDto toFindingSummaryDto(FuzzFindingSummaryProjection finding) {
-        if (finding == null) return null;
-        return toFindingSummaryDto(finding, null, finding.getViolatedSpecId());
-    }
-
     private FuzzFindingSummaryDto toFindingSummaryDto(
             FuzzFindingSummaryProjection finding, SpecificationDto specification, String frozenLabel) {
-        validateFindingSummaryProjection(finding);
         return FuzzFindingSummaryDto.builder()
                 .id(finding.getId())
                 .fuzzTaskId(finding.getFuzzTaskId())
@@ -403,48 +286,17 @@ public class FuzzMapper {
                 .build();
     }
 
-    /* No `toFindingSummaryDtos`/`toFindingDtos` list wrappers: they had no callers, because callers map the
-       singular overloads over their own streams (they need the per-finding validated data). */
-
-    private String statusName(FuzzTaskPo task) {
-        return task.getStatus().name();
-    }
-
     private String statusName(FuzzTaskSummaryProjection task) {
         return task.getStatus().name();
-    }
-
-    private Long runId(FuzzTaskPo task) {
-        return task.getStatus() == FuzzTaskPo.TaskStatus.COMPLETED ? task.getId() : null;
     }
 
     private Long runId(FuzzTaskSummaryProjection task) {
         return task.getStatus() == FuzzTaskPo.TaskStatus.COMPLETED ? task.getId() : null;
     }
 
-    private List<String> readTargetSpecIds(FuzzTaskPo task) {
-        List<String> targetSpecIds = JsonUtils.readPersistedJsonRequired(
-                "FuzzTask", task.getId(), "targetSpecIdsJson",
-                task.getTargetSpecIdsJson(), () -> JsonUtils.fromJson(
-                        task.getTargetSpecIdsJson(), new TypeReference<List<String>>() {}));
-        if (!validTargetSpecIds(targetSpecIds)) {
-            throw invalidTask(task, "targetSpecIdsJson", "target specification IDs are invalid");
-        }
-        return targetSpecIds;
-    }
-
-    private List<String> readTargetSpecIds(FuzzTaskSummaryProjection task) {
-        return JsonUtils.readPersistedJsonRequired("FuzzTask", task.getId(), "targetSpecIdsJson",
-                task.getTargetSpecIdsJson(), () -> JsonUtils.fromJson(
-                        task.getTargetSpecIdsJson(), new TypeReference<List<String>>() {}));
-    }
-
-    private ModelRunSnapshotDto readModelSnapshot(FuzzTaskPo task) {
-        return readModelSnapshot(task.getId(), task.getModelSnapshotJson());
-    }
-
-    private ModelRunSnapshotDto readModelSnapshot(FuzzTaskSummaryProjection task) {
-        return readModelSnapshot(task.getId(), task.getModelSnapshotJson());
+    private List<String> readTargetSpecIds(Long taskId, String json) {
+        return JsonUtils.readPersistedJsonRequired("FuzzTask", taskId, "targetSpecIdsJson",
+                json, () -> JsonUtils.fromJson(json, new TypeReference<List<String>>() {}));
     }
 
     private ModelRunSnapshotDto readModelSnapshot(Long taskId, String snapshotJson) {
@@ -471,32 +323,10 @@ public class FuzzMapper {
                         task.getModelInputSnapshotJson()));
     }
 
-    private FuzzEligibilityDto readEligibility(FuzzTaskPo task) {
-        requireMetadataFieldSize(task.getId(), "eligibilityJson", task.getEligibilityJson());
-        return JsonUtils.readPersistedJsonRequired("FuzzTask", task.getId(), "eligibilityJson",
-                task.getEligibilityJson(), () -> JsonUtils.fromJson(
-                        task.getEligibilityJson(), FuzzEligibilityDto.class));
-    }
-
-    private FuzzEligibilityDto readEligibility(FuzzTaskSummaryProjection task) {
-        requireMetadataFieldSize(task.getId(), "eligibilityJson", task.getEligibilityJson());
-        return JsonUtils.readPersistedJsonRequired("FuzzTask", task.getId(), "eligibilityJson",
-                task.getEligibilityJson(), () -> JsonUtils.fromJson(
-                        task.getEligibilityJson(), FuzzEligibilityDto.class));
-    }
-
-    private List<String> readLimitations(FuzzTaskPo task) {
-        requireMetadataFieldSize(task.getId(), "limitationsJson", task.getLimitationsJson());
-        return JsonUtils.readPersistedJsonRequired("FuzzTask", task.getId(), "limitationsJson",
-                task.getLimitationsJson(), () -> JsonUtils.fromJson(
-                        task.getLimitationsJson(), new TypeReference<List<String>>() {}));
-    }
-
-    private List<String> readLimitations(FuzzTaskSummaryProjection task) {
-        requireMetadataFieldSize(task.getId(), "limitationsJson", task.getLimitationsJson());
-        return JsonUtils.readPersistedJsonRequired("FuzzTask", task.getId(), "limitationsJson",
-                task.getLimitationsJson(), () -> JsonUtils.fromJson(
-                        task.getLimitationsJson(), new TypeReference<List<String>>() {}));
+    private FuzzEligibilityDto readEligibility(Long taskId, String json) {
+        requireMetadataFieldSize(taskId, "eligibilityJson", json);
+        return JsonUtils.readPersistedJsonRequired("FuzzTask", taskId, "eligibilityJson",
+                json, () -> JsonUtils.fromJson(json, FuzzEligibilityDto.class));
     }
 
     private SpecificationDto readViolatedSpec(FuzzFindingPo finding) {
@@ -584,7 +414,7 @@ public class FuzzMapper {
                         "FuzzFinding", finding.getId(), "inputEventsJson",
                         "random initial-state events are only valid at step 0");
             }
-            int sourceOrder = inputEventSourceOrder(source);
+            int sourceOrder = source.causalOrder();
             if (event.getStep() < previousStep
                     || (event.getStep() == previousStep && sourceOrder < previousSourceOrder)) {
                 throw new PersistedDataIntegrityException(
@@ -640,39 +470,8 @@ public class FuzzMapper {
         }
     }
 
-    private int inputEventSourceOrder(FuzzInputEventSource source) {
-        return switch (source) {
-            case RANDOM_INITIAL_STATE -> 0;
-            case SEED_EVENT -> 1;
-            case MODEL_CHOICE -> 2;
-        };
-    }
-
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
-    }
-
-    private boolean hasValidRunStatisticsRelation(
-            Integer iterations,
-            Long generatedPaths,
-            Integer maxIterations,
-            Integer populationSize) {
-        if (iterations == null || iterations < 0
-                || generatedPaths == null || generatedPaths < 0
-                || maxIterations == null || maxIterations < 1
-                || populationSize == null || populationSize < 1) {
-            return false;
-        }
-        long maximumGeneratedPaths;
-        try {
-            maximumGeneratedPaths = Math.multiplyExact((long) iterations, populationSize);
-        } catch (ArithmeticException e) {
-            return false;
-        }
-        return iterations <= maxIterations
-                && (iterations == 0) == (generatedPaths == 0)
-                && (iterations == 0 || generatedPaths >= iterations)
-                && generatedPaths <= maximumGeneratedPaths;
     }
 
     private void validateRunEvidence(FuzzTaskPo task, List<FuzzFindingPo> findings) {
@@ -700,9 +499,6 @@ public class FuzzMapper {
     }
 
     private void validateRunFindingCount(FuzzTaskPo task, long actualFindingCount) {
-        if (task == null) {
-            throw new PersistedDataIntegrityException("FuzzTask", null, "task", "run is missing");
-        }
         if (actualFindingCount < 0 || actualFindingCount > 100) {
             throw new PersistedDataIntegrityException(
                     "FuzzTask", task.getId(), "findingCount", "a run cannot contain more than 100 findings");
@@ -733,8 +529,7 @@ public class FuzzMapper {
             FuzzTaskPo task, List<FuzzFindingPo> findings) {
         validateTaskLifecycle(task);
         validateRunEvidence(task, findings);
-        PersistedRunContext context = readAndValidateRunContext(
-                task, findings == null ? 0 : findings.size());
+        PersistedRunContext context = readAndValidateRunContext(task);
         Map<Long, PersistedFindingData> findingsById = new LinkedHashMap<>();
         for (FuzzFindingPo finding : findings == null ? List.<FuzzFindingPo>of() : findings) {
             PersistedFindingData findingData = readAndValidateFinding(finding);
@@ -750,7 +545,7 @@ public class FuzzMapper {
         return new PersistedRunWithFindings(context.data(), findingsById);
     }
 
-    private void validateTaskSummaryProjection(FuzzTaskSummaryProjection task) {
+    private List<String> validateTaskSummaryProjection(FuzzTaskSummaryProjection task) {
         if (task.getId() == null || task.getId() <= 0
                 || task.getUserId() == null || task.getUserId() <= 0
                 || task.getStatus() == null || task.getCreatedAt() == null
@@ -768,28 +563,24 @@ public class FuzzMapper {
             throw invalidProjectedTask(task, "task budgets are invalid");
         }
         validateProjectedLifecycle(task);
-        List<String> targetSpecIds = readTargetSpecIds(task);
+        List<String> targetSpecIds = readTargetSpecIds(task.getId(), task.getTargetSpecIdsJson());
         if (!validTargetSpecIds(targetSpecIds)) {
             throw invalidProjectedTask(task, "target specification IDs are invalid");
         }
+        return targetSpecIds;
     }
 
-    private ProjectedRunContext readAndValidateProjectedRunContext(
+    private ProjectedRunData readAndValidateProjectedRunData(
             FuzzTaskSummaryProjection task, List<FuzzFindingSummaryProjection> findings) {
-        validateTaskSummaryProjection(task);
+        List<String> targetSpecIds = validateTaskSummaryProjection(task);
         validateProjectedRunEvidence(task, findings);
         validateProjectedRequiredRunScalars(task);
-        ModelRunSnapshotDto modelSnapshot = readModelSnapshot(task);
-        List<String> targetSpecIds = readTargetSpecIds(task);
-        if (!validTargetSpecIds(targetSpecIds)) {
-            throw invalidProjectedRun(task, "targetSpecIdsJson", "target specification IDs are invalid");
-        }
-        FuzzEligibilityDto eligibility = readEligibility(task);
+        ModelRunSnapshotDto modelSnapshot = readModelSnapshot(task.getId(), task.getModelSnapshotJson());
+        FuzzEligibilityDto eligibility = readEligibility(task.getId(), task.getEligibilityJson());
         requireMetadataSize(task.getId(), task.getEligibilityJson(), task.getLimitationsJson());
         validateProjectedEligibility(task, targetSpecIds, eligibility,
                 modelSnapshot.getSpecificationCount());
-        List<String> limitations = normalizeLimitations(
-                task, readLimitations(task));
+        List<String> limitations = readLimitations(task.getId(), task.getLimitationsJson(), task.getExplorationMode());
         Set<String> eligibleIds = new HashSet<>(eligibility.getEligibleSpecIds());
         for (FuzzFindingSummaryProjection finding
                 : findings == null ? List.<FuzzFindingSummaryProjection>of() : findings) {
@@ -804,9 +595,7 @@ public class FuzzMapper {
             throw invalidProjectedRun(task, "eligibilityJson",
                     "search outcomes require an eligible specification");
         }
-        return new ProjectedRunContext(
-                new ProjectedRunData(targetSpecIds, modelSnapshot, eligibility, limitations),
-                eligibleIds);
+        return new ProjectedRunData(modelSnapshot, eligibility, limitations);
     }
 
     private void validateProjectedRunEvidence(
@@ -842,8 +631,6 @@ public class FuzzMapper {
 
     private void validateProjectedRequiredRunScalars(FuzzTaskSummaryProjection task) {
         if (task.getStatus() != FuzzTaskPo.TaskStatus.COMPLETED
-                || task.getCreatedAt() == null || task.getCompletedAt() == null
-                || task.getCompletedAt().isBefore(task.getCreatedAt())
                 || task.getOutcome() == null || task.getExplorationMode() == null
                 || task.getEffectiveSeed() == null || task.getEffectiveSeed() < 0
                 || task.getEffectiveSeed() > FuzzRequestDto.JS_SAFE_SEED_MAX
@@ -852,13 +639,7 @@ public class FuzzMapper {
                 || task.getGeneratedPaths() > FuzzRequestDto.JS_SAFE_SEED_MAX
                 || task.getElapsedMs() == null || task.getElapsedMs() < 0
                 || task.getElapsedMs() > FuzzRequestDto.JS_SAFE_SEED_MAX
-                || task.getMaxIterations() == null || task.getMaxIterations() < 1
-                || task.getMaxIterations() > 5_000
-                || task.getPathLength() == null || task.getPathLength() < 1
-                || task.getPathLength() > 50
-                || task.getPopulationSize() == null || task.getPopulationSize() < 1
-                || task.getPopulationSize() > 50
-                || !hasValidRunStatisticsRelation(
+                || !FuzzMetadataPolicy.hasValidRunStatisticsRelation(
                         task.getIterations(), task.getGeneratedPaths(),
                         task.getMaxIterations(), task.getPopulationSize())) {
             throw invalidProjectedRun(task, "statistics", "run metadata is invalid");
@@ -898,9 +679,7 @@ public class FuzzMapper {
                     || item.getSpecificationLabel().length() > MAX_ELIGIBILITY_LABEL_CHARS
                     || !isCanonicalSingleLine(
                     item.getSpecificationLabel(), item.getSpecId(), MAX_ELIGIBILITY_LABEL_CHARS)
-                    || !hasText(item.getReasonCode())
-                    || item.getReasonCode().length() > MAX_STABLE_CODE_CHARS
-                    || !STABLE_CODE.matcher(item.getReasonCode()).matches()
+                    || !FuzzMetadataPolicy.isStableCode(item.getReasonCode())
                     || !hasText(item.getReason())
                     || item.getReason().length() > MAX_ELIGIBILITY_REASON_CHARS
                     || !isCanonicalSingleLine(item.getReason(), MAX_ELIGIBILITY_REASON_CHARS)
@@ -1039,15 +818,17 @@ public class FuzzMapper {
                 "FuzzTask", task == null ? null : task.getId(), field, detail);
     }
 
-    private PersistedRunContext readAndValidateRunContext(FuzzTaskPo task, long actualFindingCount) {
-        validateRunFindingCount(task, actualFindingCount);
+    private PersistedRunContext readAndValidateRunContext(FuzzTaskPo task) {
         validateRequiredRunScalars(task);
         ModelInputSnapshot inputSnapshot = readModelInputSnapshot(task);
-        List<String> targetSpecIds = readTargetSpecIds(task);
-        ModelRunSnapshotDto modelSnapshot = readModelSnapshot(task);
-        FuzzEligibilityDto eligibility = readEligibility(task);
+        List<String> targetSpecIds = readTargetSpecIds(task.getId(), task.getTargetSpecIdsJson());
+        if (!validTargetSpecIds(targetSpecIds)) {
+            throw invalidTask(task, "targetSpecIdsJson", "target specification IDs are invalid");
+        }
+        ModelRunSnapshotDto modelSnapshot = readModelSnapshot(task.getId(), task.getModelSnapshotJson());
+        FuzzEligibilityDto eligibility = readEligibility(task.getId(), task.getEligibilityJson());
         requireMetadataSize(task.getId(), task.getEligibilityJson(), task.getLimitationsJson());
-        List<String> limitations = normalizeLimitations(task, readLimitations(task));
+        List<String> limitations = readLimitations(task.getId(), task.getLimitationsJson(), task.getExplorationMode());
         FrozenInputData frozenInput = validateModelInputSnapshot(task, inputSnapshot);
         Map<String, SpecificationDto> specificationsById = frozenInput.specificationsById();
         Set<String> expectedTargetIds = validateTargetSpecIds(
@@ -1104,9 +885,6 @@ public class FuzzMapper {
 
     private void validateRequiredRunScalars(FuzzTaskPo task) {
         if (task.getStatus() != FuzzTaskPo.TaskStatus.COMPLETED
-                || task.getCreatedAt() == null
-                || task.getCompletedAt() == null
-                || task.getCompletedAt().isBefore(task.getCreatedAt())
                 || task.getExplorationMode() == null) {
             throw invalidRun(task, "completedAt", "completed run timestamps or status are invalid");
         }
@@ -1121,13 +899,8 @@ public class FuzzMapper {
                 || task.getElapsedMs() > FuzzRequestDto.JS_SAFE_SEED_MAX) {
             throw invalidRun(task, "statistics", "run statistics are missing or invalid");
         }
-        if (task.getMaxIterations() == null || task.getMaxIterations() < 1 || task.getMaxIterations() > 5_000
-                || task.getPathLength() == null || task.getPathLength() < 1 || task.getPathLength() > 50
-                || task.getPopulationSize() == null || task.getPopulationSize() < 1
-                || task.getPopulationSize() > 50
-                || !hasValidRunStatisticsRelation(
-                        task.getIterations(), task.getGeneratedPaths(),
-                        task.getMaxIterations(), task.getPopulationSize())) {
+        if (!FuzzMetadataPolicy.hasValidRunStatisticsRelation(task.getIterations(), task.getGeneratedPaths(),
+                task.getMaxIterations(), task.getPopulationSize())) {
             throw invalidRun(task, "budgets", "run budgets or iteration count are invalid");
         }
     }
@@ -1172,37 +945,12 @@ public class FuzzMapper {
                 && (task.getSeed() < 0 || task.getSeed() > FuzzRequestDto.JS_SAFE_SEED_MAX)) {
             throw invalidTask(task, "seed", "requested seed is outside the safe range");
         }
-        validateTimeOrder(task);
+        PersistedTaskLifecycle.validateTimeOrder("FuzzTask", task.getId(), task.getCreatedAt(),
+                task.getStartedAt(), task.getCompletedAt(), task.getProcessingTimeMs());
 
         FuzzTaskPo.TaskStatus status = task.getStatus();
-        boolean terminal = status == FuzzTaskPo.TaskStatus.COMPLETED
-                || status == FuzzTaskPo.TaskStatus.FAILED
-                || status == FuzzTaskPo.TaskStatus.CANCELLED;
-        if (status == FuzzTaskPo.TaskStatus.PENDING && task.getStartedAt() != null) {
-            throw invalidTask(task, "startedAt", "pending task cannot have a start time");
-        }
-        if ((status == FuzzTaskPo.TaskStatus.RUNNING || status == FuzzTaskPo.TaskStatus.COMPLETED)
-                && task.getStartedAt() == null) {
-            throw invalidTask(task, "startedAt", "running or completed task start time is missing");
-        }
-        if (terminal) {
-            if (task.getCompletedAt() == null) {
-                throw invalidTask(task, "completedAt", "terminal task completion time is missing");
-            }
-            // Only a COMPLETED run finished its work, so only it must report 100. A cancelled or
-            // failed run keeps the progress its last heartbeat reported; requiring 100 of every
-            // terminal status made such a row unreadable — the task endpoint and the whole task list
-            // answered HTTP 500 for a run the user had simply cancelled partway.
-            if (status == FuzzTaskPo.TaskStatus.COMPLETED && task.getProgress() != 100) {
-                throw invalidTask(task, "progress", "completed task progress must be 100");
-            }
-        } else if (task.getCompletedAt() != null) {
-            throw invalidTask(task, "completedAt", "active task cannot have a completion time");
-        }
-        if (status == FuzzTaskPo.TaskStatus.FAILED
-                && (task.getErrorMessage() == null || task.getErrorMessage().isBlank())) {
-            throw invalidTask(task, "errorMessage", "failed task error message is missing");
-        }
+        PersistedTaskLifecycle.validateStatus("FuzzTask", task.getId(), status.name(),
+                task.getStartedAt(), task.getCompletedAt(), task.getProgress(), task::getErrorMessage);
         if (status == FuzzTaskPo.TaskStatus.COMPLETED) {
             if (task.getProcessingTimeMs() == null) {
                 throw invalidTask(task, "processingTimeMs", "completed task processing time is missing");
@@ -1212,22 +960,6 @@ public class FuzzMapper {
             }
         } else if (task.getOutcome() != null) {
             throw invalidTask(task, "outcome", "non-completed task cannot have a run outcome");
-        }
-    }
-
-    private void validateTimeOrder(FuzzTaskPo task) {
-        if (task.getStartedAt() != null && task.getStartedAt().isBefore(task.getCreatedAt())) {
-            throw invalidTask(task, "startedAt", "task start time precedes creation time");
-        }
-        if (task.getCompletedAt() != null
-                && (task.getCompletedAt().isBefore(task.getCreatedAt())
-                || (task.getStartedAt() != null && task.getCompletedAt().isBefore(task.getStartedAt())))) {
-            throw invalidTask(task, "completedAt", "task completion time is out of order");
-        }
-        if (task.getProcessingTimeMs() != null
-                && (task.getStartedAt() == null || task.getCompletedAt() == null)) {
-            throw invalidTask(task, "processingTimeMs",
-                    "processing time requires start and completion times");
         }
     }
 
@@ -1557,9 +1289,7 @@ public class FuzzMapper {
             SpecificationDto specification = item == null
                     ? null : specificationsById.get(item.getSpecId());
             if (item == null || !hasText(item.getSpecId())
-                    || !hasText(item.getReasonCode())
-                    || item.getReasonCode().length() > MAX_STABLE_CODE_CHARS
-                    || !STABLE_CODE.matcher(item.getReasonCode()).matches()
+                    || !FuzzMetadataPolicy.isStableCode(item.getReasonCode())
                     || !hasText(item.getReason())
                     || item.getReason().length() > MAX_ELIGIBILITY_REASON_CHARS
                     || !isCanonicalSingleLine(item.getReason(), MAX_ELIGIBILITY_REASON_CHARS)
@@ -1610,37 +1340,21 @@ public class FuzzMapper {
         };
     }
 
-    private List<String> normalizeLimitations(FuzzTaskPo task, List<String> limitations) {
-        if (limitations == null
-                || limitations.size() > FuzzMetadataPolicy.MAX_LIMITATION_CODES
-                || limitations.stream().anyMatch(code -> code == null
-                || code.length() > MAX_STABLE_CODE_CHARS || !STABLE_CODE.matcher(code).matches())
+    private List<String> readLimitations(Long taskId, String json, FuzzExplorationMode mode) {
+        requireMetadataFieldSize(taskId, "limitationsJson", json);
+        List<String> limitations = JsonUtils.readPersistedJsonRequired("FuzzTask", taskId, "limitationsJson",
+                json, () -> JsonUtils.fromJson(json, new TypeReference<List<String>>() {}));
+        if (limitations.size() > FuzzMetadataPolicy.MAX_LIMITATION_CODES
+                || limitations.stream().anyMatch(code -> !FuzzMetadataPolicy.isStableCode(code))
                 || new HashSet<>(limitations).size() != limitations.size()) {
-            throw invalidRun(task, "limitationsJson", "limitation codes are invalid");
+            throw new PersistedDataIntegrityException(
+                    "FuzzTask", taskId, "limitationsJson", "limitation codes are invalid");
         }
-        FuzzExplorationMode mode = explorationMode(task);
         if (!limitations.containsAll(FuzzLimitationContract.requiredCodes(mode))) {
-            throw invalidRun(task, "limitationsJson", "required semantic limitation codes are missing");
+            throw new PersistedDataIntegrityException(
+                    "FuzzTask", taskId, "limitationsJson", "required semantic limitation codes are missing");
         }
-        return List.copyOf(new LinkedHashSet<>(limitations));
-    }
-
-    private List<String> normalizeLimitations(
-            FuzzTaskSummaryProjection task, List<String> limitations) {
-        if (limitations == null
-                || limitations.size() > FuzzMetadataPolicy.MAX_LIMITATION_CODES
-                || limitations.stream().anyMatch(
-                 code -> code == null || code.length() > MAX_STABLE_CODE_CHARS
-                         || !STABLE_CODE.matcher(code).matches())
-                || new HashSet<>(limitations).size() != limitations.size()) {
-            throw invalidProjectedRun(task, "limitationsJson", "limitation codes are invalid");
-        }
-        FuzzExplorationMode mode = explorationMode(task);
-        if (!limitations.containsAll(FuzzLimitationContract.requiredCodes(mode))) {
-            throw invalidProjectedRun(task, "limitationsJson",
-                    "required semantic limitation codes are missing");
-        }
-        return List.copyOf(new LinkedHashSet<>(limitations));
+        return List.copyOf(limitations);
     }
 
     private boolean isCanonicalSingleLine(String value, int maxChars) {
@@ -1704,14 +1418,8 @@ public class FuzzMapper {
     }
 
     private record ProjectedRunData(
-            List<String> targetSpecIds,
             ModelRunSnapshotDto modelSnapshot,
             FuzzEligibilityDto eligibility,
             List<String> limitations) {
-    }
-
-    private record ProjectedRunContext(
-            ProjectedRunData data,
-            Set<String> eligibleIds) {
     }
 }

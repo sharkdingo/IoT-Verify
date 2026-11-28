@@ -175,7 +175,8 @@ describe('run failure language and recovery', () => {
         () => new Promise((_resolve, reject) => { stop = () => reject(new Error('poll aborted')) })
     })
     for (const name of ['showVerificationPanel', 'showSimulationPanel', 'tracksRun', 'verificationPanelTracksRun',
-      'simulationPanelTracksRun', 'retireHistoryPanelIntent', 'openRunPanel', 'setRunPanelView']) {
+      'simulationPanelTracksRun', 'retireHistoryPanelIntent', 'openRunPanel', 'setRunPanelView',
+      'formalRunState', 'showFormalRunFailure', 'finishFormalRun', 'watchFormalTask']) {
       ports[name] = bind(name, ports)
     }
     const pending = bind(kind === 'verification' ? 'watchVerificationTask' : 'watchSimulationTask', ports)(7)

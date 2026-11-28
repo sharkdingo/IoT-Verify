@@ -4,8 +4,6 @@ import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
 import cn.edu.nju.Iot_Verify.component.aitool.ModelTraceToolPresenter;
 import cn.edu.nju.Iot_Verify.dto.simulation.SimulationTraceDto;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.SimulationService;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -61,12 +59,7 @@ public class GetSimulationTraceTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
 
             requireOnlyFields(args, "arguments", Set.of(
                     "simulationId", "stateOffset", "stateLimit"));
@@ -100,18 +93,12 @@ public class GetSimulationTraceTool extends AbstractAiTool {
             message += " Simulation does not check specifications. modelSnapshot.specificationCount describes "
                     + "the simulation model, not whether the saved Board has specifications. Use formal verification for specification outcomes.";
             body.put("message", message);
-            return readOnlySuccessJson(body, message);
+            return readOnlySuccessJson(body);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
-        } catch (ServiceUnavailableException e) {
-            log.warn("get_simulation_trace busy: {}", e.getMessage());
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            log.warn("get_simulation_trace business error [{}]: {}", e.getCode(), e.getMessage());
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
         } catch (Exception e) {
-            log.error("get_simulation_trace failed", e);
-            return errorJson("Failed to get simulation trace.", "INTERNAL_ERROR", 500);
+            return readOnlyToolFailure(log, "get_simulation_trace", e,
+                    "Failed to get simulation trace.");
         }
     }
 }

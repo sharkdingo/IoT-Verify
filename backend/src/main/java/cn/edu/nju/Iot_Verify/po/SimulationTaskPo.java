@@ -24,7 +24,7 @@ import java.util.List;
 @AllArgsConstructor
 @Builder
 @EqualsAndHashCode(onlyExplicitlyIncluded = true)
-public class SimulationTaskPo implements TaskView {
+public class SimulationTaskPo implements TaskView, SimulationTaskView {
 
     public enum TaskStatus {
         PENDING, RUNNING, COMPLETED, FAILED, CANCELLED
@@ -125,18 +125,6 @@ public class SimulationTaskPo implements TaskView {
     @Column(name = "lease_expires_at")
     @JsonIgnore
     private LocalDateTime leaseExpiresAt;
-
-    @Override
-    public boolean isTerminalStatus() {
-        return status == TaskStatus.COMPLETED
-                || status == TaskStatus.FAILED
-                || status == TaskStatus.CANCELLED;
-    }
-
-    @Override
-    public boolean isCancelledStatus() {
-        return status == TaskStatus.CANCELLED;
-    }
 
     @Override
     public String getTaskStatusName() {

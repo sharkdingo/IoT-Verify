@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.fuzz.paper;
 
-import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzInputEventDto;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -9,6 +8,7 @@ import java.util.List;
 import java.util.SplittableRandom;
 import java.util.stream.IntStream;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -59,64 +59,19 @@ class PaperEventDomainTest {
     }
 
     @Test
-    void seedEventMapsLosslesslyWithKindAndProvenance() {
-        PaperEventDomainSnapshot domain = domain();
-
-        FuzzInputEventDto device = new PaperEvent(
-                PaperEvent.Type.DEVICE, "thermostat", "heat", 1)
-                .toFuzzInputEventDto(domain);
-        assertEquals(0, device.getStep());
-        assertEquals("DEVICE_STATE", device.getKind());
-        assertEquals("thermostat", device.getTargetId());
-        assertEquals("mode", device.getProperty());
-        assertEquals("heat", device.getValue());
-        assertEquals("SEED_EVENT", device.getSource());
-
-        FuzzInputEventDto environment = new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "rate:1", 3)
-                .toFuzzInputEventDto(domain);
-        assertEquals(2, environment.getStep());
-        assertEquals("ENVIRONMENT_RATE", environment.getKind());
-        assertEquals("environment", environment.getTargetId());
-        assertEquals("temperature", environment.getProperty());
-        assertEquals("rate:1", environment.getValue());
-        assertEquals("SEED_EVENT", environment.getSource());
-
-        PaperEnvironmentDomain discreteDomain = new PaperEnvironmentDomain(
-                "door", "environment", "doorState", List.of("open", "closed"), List.of());
-        PaperEventDomainSnapshot domainWithDiscrete = new PaperEventDomainSnapshot(
-                5, domain.deviceDomains(), List.of(discreteDomain));
-        FuzzInputEventDto discrete = new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "door", "open", 2)
-                .toFuzzInputEventDto(domainWithDiscrete);
-        assertEquals("ENVIRONMENT_VALUE", discrete.getKind());
-        assertEquals("SEED_EVENT", discrete.getSource());
-
-        assertThrows(IllegalArgumentException.class, () -> new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "not-legal", 2)
-                .toFuzzInputEventDto(domain));
-        assertThrows(IllegalArgumentException.class, () -> new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "18", 2)
-                .toFuzzInputEventDto(domain));
-        assertThrows(IllegalArgumentException.class, () -> new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "18", 6)
-                .toFuzzInputEventDto(domain));
-    }
-
-    @Test
     void initializationIsDeterministicAndUsesDirectEnvironmentValuesOnly() {
         PaperEventDomainSnapshot domain = domain();
 
-        List<PaperEvent> first = domain.materializeInitialState(8128L);
-        List<PaperEvent> repeated = domain.materializeInitialState(8128L);
+        List<PaperInitialValue> first = domain.materializeInitialValues(8128L);
+        List<PaperInitialValue> repeated = domain.materializeInitialValues(8128L);
 
         assertEquals(first, repeated);
         assertEquals(2, first.size());
-        PaperEvent device = eventOfType(first, PaperEvent.Type.DEVICE);
-        PaperEvent environment = eventOfType(first, PaperEvent.Type.ENVIRONMENT);
-        assertEquals(1, device.position());
+        PaperInitialValue device = first.get(0);
+        PaperInitialValue environment = first.get(1);
+        assertEquals(PaperInitialValue.Type.DEVICE_STATE, device.type());
         assertTrue(List.of("off", "heat").contains(device.value()));
-        assertEquals(1, environment.position());
+        assertEquals(PaperInitialValue.Type.ENVIRONMENT_VALUE, environment.type());
         assertTrue(List.of("18", "21").contains(environment.value()));
         assertEquals(List.of("rate:-1", "rate:1"),
                 domain.environment("temperature").eventValues());
@@ -175,18 +130,14 @@ class PaperEventDomainTest {
         assertTrue(numeric.eventValues().isEmpty());
         assertTrue(numeric.isValidInitialValue("1379"));
         assertTrue(numeric.isValidEventValue("rate:1379"));
-        assertEquals("ENVIRONMENT_RATE", new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "rate:1379", 2)
-                .toFuzzInputEventDto(domain).getKind());
+        assertTrue(numeric.hasRateDomain());
         assertTrue(numeric.isValidInitialValue(
-                domain.materializeInitialState(19L).get(0).value()));
+                domain.materializeInitialValues(19L).get(0).value()));
         String changed = numeric.differentEventValue(
                 new SplittableRandom(7L), "rate:1379");
         assertNotEquals("rate:1379", changed);
         assertTrue(numeric.isValidEventValue(changed));
-        assertThrows(IllegalArgumentException.class, () -> new PaperEvent(
-                PaperEvent.Type.ENVIRONMENT, "temperature", "1379", 2)
-                .toFuzzInputEventDto(domain));
+        assertFalse(numeric.isValidEventValue("1379"));
     }
 
     @Test
@@ -203,6 +154,13 @@ class PaperEventDomainTest {
         assertNotEquals(
                 "7",
                 multipleValues.differentEventValue(new SplittableRandom(17L), "7"));
+
+        PaperEnvironmentDomain pair = PaperEnvironmentDomain.numeric("level", "environment", "level", 7, 8, 7, 8);
+        var snapshot = new PaperEventDomainSnapshot(1, List.of(), List.of(pair));
+        var initial = snapshot.initialValueDomains().get(0);
+        assertAll(
+                () -> assertEquals("rate:8", pair.differentEventValue(new SplittableRandom(17L), "rate:7")),
+                () -> assertEquals("8", initial.differentValue(new SplittableRandom(17L), "7")));
     }
 
     @Test
@@ -240,13 +198,6 @@ class PaperEventDomainTest {
                 PaperEvent.Type.ENVIRONMENT, "temperature", "20", 1);
         assertThrows(IllegalArgumentException.class, () -> new PaperSeed(
                 0L, Collections.nCopies(PaperSeed.MAX_EVENTS + 1, repeated)));
-    }
-
-    private static PaperEvent eventOfType(List<PaperEvent> events, PaperEvent.Type type) {
-        return events.stream()
-                .filter(event -> event.type() == type)
-                .findFirst()
-                .orElseThrow();
     }
 
     private static PaperEventDomainSnapshot domain() {

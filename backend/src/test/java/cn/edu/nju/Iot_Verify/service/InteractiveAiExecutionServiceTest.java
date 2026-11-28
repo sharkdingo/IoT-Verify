@@ -20,6 +20,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Optional;
 import java.io.IOException;
 
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.awaitQueuedTask;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.occupyExecutorWorker;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.runCancellableRequest;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.singleWorkerExecutor;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.startInterruptibleRequest;
+import static cn.edu.nju.Iot_Verify.testutil.InteractiveExecutionFixtures.unavailableRedisStore;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,12 +46,8 @@ class InteractiveAiExecutionServiceTest {
 
     @BeforeEach
     void setUp() {
-        executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(1);
-        executor.setMaxPoolSize(1);
-        executor.setQueueCapacity(1);
-        executor.initialize();
-        service = new InteractiveAiExecutionService(executor);
+        executor = singleWorkerExecutor();
+        service = new InteractiveAiExecutionService(executor, unavailableRedisStore());
     }
 
     @AfterEach
@@ -87,59 +89,22 @@ class InteractiveAiExecutionServiceTest {
 
     @Test
     void cancel_interruptsTheTrackedServerTask() throws Exception {
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch interrupted = new CountDownLatch(1);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
-                service.execute(1L, "request-123", () -> {
-                    started.countDown();
-                    try {
-                        Thread.sleep(30_000);
-                    } catch (InterruptedException e) {
-                        interrupted.countDown();
-                        Thread.currentThread().interrupt();
-                    }
-                    return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // Cancellation is surfaced to the waiting HTTP request as a terminal service response.
-            }
-        });
+        var request = startInterruptibleRequest(operation -> service.execute(1L, "request-123", operation));
 
-        assertTrue(started.await(2, TimeUnit.SECONDS));
+        request.awaitStarted();
         assertTrue(service.cancel(1L, "request-123"));
-        request.get(2, TimeUnit.SECONDS);
-        assertTrue(interrupted.await(2, TimeUnit.SECONDS));
+        request.awaitResponseAndInterrupt();
     }
 
     @Test
     void accountDeletionStopsLocalWorkAndPublishesDistributedCancellation() throws Exception {
         DistributedInteractiveExecutionStore store = mock(DistributedInteractiveExecutionStore.class);
         InteractiveAiExecutionService instance = new InteractiveAiExecutionService(executor, store);
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch interrupted = new CountDownLatch(1);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
-                instance.execute(1L, "request-123", () -> {
-                    started.countDown();
-                    try {
-                        Thread.sleep(30_000);
-                    } catch (InterruptedException e) {
-                        interrupted.countDown();
-                        Thread.currentThread().interrupt();
-                    }
-                    return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // Account deletion releases the waiting HTTP request.
-            }
-        });
+        var request = startInterruptibleRequest(operation -> instance.execute(1L, "request-123", operation));
 
-        assertTrue(started.await(2, TimeUnit.SECONDS));
+        request.awaitStarted();
         instance.requestUserExecutionStop(1L);
-        request.get(2, TimeUnit.SECONDS);
-
-        assertTrue(interrupted.await(2, TimeUnit.SECONDS));
+        request.awaitResponseAndInterrupt();
         verify(store).requestUserCancellation("recommendation", 1L);
     }
 
@@ -337,8 +302,7 @@ class InteractiveAiExecutionServiceTest {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch releaseProvider = new CountDownLatch(1);
         CountDownLatch providerReturned = new CountDownLatch(1);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
+        CompletableFuture<Void> request = runCancellableRequest(() ->
                 service.execute(1L, "request-123", () -> {
                     started.countDown();
                     while (releaseProvider.getCount() > 0) {
@@ -350,11 +314,7 @@ class InteractiveAiExecutionServiceTest {
                     }
                     providerReturned.countDown();
                     return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // The waiting HTTP request is released as soon as cancellation is accepted.
-            }
-        });
+                }));
 
         try {
             assertTrue(started.await(2, TimeUnit.SECONDS));
@@ -377,32 +337,17 @@ class InteractiveAiExecutionServiceTest {
 
     @Test
     void cancel_beforeStartRemovesQueuedWorkWithoutInvokingProvider() throws Exception {
-        CountDownLatch workerStarted = new CountDownLatch(1);
-        CountDownLatch releaseWorker = new CountDownLatch(1);
-        executor.execute(() -> {
-            workerStarted.countDown();
-            try {
-                releaseWorker.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        assertTrue(workerStarted.await(2, TimeUnit.SECONDS));
+        CountDownLatch releaseWorker = occupyExecutorWorker(executor);
 
         AtomicBoolean providerCalled = new AtomicBoolean(false);
-        CompletableFuture<Void> request = CompletableFuture.runAsync(() -> {
-            try {
+        CompletableFuture<Void> request = runCancellableRequest(() ->
                 service.execute(1L, "request-123", () -> {
                     providerCalled.set(true);
                     return null;
-                });
-            } catch (ServiceUnavailableException expected) {
-                // Cancellation releases the waiting HTTP request.
-            }
-        });
+                }));
 
         try {
-            awaitQueuedTask();
+            awaitQueuedTask(executor, "recommendation");
             assertTrue(service.cancel(1L, "request-123"));
             request.get(2, TimeUnit.SECONDS);
             releaseWorker.countDown();
@@ -447,16 +392,6 @@ class InteractiveAiExecutionServiceTest {
                 .thenReturn(Optional.of(currentStatus));
 
         assertEquals(currentStatus, instance.getStatus(1L, "request-123"));
-    }
-
-    private void awaitQueuedTask() throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (executor.getThreadPoolExecutor().getQueue().isEmpty()) {
-            if (System.nanoTime() >= deadline) {
-                throw new AssertionError("Timed out waiting for queued recommendation");
-            }
-            Thread.yield();
-        }
     }
 
     private void awaitUserAdmissionRelease() throws Exception {

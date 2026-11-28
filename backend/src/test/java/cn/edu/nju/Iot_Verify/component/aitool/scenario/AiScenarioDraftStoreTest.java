@@ -17,6 +17,7 @@ import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.stream.Stream;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryScenarioDraftStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,7 +39,7 @@ class AiScenarioDraftStoreTest {
 
     @Test
     void invalidReplacementDoesNotDeleteThePreviousValidDraft() throws Exception {
-        AiScenarioDraftStore store = new AiScenarioDraftStore();
+        AiScenarioDraftStore store = inMemoryScenarioDraftStore();
         store.saveDraft(1L, "session", "Existing", objectMapper.readTree(
                 "{\"devices\":[{\"id\":\"device_1\"}],\"specs\":[]}"));
 
@@ -97,7 +98,7 @@ class AiScenarioDraftStoreTest {
 
     @Test
     void staleApprovalAndCancellationCannotConsumeAnotherDraftWithTheSameBoardImpact() throws Exception {
-        AiScenarioDraftStore store = new AiScenarioDraftStore();
+        AiScenarioDraftStore store = inMemoryScenarioDraftStore();
         BoardReplacementPreviewDto preview = BoardReplacementPreviewDto.builder().impactToken("unchanged-board").build();
         store.saveDraft(1L, "session", "X", objectMapper.readTree("{\"devices\":[{\"id\":\"X\"}]}"));
         String previous = store.beginApplication(1L, "session", preview).orElseThrow().confirmationId();
@@ -115,7 +116,7 @@ class AiScenarioDraftStoreTest {
 
     @Test
     void completeApplicationConsumesOnlyTheConfirmedPendingDraft() throws Exception {
-        AiScenarioDraftStore store = new AiScenarioDraftStore();
+        AiScenarioDraftStore store = inMemoryScenarioDraftStore();
         store.saveDraft(1L, "session", "X", objectMapper.readTree("{\"devices\":[{\"id\":\"X\"}]}"));
         String identity = store.beginApplication(1L, "session",
                 BoardReplacementPreviewDto.builder().impactToken("board").build()).orElseThrow().confirmationId();

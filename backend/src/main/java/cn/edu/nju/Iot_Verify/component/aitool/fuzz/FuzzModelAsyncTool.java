@@ -76,12 +76,7 @@ public class FuzzModelAsyncTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "targetSpecIds", "maxIterations", "pathLength", "populationSize", "seed"));
 
@@ -99,35 +94,17 @@ public class FuzzModelAsyncTool extends AbstractAiTool {
                     .build();
 
             Long taskId = fuzzService.submit(userId, request);
-            if (taskId == null || taskId <= 0) {
-                throw new IllegalStateException("Counterexample-search submission returned no usable task id");
-            }
-            try {
-                FuzzTaskDto task = fuzzService.getTask(userId, taskId);
-                if (task == null) {
-                    throw new IllegalStateException("Accepted counterexample-search task was not readable");
-                }
-
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("message", "Counterexample search accepted. Its current status is authoritative; completion is not implied, and budget exhaustion never proves a specification holds.");
-                response.put("taskAccepted", true);
-                response.put("taskId", taskId);
-                response.put("taskStatus", task.getStatus());
-                response.put("progress", task.getProgress());
-                response.put("explorationMode", task.getExplorationMode());
-                response.put("maxIterations", task.getMaxIterations());
-                response.put("pathLength", task.getPathLength());
-                response.put("populationSize", task.getPopulationSize());
-                response.put("seed", task.getSeed());
-                response.put("targetSpecIds", task.getTargetSpecIds());
-                response.put("modelSnapshot", task.getModelSnapshot());
-                return acceptedAsyncTaskJson(
-                        response, taskId, "fuzz_task_status");
-            } catch (Exception e) {
-                log.error("Counterexample-search task {} was accepted, but its status response is unavailable",
-                        taskId, e);
-                return acceptedAsyncTaskResultUnavailable(taskId, "fuzz_task_status");
-            }
+            return acceptedAsyncTaskJson(taskId, "Counterexample-search", "fuzz_task_status",
+                    "Counterexample search accepted. Its current status is authoritative; completion is not implied, and budget exhaustion never proves a specification holds.",
+                    () -> fuzzService.getTask(userId, taskId), (response, task) -> {
+                        response.put("explorationMode", task.getExplorationMode());
+                        response.put("maxIterations", task.getMaxIterations());
+                        response.put("pathLength", task.getPathLength());
+                        response.put("populationSize", task.getPopulationSize());
+                        response.put("seed", task.getSeed());
+                        response.put("targetSpecIds", task.getTargetSpecIds());
+                        response.put("modelSnapshot", task.getModelSnapshot());
+                    });
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (AsyncTaskDispatchOutcomeUnknownException e) {

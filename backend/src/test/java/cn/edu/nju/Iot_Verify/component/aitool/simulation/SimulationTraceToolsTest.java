@@ -23,6 +23,7 @@ import java.util.List;
 import java.nio.charset.StandardCharsets;
 import java.util.stream.IntStream;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,7 +46,7 @@ class SimulationTraceToolsTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        AiDestructiveActionGuard destructiveActionGuard = new AiDestructiveActionGuard(objectMapper);
+        AiDestructiveActionGuard destructiveActionGuard = inMemoryActionGuard(objectMapper);
         listTool = new ListSimulationTracesTool(simulationService, objectMapper, new ChatExecutionConfig());
         getTool = new GetSimulationTraceTool(simulationService, objectMapper);
         deleteTool = new DeleteSimulationTraceTool(
@@ -150,7 +151,7 @@ class SimulationTraceToolsTest {
                 .mapToObj(id -> SimulationTraceSummaryDto.builder().id(id).dataAvailable(true)
                         .generationIssues(List.of(ModelGenerationIssueDto.builder()
                                 .issueType("rule").itemLabel("long issue")
-                                .reason("cause ".repeat(90)).build())).build())
+                                .reason("原因".repeat(100)).build())).build())
                 .toList();
         when(simulationService.getUserSimulations(1L)).thenReturn(runs);
 

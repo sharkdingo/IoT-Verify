@@ -2213,84 +2213,6 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         return finalMessages;
     }
 
-    /**
-     * Test-only convenience entry points. No production path calls these two — the SSE flow uses
-     * the full-arity overload below.
-     *
-     * <p>There were three. The middle one took eight arguments and nothing called it: the tests reach these by
-     * reflection and look up exactly two signatures, the seven- and nine-argument forms, with no
-     * {@code getDeclaredMethods()} enumeration anywhere in this package's tests. So it was reachable by nothing,
-     * while the count in this very comment vouched for it.
-     *
-     * <p>They bind both {@code shouldStop} and {@code forceStopCheck} to {@code isDisconnect}, which
-     * the real caller does not: there, a user's Stop (a database flag readable from any instance) and
-     * a transport disconnect are separate signals leading to different terminal statuses. Tests that
-     * go through here therefore cannot distinguish STOPPED from DISCONNECTED — do not read their
-     * coverage as evidence for that distinction.
-     */
-    private ToolLoopResult executeToolLoop(Long userId,
-                                           String sessionId,
-                                           List<LlmMessage> messages,
-                                           List<LlmToolSpec> tools,
-                                           Set<StreamResponseDto.CommandDto> commandSet,
-                                           SseEmitter emitter,
-                                           AtomicBoolean isDisconnect) {
-        return executeToolLoop(
-                userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
-                false, null, null, isDisconnect::get, isDisconnect::get);
-    }
-
-
-    private ToolLoopResult executeToolLoop(Long userId,
-                                           String sessionId,
-                                           List<LlmMessage> messages,
-                                           List<LlmToolSpec> tools,
-                                           Set<StreamResponseDto.CommandDto> commandSet,
-                                           SseEmitter emitter,
-                                           AtomicBoolean isDisconnect,
-                                           boolean preferChinese,
-                                           List<StreamResponseDto.ProgressDto> executionTrace) {
-        return executeToolLoop(
-                userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
-                preferChinese, executionTrace, null, isDisconnect::get, isDisconnect::get);
-    }
-
-    private ToolLoopResult executeToolLoop(Long userId,
-                                           String sessionId,
-                                           List<LlmMessage> messages,
-                                           List<LlmToolSpec> tools,
-                                           Set<StreamResponseDto.CommandDto> commandSet,
-                                           SseEmitter emitter,
-                                           AtomicBoolean isDisconnect,
-                                           boolean preferChinese,
-                                           List<StreamResponseDto.ProgressDto> executionTrace,
-                                           String executionId,
-                                           BooleanSupplier shouldStop,
-                                           BooleanSupplier forceStopCheck) {
-        return executeToolLoop(
-                userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
-                preferChinese, executionTrace, executionId, shouldStop, forceStopCheck,
-                new LinkedHashSet<>());
-    }
-
-    private ToolLoopResult executeToolLoop(Long userId,
-                                           String sessionId,
-                                           List<LlmMessage> messages,
-                                           List<LlmToolSpec> tools,
-                                           Set<StreamResponseDto.CommandDto> commandSet,
-                                           SseEmitter emitter,
-                                           AtomicBoolean isDisconnect,
-                                           boolean preferChinese,
-                                           List<StreamResponseDto.ProgressDto> executionTrace,
-                                           String executionId,
-                                           BooleanSupplier shouldStop,
-                                           BooleanSupplier forceStopCheck,
-                                           Set<String> confirmedMutationTools) {
-        return executeToolLoop(userId, sessionId, messages, tools, commandSet, emitter, isDisconnect,
-                preferChinese, executionTrace, executionId, shouldStop, forceStopCheck,
-                confirmedMutationTools, null, null);
-    }
-
     private ToolLoopResult executeToolLoop(Long userId,
                                            String sessionId,
                                            List<LlmMessage> messages,
@@ -2863,14 +2785,6 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         return ReplyGuardOutcome.NONE;
     }
 
-    static boolean containsUnsupportedPlatformClaim(String reply) {
-        if (reply == null || reply.isBlank()) return false;
-        String checkableReply = maskLiteralContent(reply);
-        if (hasUnsupportedClaim(checkableReply, UNSUPPORTED_TOOL_EVIDENCE_CLAIM, false, false)) return true;
-        if (hasUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_READ_CLAIM, false, true)) return true;
-        return hasUnsupportedClaim(checkableReply, UNSUPPORTED_PLATFORM_MUTATION_CLAIM, true, false);
-    }
-
     private boolean containsUnsupportedPlatformClaim(
             String reply,
             List<StreamResponseDto.ProgressDto> executionTrace,
@@ -2878,7 +2792,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         return unsupportedPlatformClaim(reply, executionTrace, confirmedMutationTools) != null;
     }
 
-    private StreamResponseDto.ClaimReviewDto unsupportedPlatformClaim(
+    static StreamResponseDto.ClaimReviewDto unsupportedPlatformClaim(
             String reply,
             List<StreamResponseDto.ProgressDto> executionTrace,
             Set<String> confirmedMutationTools) {
@@ -2901,7 +2815,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         return null;
     }
 
-    private StreamResponseDto.ClaimReviewDto claimReview(
+    private static StreamResponseDto.ClaimReviewDto claimReview(
             String reply, java.util.regex.MatchResult match, StreamResponseDto.ClaimReviewReason reason) {
         // Offsets survive literal masking. Keep the exact public segment under the same ownership
         // as its chat history; do not put user content or provider reasoning in server logs.
@@ -2922,7 +2836,7 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         };
     }
 
-    private boolean hasUsableToolEvidence(
+    private static boolean hasUsableToolEvidence(
             List<StreamResponseDto.ProgressDto> executionTrace, Set<String> allowedTools) {
         return executionTrace != null && executionTrace.stream().anyMatch(progress -> progress != null
                 && "TOOL_RESULT".equals(progress.getStage())
@@ -3270,10 +3184,6 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             return false;
         }
-    }
-
-    private boolean hasArray(JsonNode root, String field) {
-        return root != null && root.has(field) && root.get(field).isArray();
     }
 
     private boolean hasValidToolResultControlFields(JsonNode root) {
@@ -3818,62 +3728,48 @@ public class ChatServiceImpl implements ChatService, ChatExecutionControl {
                 continue;
             }
 
+            int firstIndex = i;
             if (isToolMessage(current)) {
-                int assistantIndex = i;
-                while (assistantIndex >= 0 && isToolMessage(allMessages.get(assistantIndex))) {
-                    assistantIndex--;
+                while (firstIndex > 0 && isToolMessage(allMessages.get(firstIndex - 1))) {
+                    firstIndex--;
                 }
-                int firstToolIndex = assistantIndex + 1;
-                if (assistantIndex >= 0 && isAssistantToolCallMessage(allMessages.get(assistantIndex))) {
-                    if (!isCompleteToolCallBlock(allMessages, assistantIndex, i)) {
-                        log.warn("Dropping incomplete persisted tool-call block from chat history: "
-                                + "sessionId={}, assistantMessageId={}",
-                                sessionId, allMessages.get(assistantIndex).getId());
-                        i = assistantIndex;
-                        continue;
-                    }
-                    int blockLength = 0;
-                    for (int j = assistantIndex; j <= i; j++) {
-                        blockLength += messageLength(allMessages.get(j));
-                    }
-                    if (currentLength + blockLength > limitCharCount) {
-                        // Always keep the newest coherent tool-call block,
-                        // otherwise the next completion may miss required tool context.
-                        if (safeHistory.isEmpty()) {
-                            for (int j = i; j >= assistantIndex; j--) {
-                                safeHistory.addFirst(allMessages.get(j));
-                            }
-                        }
-                        break;
-                    }
-                    for (int j = i; j >= assistantIndex; j--) {
-                        safeHistory.addFirst(allMessages.get(j));
-                    }
-                    currentLength += blockLength;
+                int assistantIndex = firstIndex - 1;
+                if (assistantIndex < 0 || !isAssistantToolCallMessage(allMessages.get(assistantIndex))) {
+                    // The corresponding assistant tool call is outside the window.
+                    i = firstIndex;
+                    continue;
+                }
+                if (!isCompleteToolCallBlock(allMessages, assistantIndex, i)) {
+                    log.warn("Dropping incomplete persisted tool-call block from chat history: "
+                            + "sessionId={}, assistantMessageId={}",
+                            sessionId, allMessages.get(assistantIndex).getId());
                     i = assistantIndex;
                     continue;
                 }
-                // Skip isolated tool blocks when corresponding assistant tool_call message is out of window.
-                i = firstToolIndex;
-                continue;
-            }
-
-            if (isAssistantToolCallMessage(current)) {
+                firstIndex = assistantIndex;
+            } else if (isAssistantToolCallMessage(current)) {
                 log.warn("Dropping persisted assistant tool-call message without adjacent results: "
                         + "sessionId={}, assistantMessageId={}", sessionId, current.getId());
                 continue;
             }
 
-            int msgLen = messageLength(current);
-            if (currentLength + msgLen > limitCharCount) {
-                // Ensure the latest user/assistant message is never dropped from context.
-                if (safeHistory.isEmpty()) {
-                    safeHistory.addFirst(current);
-                }
+            int blockLength = 0;
+            for (int j = firstIndex; j <= i; j++) {
+                blockLength += messageLength(allMessages.get(j));
+            }
+            boolean overBudget = currentLength + blockLength > limitCharCount;
+            // Always retain the newest message or complete tool-call block, even when it alone exceeds the budget.
+            if (overBudget && !safeHistory.isEmpty()) {
                 break;
             }
-            safeHistory.addFirst(current);
-            currentLength += msgLen;
+            for (int j = i; j >= firstIndex; j--) {
+                safeHistory.addFirst(allMessages.get(j));
+            }
+            if (overBudget) {
+                break;
+            }
+            currentLength += blockLength;
+            i = firstIndex;
         }
 
         return new ArrayList<>(safeHistory);

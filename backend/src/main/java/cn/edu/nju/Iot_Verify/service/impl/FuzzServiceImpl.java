@@ -95,16 +95,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.FutureTask;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -122,7 +115,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     // on a correctly-estimated search and only catches the cases the static estimate got wrong.
     private static final Duration MAX_SEARCH_WALL_CLOCK = Duration.ofMinutes(5);
     private static final Duration TASK_LEASE_DURATION = Duration.ofMinutes(2);
-    private static final long LEASE_MAINTENANCE_SECONDS = 10L;
     // Calibrated against measured throughput rather than chosen. Forced BUDGET_EXHAUSTED runs over the
     // docs/examples scenes (BOARD_SNAPSHOT, one dev box, single-threaded) cost ~119-137 us per state step on
     // the cheapest scene and ~159-168 us on the most expensive. Admissible steps are LIMIT / complexity, and
@@ -140,7 +132,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     static final int MAX_ELIGIBILITY_LABEL_CHARS = FuzzMetadataPolicy.MAX_ELIGIBILITY_LABEL_CHARS;
     static final int MAX_ELIGIBILITY_REASON_CHARS = FuzzMetadataPolicy.MAX_ELIGIBILITY_REASON_CHARS;
     private static final int MAX_STABLE_CODE_CHARS = FuzzMetadataPolicy.MAX_STABLE_CODE_CHARS;
-    private static final Pattern STABLE_CODE = Pattern.compile("^[A-Z][A-Z0-9_]*$");
     private static final Pattern MODEL_FINGERPRINT = Pattern.compile("^[0-9a-f]{64}$");
     private static final List<FuzzTaskPo.TaskStatus> ACTIVE_STATUSES = List.of(
             FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING);
@@ -160,14 +151,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     private final Semaphore globalTaskCapacity;
     private final ModelFingerprint modelFingerprint;
     private final String workerId = UUID.randomUUID().toString();
-    private final ScheduledExecutorService leaseMaintenanceExecutor =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable, "fuzz-task-lease-maintenance");
-                thread.setDaemon(true);
-                return thread;
-            });
-    private final ConcurrentHashMap<Long, LocalFuzzExecution> localExecutions =
-            new ConcurrentHashMap<>();
+    private final TaskLeaseMaintenance leaseMaintenance = new TaskLeaseMaintenance("fuzz-task-lease-maintenance");
 
     public FuzzServiceImpl(FuzzTaskRepository taskRepository,
                            FuzzFindingRepository findingRepository,
@@ -208,79 +192,30 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
 
     @PostConstruct
     void initializeTaskLeaseMaintenance() {
-        maintainTaskLeases();
-        leaseMaintenanceExecutor.scheduleWithFixedDelay(
-                this::maintainTaskLeases,
-                LEASE_MAINTENANCE_SECONDS,
-                LEASE_MAINTENANCE_SECONDS,
-                TimeUnit.SECONDS);
+        leaseMaintenance.start(this::maintainTaskLeases);
     }
 
     @PreDestroy
     void stopTaskLeaseMaintenance() {
-        leaseMaintenanceExecutor.shutdownNow();
+        leaseMaintenance.stop();
     }
 
     void maintainTaskLeases() {
-        List<LocalFuzzExecution> executions = List.copyOf(localExecutions.values());
-        try {
-            databaseNow();
-        } catch (RuntimeException e) {
-            stopFuzzExecutionsWithExpiredConfirmation(executions);
-            log.warn("Could not read database time while maintaining counterexample-search task leases", e);
-            return;
-        }
-        for (LocalFuzzExecution execution : executions) {
-            try {
-                TaskLeaseRenewal.RenewalResult renewal = TaskLeaseRenewal.renewWithConfirmation(
-                        transactionTemplate,
-                        () -> taskRepository.findByIdForUpdate(execution.taskId),
-                        this::databaseNow,
-                        taskRepository::saveAndFlush,
-                        workerId,
-                        TASK_LEASE_DURATION);
-                if (!renewal.renewed()) {
-                    execution.requestStop();
-                } else {
-                    execution.leaseConfirmation.confirmAt(renewal.confirmationStartedNanos());
-                }
-            } catch (RuntimeException e) {
-                if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                    execution.requestStop();
-                    log.warn("Stopped local counterexample-search task {} after its lease could not be confirmed for a full TTL",
-                            execution.taskId);
-                } else {
-                    log.warn("Could not renew counterexample-search task lease {}; the next cycle will retry",
-                            execution.taskId, e);
-                }
-            }
-        }
-        try {
-            LocalDateTime recoveryTime = databaseNow();
-            String checkLogs = serializeCheckLogs(List.of("Counterexample search task lease expired before completion"));
-            int recovered = TaskLeaseRenewal.failExpiredTasks(
-                    transactionTemplate,
-                    taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
-                    taskRepository::findByIdForUpdate,
-                    taskId -> taskRepository.failExpiredTask(taskId, FuzzTaskPo.TaskStatus.FAILED,
-                            recoveryTime, "The counterexample search stopped before the task completed",
-                            checkLogs, ACTIVE_STATUSES, recoveryTime));
-            if (recovered > 0) {
-                log.warn("Recovered {} expired fuzz task lease(s)", recovered);
-            }
-        } catch (RuntimeException e) {
-            log.warn("Could not recover expired counterexample-search task leases; the next cycle will retry", e);
-        }
-    }
-
-    private void stopFuzzExecutionsWithExpiredConfirmation(List<LocalFuzzExecution> executions) {
-        for (LocalFuzzExecution execution : executions) {
-            if (execution.leaseConfirmation.isUnconfirmedFor(TASK_LEASE_DURATION)) {
-                execution.requestStop();
-                log.warn("Stopped local counterexample-search task {} after the database could not confirm its lease for a full TTL",
-                        execution.taskId);
-            }
-        }
+        TaskLeaseMaintenance.sweep(localLeases(),
+                TASK_LEASE_DURATION, this::databaseNow,
+                taskId -> TaskLeaseRenewal.renewWithConfirmation(
+                        transactionTemplate, () -> taskRepository.findByIdForUpdate(taskId),
+                        this::databaseNow, taskRepository::saveAndFlush, workerId, TASK_LEASE_DURATION),
+                recoveryTime -> {
+                    String checkLogs = serializeCheckLogs(List.of("Counterexample search task lease expired before completion"));
+                    return TaskLeaseRenewal.failExpiredTasks(
+                            transactionTemplate,
+                            taskRepository.findExpiredActiveTaskIds(ACTIVE_STATUSES, recoveryTime),
+                            taskRepository::findByIdForUpdate,
+                            taskId -> taskRepository.failExpiredTask(taskId, FuzzTaskPo.TaskStatus.FAILED,
+                                    recoveryTime, "The counterexample search stopped before the task completed",
+                                    checkLogs, ACTIVE_STATUSES, recoveryTime));
+                }, log, "counterexample-search");
     }
 
     @Override
@@ -341,7 +276,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     public Long submit(Long userId, FuzzRequestDto request) {
         NormalizedRequest normalized = validateAndNormalize(request);
         SubmissionCapacityPermit capacityPermit = acquireSubmissionCapacity();
-        LocalFuzzExecution localExecution = null;
+        LocalTaskExecution localExecution = null;
         Long taskId = null;
         boolean executorAccepted = false;
         try {
@@ -358,12 +293,15 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                     snapshot.environmentVariables().size(),
                     snapshot.templateManifests().size());
             modelSnapshot.setModelFingerprint(modelFingerprint(snapshot));
-            taskId = createTask(userId, normalized, snapshot, modelSnapshot);
-            localExecution = new LocalFuzzExecution(taskId, userId, capacityPermit);
-            LocalFuzzExecution existing = localExecutions.putIfAbsent(taskId, localExecution);
-            if (existing != null) {
-                throw new IllegalStateException("Duplicate local fuzz task execution " + taskId);
-            }
+            Long createdTaskId = createTask(userId, normalized, snapshot, modelSnapshot);
+            taskId = createdTaskId;
+            localExecution = new LocalTaskExecution(createdTaskId, () -> runTask(userId, createdTaskId),
+                    () -> LocalTaskExecution.purgeCancelledTasks(fuzzTaskExecutor, log, "fuzz"),
+                    completed -> {
+                        capacityPermit.release();
+                        retireLocalExecution(createdTaskId, completed);
+                    });
+            registerLocalExecution(taskId, localExecution, "fuzz");
             if (taskRepository.findStatusById(taskId)
                     .filter(status -> status == FuzzTaskPo.TaskStatus.PENDING)
                     .isEmpty()
@@ -372,7 +310,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                 return taskId;
             }
             try {
-                fuzzTaskExecutor.execute(localExecution.futureTask);
+                fuzzTaskExecutor.execute(localExecution.futureTask());
                 executorAccepted = true;
                 localExecution.purgeIfCancelledAfterDispatch();
             } catch (TaskRejectedException e) {
@@ -459,31 +397,11 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                 "Database current timestamp must not be null");
     }
 
-    private void purgeCancelledFuzzTasks() {
-        try {
-            ThreadPoolExecutor executor = fuzzTaskExecutor.getThreadPoolExecutor();
-            if (executor != null) executor.purge();
-        } catch (RuntimeException e) {
-            log.warn("Could not purge cancelled fuzz tasks from the local executor queue", e);
-        }
-    }
-
     private boolean cleanupUndispatchedTask(Long userId, Long taskId, RuntimeException failure) {
-        try {
-            int deleted = taskRepository.deleteUndispatchedTask(
-                    taskId, userId, workerId, FuzzTaskPo.TaskStatus.PENDING);
-            if (deleted == 1) return true;
-            boolean absent = taskRepository.findByIdAndUserId(taskId, userId).isEmpty();
-            if (!absent) {
-                log.error("Could not remove fuzz task {} after failure before dispatch", taskId);
-            }
-            return absent;
-        } catch (RuntimeException cleanupError) {
-            failure.addSuppressed(cleanupError);
-            log.error("Could not remove fuzz task {} after failure before dispatch",
-                    taskId, cleanupError);
-            return false;
-        }
+        return removeUndispatchedTask(taskId, "fuzz", log, failure,
+                () -> taskRepository.deleteUndispatchedTask(
+                        taskId, userId, workerId, FuzzTaskPo.TaskStatus.PENDING),
+                () -> taskRepository.findByIdAndUserId(taskId, userId).isEmpty());
     }
 
     private void runTask(Long userId, Long taskId) {
@@ -513,9 +431,9 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                 log.warn("Fuzz task {} lease expired before its start was committed", taskId);
                 return;
             }
-            LocalFuzzExecution localExecution = localExecutions.get(taskId);
+            LocalTaskExecution localExecution = findLocalExecution(taskId);
             if (localExecution != null) {
-                localExecution.leaseConfirmation.confirmAt(start.confirmationStartedNanos());
+                localExecution.confirmLeaseAt(start.confirmationStartedNanos());
             }
             task = taskRepository.findById(taskId).orElse(null);
             if (task == null) {
@@ -531,6 +449,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                     request.populationSize(), request.seed(), request.explorationMode()));
 
             updateTaskProgress(taskId, 1, TaskProgressStage.PREPARING_EXPLORATION);
+            if (isExecutionStopped(taskId)) return;
             BooleanSupplier cancelled = cancellationSignal(taskId);
             FuzzEngineResult result = fuzzEngine.run(
                     engineInput,
@@ -830,17 +749,8 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         if (result.iterations() < 0 || result.generatedPaths() < 0 || result.elapsedMs() < 0) {
             throw new IllegalStateException("Fuzz engine returned negative execution statistics");
         }
-        long maximumGeneratedPaths;
-        try {
-            maximumGeneratedPaths = Math.multiplyExact(
-                    (long) result.iterations(), populationSize);
-        } catch (ArithmeticException e) {
-            throw new IllegalStateException("Fuzz engine returned overflowing execution statistics", e);
-        }
-        if (result.iterations() > maxIterations
-                || (result.iterations() == 0) != (result.generatedPaths() == 0)
-                || (result.iterations() > 0 && result.generatedPaths() < result.iterations())
-                || result.generatedPaths() > maximumGeneratedPaths) {
+        if (!FuzzMetadataPolicy.hasValidRunStatisticsRelation(
+                result.iterations(), result.generatedPaths(), maxIterations, populationSize)) {
             throw new IllegalStateException("Fuzz engine returned inconsistent execution statistics");
         }
         if (result.outcome() == FuzzEngineOutcome.FINDINGS_FOUND && result.findings().isEmpty()) {
@@ -884,9 +794,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                 throw new IllegalStateException("Fuzz engine returned duplicate specification eligibility");
             }
             if (!eligibility.supported()
-                    && (eligibility.reasonCode() == null || eligibility.reasonCode().isBlank()
-                    || eligibility.reasonCode().length() > MAX_STABLE_CODE_CHARS
-                    || !STABLE_CODE.matcher(eligibility.reasonCode()).matches()
+                    && (!FuzzMetadataPolicy.isStableCode(eligibility.reasonCode())
                     || eligibility.reason() == null || eligibility.reason().isBlank())) {
                 throw new IllegalStateException("Fuzz engine returned incomplete ineligibility details");
             }
@@ -923,26 +831,14 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
             if (event.source() == FuzzInputEventSource.RANDOM_INITIAL_STATE && event.step() != 0) {
                 throw new IllegalStateException("Fuzz engine returned a random initial-state event after step 0");
             }
-            int sourceOrder = inputEventSourceOrder(event.source());
+            int sourceOrder = event.source().causalOrder();
             if (event.step() < previousStep
                     || (event.step() == previousStep && sourceOrder < previousSourceOrder)) {
                 throw new IllegalStateException("Fuzz engine returned input events out of causal order");
             }
-            if (event.step() != previousStep) {
-                previousSourceOrder = sourceOrder;
-            } else {
-                previousSourceOrder = Math.max(previousSourceOrder, sourceOrder);
-            }
+            previousSourceOrder = sourceOrder;
             previousStep = event.step();
         }
-    }
-
-    private int inputEventSourceOrder(FuzzInputEventSource source) {
-        return switch (source) {
-            case RANDOM_INITIAL_STATE -> 0;
-            case SEED_EVENT -> 1;
-            case MODEL_CHOICE -> 2;
-        };
     }
 
     List<String> normalizeLimitations(
@@ -956,8 +852,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
         List<String> normalized = new ArrayList<>(limitations.size());
         Set<String> seen = new LinkedHashSet<>();
         for (String code : limitations) {
-            if (code == null || code.length() > MAX_STABLE_CODE_CHARS
-                    || !STABLE_CODE.matcher(code).matches()) {
+            if (!FuzzMetadataPolicy.isStableCode(code)) {
                 throw new IllegalStateException("Fuzz engine returned an invalid limitation code");
             }
             if (!seen.add(code)) {
@@ -1464,9 +1359,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<FuzzRunSummaryDto> getRuns(Long userId, int page, int size) {
         Pageable pageable = pageRequest(page, size, 100);
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        RunHistoryRows rows = readTransaction.execute(status -> {
+        RunHistoryRows rows = captureHistoryRows(transactionTemplate, () -> {
             List<FuzzTaskSummaryProjection> runs =
                     taskRepository.findSummaryByUserIdAndStatusOrderByCreatedAtDescIdDesc(
                             userId, FuzzTaskPo.TaskStatus.COMPLETED, pageable);
@@ -1520,9 +1413,7 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     @Override
     @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public FuzzRunDto getRun(Long userId, Long runId) {
-        var readTransaction = new TransactionTemplate(transactionTemplate.getTransactionManager());
-        readTransaction.setReadOnly(true);
-        RunDetailRows rows = readTransaction.execute(status ->
+        RunDetailRows rows = captureHistoryRows(transactionTemplate, () ->
                 new RunDetailRows(requireOwnedRun(userId, runId), loadOrderedFindings(userId, runId)));
         return fuzzMapper.toRunDto(rows.run(), rows.findings());
     }
@@ -1591,35 +1482,37 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public List<FuzzFindingDto> getFindings(Long userId, Long runId) {
-        FuzzTaskPo run = requireOwnedRun(userId, runId);
-        return fuzzMapper.toRunDto(run, loadOrderedFindings(userId, runId)).getFindings();
+        return getRun(userId, runId).getFindings();
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public FuzzFindingDto getFinding(Long userId, Long findingId) {
-        FuzzFindingPo finding = findingRepository.findByIdAndUserId(findingId, userId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Counterexample search finding", findingId));
-        FuzzTaskPo run = requireOwnedRun(userId, finding.getFuzzTaskId());
-        long actualFindingCount = findingRepository.countByUserIdAndFuzzTaskId(
-                userId, finding.getFuzzTaskId());
-        return fuzzMapper.toFindingDto(run, finding, actualFindingCount);
+        FindingDetailRows rows = captureFindingDetails(userId, findingId);
+        return fuzzMapper.toFindingDto(rows.run(), rows.finding(), rows.findingCount());
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional(readOnly = true, propagation = Propagation.SUPPORTS)
     public FuzzFindingReplayDto getFindingReplay(Long userId, Long findingId) {
-        FuzzFindingPo finding = findingRepository.findByIdAndUserId(findingId, userId)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Counterexample search finding", findingId));
-        FuzzTaskPo run = requireOwnedRun(userId, finding.getFuzzTaskId());
-        long actualFindingCount = findingRepository.countByUserIdAndFuzzTaskId(
-                userId, finding.getFuzzTaskId());
-        return fuzzMapper.toFindingReplayDto(run, finding, actualFindingCount);
+        FindingDetailRows rows = captureFindingDetails(userId, findingId);
+        return fuzzMapper.toFindingReplayDto(rows.run(), rows.finding(), rows.findingCount());
     }
+
+    private FindingDetailRows captureFindingDetails(Long userId, Long findingId) {
+        return captureHistoryRows(transactionTemplate, () -> {
+            FuzzFindingPo finding = findingRepository.findByIdAndUserId(findingId, userId)
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Counterexample search finding", findingId));
+            Long runId = finding.getFuzzTaskId();
+            return new FindingDetailRows(requireOwnedRun(userId, runId), finding,
+                    findingRepository.countByUserIdAndFuzzTaskId(userId, runId));
+        });
+    }
+
+    private record FindingDetailRows(FuzzTaskPo run, FuzzFindingPo finding, long findingCount) {}
 
     private FuzzTaskPo requireOwnedTask(Long userId, Long taskId) {
         return taskRepository.findByIdAndUserId(taskId, userId)
@@ -1768,11 +1661,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
     }
 
     @Override
-    protected Optional<FuzzTaskPo> findTaskByIdAndUserId(Long id, Long userId) {
-        return taskRepository.findByIdAndUserId(id, userId);
-    }
-
-    @Override
     protected Optional<FuzzTaskPo> findTaskByIdAndUserIdForUpdate(Long id, Long userId) {
         return taskRepository.findByIdAndUserIdForUpdate(id, userId);
     }
@@ -1798,20 +1686,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                         taskId, progress, stage, workerId, currentTime)).updated();
     }
 
-    @Override
-    protected LocalExecutionStopResult stopLocalExecution(Long taskId) {
-        LocalFuzzExecution execution = localExecutions.get(taskId);
-        return execution == null
-                ? LocalExecutionStopResult.NONE
-                : execution.requestStop();
-    }
-
-    @Override
-    protected boolean isLocalStopRequested(Long taskId) {
-        LocalFuzzExecution execution = localExecutions.get(taskId);
-        return execution != null && execution.futureTask.isCancelled();
-    }
-
     private record NormalizedRequest(List<String> targetSpecIds,
                                      int maxIterations,
                                      int pathLength,
@@ -1819,80 +1693,6 @@ public class FuzzServiceImpl extends AbstractAsyncTaskService<FuzzTaskPo> implem
                                      Long seed,
                                      FuzzExplorationMode explorationMode,
                                      String paperDomainFingerprint) {
-    }
-
-    private enum LocalExecutionState {
-        QUEUED,
-        RUNNING,
-        CANCELLED_BEFORE_START,
-        FINISHED
-    }
-
-    private final class LocalFuzzExecution implements Runnable {
-        private final Long taskId;
-        private final Long userId;
-        private final SubmissionCapacityPermit capacityPermit;
-        private final AtomicReference<LocalExecutionState> state =
-                new AtomicReference<>(LocalExecutionState.QUEUED);
-        private final LeaseConfirmation leaseConfirmation = new LeaseConfirmation();
-        private final FutureTask<Void> futureTask;
-
-        private LocalFuzzExecution(Long taskId,
-                                   Long userId,
-                                   SubmissionCapacityPermit capacityPermit) {
-            this.taskId = taskId;
-            this.userId = userId;
-            this.capacityPermit = capacityPermit;
-            this.futureTask = new FutureTask<>(this, null);
-        }
-
-        @Override
-        public void run() {
-            if (!state.compareAndSet(LocalExecutionState.QUEUED, LocalExecutionState.RUNNING)) {
-                return;
-            }
-            try {
-                runTask(userId, taskId);
-            } finally {
-                state.set(LocalExecutionState.FINISHED);
-                releaseAndForget();
-            }
-        }
-
-        private boolean isQueued() {
-            return state.get() == LocalExecutionState.QUEUED;
-        }
-
-        private LocalExecutionStopResult requestStop() {
-            while (true) {
-                LocalExecutionState current = state.get();
-                if (current == LocalExecutionState.QUEUED) {
-                    if (!state.compareAndSet(
-                            LocalExecutionState.QUEUED,
-                            LocalExecutionState.CANCELLED_BEFORE_START)) {
-                        continue;
-                    }
-                    futureTask.cancel(false);
-                    purgeCancelledFuzzTasks();
-                    releaseAndForget();
-                    return LocalExecutionStopResult.STOPPED_BEFORE_START;
-                }
-                if (current == LocalExecutionState.RUNNING) {
-                    futureTask.cancel(true);
-                    return LocalExecutionStopResult.STOP_REQUESTED;
-                }
-                return LocalExecutionStopResult.NONE;
-            }
-        }
-
-        private void purgeIfCancelledAfterDispatch() {
-            if (futureTask.isCancelled()) purgeCancelledFuzzTasks();
-        }
-
-        private void releaseAndForget() {
-            capacityPermit.release();
-            localExecutions.remove(taskId, this);
-        }
     }
 
     private static final class SubmissionCapacityPermit {

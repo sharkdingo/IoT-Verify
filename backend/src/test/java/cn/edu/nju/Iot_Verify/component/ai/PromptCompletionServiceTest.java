@@ -19,6 +19,8 @@ import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -36,7 +38,7 @@ class PromptCompletionServiceTest {
     void classification_keepsTheSmallOutputBudgetWithoutConsumingItOnReasoning() {
         when(llmConfig.getModel()).thenReturn("gpt-6-luna");
         when(llmProvider.chat(requestCaptor.capture(), any(LlmRequestControl.class)))
-                .thenReturn(LlmChatResponse.ofText("{\"allowed\":true}"));
+                .thenReturn(new LlmChatResponse("{\"allowed\":true}", List.of()));
         var service = new PromptCompletionService(llmProvider, llmConfig);
 
         assertEquals("{\"allowed\":true}", service.completeClassification("s", "u", 0.0, 160));
@@ -49,7 +51,7 @@ class PromptCompletionServiceTest {
     void classification_doesNotAddUnsupportedReasoningParametersToOtherModels() {
         when(llmConfig.getModel()).thenReturn("custom-chat-model");
         when(llmProvider.chat(requestCaptor.capture(), any(LlmRequestControl.class)))
-                .thenReturn(LlmChatResponse.ofText("{}"));
+                .thenReturn(new LlmChatResponse("{}", List.of()));
 
         new PromptCompletionService(llmProvider, llmConfig).completeClassification("s", "u", 0.0, 160);
         assertNull(requestCaptor.getValue().reasoningEffort());
@@ -64,7 +66,7 @@ class PromptCompletionServiceTest {
                     invocation.<LlmRequestControl>getArgument(1).requestAlternativeTransport();
                     throw new LlmStreamInterruptedException(new java.io.IOException("stream reset"));
                 })
-                .thenReturn(LlmChatResponse.ofText("{\"decision\":\"" + decision + "\"}"));
+                .thenReturn(new LlmChatResponse("{\"decision\":\"" + decision + "\"}", List.of()));
         var detector = new ChatConfirmationDetector(
                 new PromptCompletionService(llmProvider, llmConfig), new ObjectMapper());
 
@@ -104,7 +106,7 @@ class PromptCompletionServiceTest {
     @ValueSource(strings = {"", "not JSON", "{\"decision\":\"ALLOWED\",\"extra\":true}"})
     void classification_doesNotRetryMalformedCompletedDecisions(String response) {
         when(llmProvider.chat(any(LlmChatRequest.class), any(LlmRequestControl.class)))
-                .thenReturn(LlmChatResponse.ofText(response));
+                .thenReturn(new LlmChatResponse(response, List.of()));
         var detector = new ChatConfirmationDetector(
                 new PromptCompletionService(llmProvider, llmConfig), new ObjectMapper());
 
@@ -175,7 +177,7 @@ class PromptCompletionServiceTest {
     void complete_buildsSystemUserRequestWithParams_andReturnsText() {
         PromptCompletionService service = new PromptCompletionService(llmProvider, llmConfig);
         when(llmProvider.chat(requestCaptor.capture(), any(LlmRequestControl.class)))
-                .thenReturn(LlmChatResponse.ofText("{\"recommendations\":[]}"));
+                .thenReturn(new LlmChatResponse("{\"recommendations\":[]}", List.of()));
 
         String result = service.complete("SYS", "USER", 0.7, 4000);
 

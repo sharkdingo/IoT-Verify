@@ -2,21 +2,16 @@ package cn.edu.nju.Iot_Verify.component.aitool.spec;
 
 import cn.edu.nju.Iot_Verify.component.ai.model.LlmToolSpec;
 import cn.edu.nju.Iot_Verify.component.aitool.AbstractAiTool;
+import cn.edu.nju.Iot_Verify.component.aitool.RecommendationToolSupport;
 import cn.edu.nju.Iot_Verify.dto.recommendation.RecommendationLimits;
-import cn.edu.nju.Iot_Verify.exception.BaseException;
-import cn.edu.nju.Iot_Verify.exception.ServiceUnavailableException;
 import cn.edu.nju.Iot_Verify.service.recommendation.SpecificationRecommendationService;
-import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationFailure;
 import cn.edu.nju.Iot_Verify.util.FunctionParameterSchema;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
 
 /** JSON transport adapter for the shared recommendation application service. */
-@Slf4j
 @Component
 public class RecommendSpecificationsTool extends AbstractAiTool {
     private final SpecificationRecommendationService recommendationService;
@@ -64,28 +59,8 @@ public class RecommendSpecificationsTool extends AbstractAiTool {
 
     @Override
     protected String doExecute(Long userId, String argsJson) {
-        try {
-            JsonNode args = parseArgs(argsJson);
-            requireOnlyFields(args, "$", Set.of("maxRecommendations", "language", "userRequirement"));
-            int maxRecommendations = intArgInRange(args, "maxRecommendations", 5, 1, 10);
-            String language = languageArg(args, "language");
-            String userRequirement = optionalTextArg(
-                    args, "userRequirement", "", RecommendationLimits.MAX_USER_REQUIREMENT_LENGTH);
-            return objectMapper.writeValueAsString(recommendationService.recommend(
-                    userId, maxRecommendations, language, userRequirement));
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
-        } catch (ArgValidationException e) {
-            return e.getErrorResponse();
-        } catch (RecommendationFailure e) {
-            return errorJson(e.getMessage(), e.getErrorCode(), e.getCode(), e.getDetails());
-        } catch (ServiceUnavailableException e) {
-            return errorJson(e.getMessage(), "SERVICE_UNAVAILABLE", 503);
-        } catch (BaseException e) {
-            return errorJson(e.getMessage(), "BUSINESS_ERROR", e.getCode());
-        } catch (Exception e) {
-            log.error("RecommendSpecificationsTool failed", e);
-            return errorJson("Failed to generate specification recommendations.", "INTERNAL_ERROR", 500);
-        }
+        return RecommendationToolSupport.execute(this, userId, argsJson,
+                args -> requireOnlyFields(args, "$", Set.of("maxRecommendations", "language", "userRequirement")),
+                recommendationService::recommend, RecommendSpecificationsTool.class, "specification");
     }
 }

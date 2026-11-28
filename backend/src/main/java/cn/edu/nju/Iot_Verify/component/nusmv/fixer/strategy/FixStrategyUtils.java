@@ -595,10 +595,6 @@ public final class FixStrategyUtils {
         return result;
     }
 
-    static boolean hasEnvironmentPool(FixContext ctx) {
-        return ctx != null && ctx.getEnvironmentVariables() != null && !ctx.getEnvironmentVariables().isEmpty();
-    }
-
     static SmvGenerator.TempModelContext tempContext(FixContext ctx) {
         return SmvGenerator.TempModelContext.fixTrace(ctx != null ? ctx.getTraceId() : null);
     }
@@ -1287,10 +1283,7 @@ public final class FixStrategyUtils {
             return List.of();
         }
         if ("in".equals(normalizedRel) || "not in".equals(normalizedRel)) {
-            return Arrays.stream(rawValue.split("[,;|]"))
-                    .map(String::trim)
-                    .filter(v -> !v.isEmpty())
-                    .toList();
+            return SmvRelationUtils.splitRuleValues(rawValue);
         }
         String trimmed = rawValue.trim();
         return trimmed.isEmpty() ? List.of() : List.of(trimmed);

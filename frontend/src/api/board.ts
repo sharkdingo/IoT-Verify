@@ -1,5 +1,6 @@
 // src/api/board.ts - Board API（自动解包Result<T>）
 import api from './http';
+import { unpack } from './resultEnvelope';
 import type { BoardModelFingerprints } from '@/types/modelSemantics';
 import { isModelFingerprint } from '@/utils/modelComparison';
 import { PRIVACY_VALUE_SET, TRUST_VALUE_SET } from '@/utils/deviceRuntime';
@@ -13,7 +14,7 @@ import type {
     SpecificationRecommendation
 } from '@/types/recommendation'
 import type { DeviceNode } from '../types/node'
-import type { Specification } from '../types/spec'
+import type { SpecCondition, Specification } from '../types/spec'
 import { isBoardEditHistoryRevision, type BoardUndoAvailability, type BoardUndoResult } from '../types/boardEdit'
 import {
     BOARD_EDIT_ENTITY_TYPES,
@@ -79,6 +80,7 @@ import {
     type OwnedRecommendationPostOptions
 } from '@/utils/recommendationRequestRecovery'
 import {
+    validateHistoryDeletionReceipt,
     validateTaskCancellationResult,
     validateInteractiveOperationStatus,
     validateVerificationTask,
@@ -188,11 +190,6 @@ export interface ScenarioSemanticWarning {
 const SERVER_BOUNDED_REQUEST = { timeout: 0 } as const
 const INTERACTIVE_CONTROL_REQUEST = { timeout: 2500 } as const
 
-// 辅助函数：解包Result（后端返回 { code, message, data }）
-const unpack = <T>(response: any): T => {
-  return response.data.data;
-};
-
 const VALUE_BASED_RULE_SOURCE_TYPES = new Set<RuleSourceItemType>(['variable', 'mode', 'state'])
 
 const normalizeRuleSourceType = (type?: string): RuleSourceItemType | undefined => {
@@ -233,6 +230,11 @@ export interface BoardSemanticSnapshot {
 
 export interface BoardWorkspaceSnapshot extends BoardSemanticSnapshot {
     editHistory: BoardUndoAvailability
+}
+
+export interface BoardModelComparison {
+    fingerprints: BoardModelFingerprints
+    scene: BoardSemanticSnapshot
 }
 
 /** Authoritative board state after a confirmed full-scene replacement (import or clear). */
@@ -306,45 +308,27 @@ const toRuleDto = (rule: RuleForm): RuleDto => {
     };
 };
 
+const toBackendSpecCondition = (condition: SpecCondition) => ({
+    deviceId: condition.deviceId,
+    targetType: condition.targetType,
+    key: condition.key,
+    ...(condition.propertyScope ? { propertyScope: condition.propertyScope } : {}),
+    // Required for a variable condition and refused on any other type. Dropping it here is what
+    // made every variable specification fail admission with "variableSource is required".
+    ...(condition.targetType === 'variable' ? { variableSource: condition.variableSource } : {}),
+    relation: normalizeModelRelation(condition.relation) || condition.relation,
+    value: condition.value
+});
+
 // Only structured specification semantics cross the write boundary. The backend rebuilds
 // labels, device summaries, and the user-facing formula preview from these fields.
 const toBackendSpecificationWriteDto = (spec: Specification) => ({
     id: spec.id,
     name: spec.name.trim(),
     templateId: spec.templateId,
-    aConditions: (spec.aConditions || []).map(condition => ({
-        deviceId: condition.deviceId,
-        targetType: condition.targetType,
-        key: condition.key,
-        ...(condition.propertyScope ? { propertyScope: condition.propertyScope } : {}),
-        // Required for a variable condition and refused on any other type. Dropping it here is what
-        // made every variable specification fail admission with "variableSource is required".
-        ...(condition.targetType === 'variable' ? { variableSource: condition.variableSource } : {}),
-        relation: normalizeModelRelation(condition.relation) || condition.relation,
-        value: condition.value
-    })),
-    ifConditions: (spec.ifConditions || []).map(condition => ({
-        deviceId: condition.deviceId,
-        targetType: condition.targetType,
-        key: condition.key,
-        ...(condition.propertyScope ? { propertyScope: condition.propertyScope } : {}),
-        // Required for a variable condition and refused on any other type. Dropping it here is what
-        // made every variable specification fail admission with "variableSource is required".
-        ...(condition.targetType === 'variable' ? { variableSource: condition.variableSource } : {}),
-        relation: normalizeModelRelation(condition.relation) || condition.relation,
-        value: condition.value
-    })),
-    thenConditions: (spec.thenConditions || []).map(condition => ({
-        deviceId: condition.deviceId,
-        targetType: condition.targetType,
-        key: condition.key,
-        ...(condition.propertyScope ? { propertyScope: condition.propertyScope } : {}),
-        // Required for a variable condition and refused on any other type. Dropping it here is what
-        // made every variable specification fail admission with "variableSource is required".
-        ...(condition.targetType === 'variable' ? { variableSource: condition.variableSource } : {}),
-        relation: normalizeModelRelation(condition.relation) || condition.relation,
-        value: condition.value
-    }))
+    aConditions: (spec.aConditions || []).map(toBackendSpecCondition),
+    ifConditions: (spec.ifConditions || []).map(toBackendSpecCondition),
+    thenConditions: (spec.thenConditions || []).map(toBackendSpecCondition)
 });
 
 /**
@@ -405,6 +389,7 @@ const DUPLICATE_RULE_REASON_CODES = new Set<DuplicateRuleReasonCode>([
 
 const RULE_SIMILARITY_REASON_CODES = new Set<RuleSimilarityReasonCode>([
     'NO_EXISTING_RULES',
+    'EXACT_MATCH',
     'AI_DUPLICATE',
     'AI_SIMILAR',
     'AI_HIGH_SCORE_REVIEW',
@@ -628,6 +613,34 @@ const requireOperation = (result: Record<string, any>, expected: string, context
     }
 }
 
+const requireImpactOperation = (
+    value: unknown,
+    expectedOperation: 'preview' | 'deleted' | 'reset',
+    context: string,
+    expectedImpactToken?: string
+) => {
+    const result = requireResponseRecord(value, context)
+    requireOperation(result, expectedOperation, context)
+    if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
+        throw new BoardResponseContractError(context, 'impactToken is required')
+    }
+    if (expectedOperation !== 'preview'
+        && result.impactToken.trim() !== String(expectedImpactToken || '').trim()) {
+        throw new BoardResponseContractError(context, 'impactToken does not match the confirmed preview')
+    }
+    return result
+}
+
+function requireUndoableEdit<T extends { canUndo?: unknown; canRedo?: unknown }>(
+    result: T,
+    context: string,
+    edit: string
+): asserts result is T & { canUndo: true; canRedo: false } {
+    if (result.canUndo !== true || result.canRedo !== false) {
+        throw new BoardResponseContractError(context, `${edit} must be undoable and must clear redo history`)
+    }
+}
+
 const requireCurrentCount = (
     result: Record<string, any>,
     currentItems: unknown[],
@@ -642,11 +655,12 @@ const requireUniqueIdentities = <T>(
     items: T[],
     identityOf: (item: T) => string | number,
     context: string,
-    field: string
+    field: string,
+    identityLabel = 'identities'
 ) => {
     const identities = items.map(identityOf)
     if (new Set(identities).size !== identities.length) {
-        throw new BoardResponseContractError(context, `${field} contains duplicate identities`)
+        throw new BoardResponseContractError(context, `${field} contains duplicate ${identityLabel}`)
     }
 }
 
@@ -670,6 +684,32 @@ const requireCheckText = (
         throw new BoardResponseContractError(context, `${field} must be non-blank text`)
     }
     return result[field]
+}
+
+const validateBoardLayoutResponse = (value: unknown, context: string): BoardLayoutDto => {
+    const envelope = requireResponseRecord(value, context)
+    if (envelope.code !== 200) {
+        throw new BoardResponseContractError(context, 'expected a successful response envelope')
+    }
+    const layout = requireResponseRecord(envelope.data, context)
+    const pan = requireResponseRecord(layout.canvasPan, `${context}.canvasPan`)
+    if (!Number.isFinite(pan.x) || !Number.isFinite(pan.y)) {
+        throw new BoardResponseContractError(context, 'canvasPan must contain finite coordinates')
+    }
+    if (!Number.isFinite(layout.canvasZoom) || layout.canvasZoom <= 0) {
+        throw new BoardResponseContractError(context, 'canvasZoom must be finite and positive')
+    }
+    const panels = requireResponseRecord(layout.panels, `${context}.panels`)
+    for (const name of ['control', 'inspector']) {
+        const panelContext = `${context}.panels.${name}`
+        const panel = requireResponseRecord(panels[name], panelContext)
+        requireCheckBoolean(panel, 'collapsed', panelContext)
+        requireCheckText(panel, 'activeSection', panelContext)
+        if (!Number.isFinite(panel.width) || panel.width <= 0) {
+            throw new BoardResponseContractError(panelContext, 'width must be finite and positive')
+        }
+    }
+    return layout as BoardLayoutDto
 }
 
 const requireCheckSimilarity = (result: Record<string, any>, context: string): number => {
@@ -738,6 +778,7 @@ const validateRuleSimilarityResult = (value: unknown): RuleSimilarityResult => {
             ? 'AI_HIGH_SCORE_REVIEW'
             : 'AI_NO_SIGNIFICANT_SIMILARITY'
     if (reasonCode !== expectedReasonCode
+        && !(reasonCode === 'EXACT_MATCH' && isDuplicate && similarity === 1)
         && !(reasonCode === 'NO_EXISTING_RULES' && !isSimilar && !isDuplicate && similarity === 0)) {
         throw new BoardResponseContractError(context, 'reasonCode contradicts the similarity result')
     }
@@ -764,22 +805,8 @@ const validateDeviceMutationResult = (
             device,
             `${context}.currentNodes[${index}]`
         ))
-    const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(
-        result,
-        context,
-        'environmentVariables'
-    ).map((variable, index) => validateEnvironmentVariable(
-        variable,
-        `${context}.environmentVariables[${index}]`
-    ))
-    const environmentChanges = requireResponseArray<EnvironmentVariableChange>(
-        result,
-        context,
-        'environmentChanges'
-    ).map((change, index) => validateEnvironmentChangeResult(
-        change,
-        `${context}.environmentChanges[${index}]`
-    ))
+    const environmentVariables = readEnvironmentVariables(result, context)
+    const environmentChanges = readEnvironmentChanges(result, context)
     const currentSpecifications = requireResponseArray<Specification>(
         result,
         context,
@@ -788,19 +815,10 @@ const validateDeviceMutationResult = (
         specification,
         `${context}.currentSpecifications[${index}]`
     ))
-    if (new Set(currentNodes.map(device => device.id)).size !== currentNodes.length) {
-        throw new BoardResponseContractError(context, 'currentNodes contains duplicate device ids')
-    }
-    if (new Set(environmentVariables.map(variable => variable.name)).size !== environmentVariables.length) {
-        throw new BoardResponseContractError(context, 'environmentVariables contains duplicate names')
-    }
-    if (new Set(environmentChanges.map(change => change.name)).size !== environmentChanges.length) {
-        throw new BoardResponseContractError(context, 'environmentChanges contains duplicate names')
-    }
-    if (new Set(currentSpecifications.map(specification => specification.id)).size
-        !== currentSpecifications.length) {
-        throw new BoardResponseContractError(context, 'currentSpecifications contains duplicate ids')
-    }
+    requireUniqueIdentities(currentNodes, device => device.id, context, 'currentNodes', 'device ids')
+    requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables', 'names')
+    requireUniqueIdentities(environmentChanges, change => change.name, context, 'environmentChanges', 'names')
+    requireUniqueIdentities(currentSpecifications, specification => specification.id, context, 'currentSpecifications', 'ids')
     requireCurrentCount(result, currentNodes, context)
     if ((result.canUndo !== undefined && result.canUndo !== null && typeof result.canUndo !== 'boolean')
         || (result.canRedo !== undefined && result.canRedo !== null && typeof result.canRedo !== 'boolean')) {
@@ -862,13 +880,6 @@ const validateDeviceRenameResult = (
     }
     if (result.previousLabel !== expectedLabel) {
         throw new BoardResponseContractError(context, 'previousLabel must match expectedLabel')
-    }
-    if (!Number.isSafeInteger(result.updatedSpecificationCount)
-        || result.updatedSpecificationCount < 0) {
-        throw new BoardResponseContractError(
-            context,
-            'updatedSpecificationCount must be a non-negative integer'
-        )
     }
     return result
 }
@@ -949,9 +960,7 @@ const validateDeviceUpdateResult = (
             device,
             `${context}.currentNodes[${index}]`
         ))
-    if (new Set(currentNodes.map(device => device.id)).size !== currentNodes.length) {
-        throw new BoardResponseContractError(context, 'currentNodes contains duplicate device ids')
-    }
+    requireUniqueIdentities(currentNodes, device => device.id, context, 'currentNodes', 'device ids')
     requireCurrentCount(result, currentNodes, context)
     const authoritative = currentNodes.find(device => device.id === nodeId)
     if (!authoritative || !sameDeviceSnapshot(authoritative, currentDevice)) {
@@ -976,12 +985,7 @@ const validateDeviceUpdateResult = (
         throw new BoardResponseContractError(context, 'operation must agree with changedFields')
     }
     if (result.operation === 'updated') {
-        if (result.canUndo !== true || result.canRedo !== false) {
-            throw new BoardResponseContractError(
-                context,
-                'a committed device update must be undoable and must clear redo history'
-            )
-        }
+        requireUndoableEdit(result, context, 'a committed device update')
         requireBoardEditAvailability(result, context)
     } else if ((result.canUndo !== undefined && result.canUndo !== null)
         || (result.canRedo !== undefined && result.canRedo !== null) || result.editHistoryRevision != null) {
@@ -1103,6 +1107,14 @@ const validateEnvironmentChangeResult = (
     return { ...change, previousValue: previous, currentValue: current } as EnvironmentVariableChange
 }
 
+const readEnvironmentVariables = (receipt: unknown, context: string): ModelEnvironmentVariable[] =>
+    requireResponseArray(receipt, context, 'environmentVariables')
+        .map((variable, index) => validateEnvironmentVariable(variable, `${context}.environmentVariables[${index}]`))
+
+const readEnvironmentChanges = (receipt: unknown, context: string): EnvironmentVariableChange[] =>
+    requireResponseArray(receipt, context, 'environmentChanges')
+        .map((change, index) => validateEnvironmentChangeResult(change, `${context}.environmentChanges[${index}]`))
+
 const validateEnvironmentMutationResult = (
     value: unknown,
     patches: EnvironmentVariableUpdateRequest[]
@@ -1117,33 +1129,14 @@ const validateEnvironmentMutationResult = (
         context,
         'patchResults'
     )
-    const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(
-        result,
-        context,
-        'environmentVariables'
-    ).map((variable, index) => validateEnvironmentVariable(
-        variable,
-        `${context}.environmentVariables[${index}]`
-    ))
-    const environmentChanges = requireResponseArray<EnvironmentVariableChange>(
-        result,
-        context,
-        'environmentChanges'
-    ).map((change, index) => validateEnvironmentChangeResult(
-        change,
-        `${context}.environmentChanges[${index}]`
-    ))
+    const environmentVariables = readEnvironmentVariables(result, context)
+    const environmentChanges = readEnvironmentChanges(result, context)
     requireCurrentCount(result, environmentVariables, context)
     if ((result.operation === 'unchanged') !== (environmentChanges.length === 0)) {
         throw new BoardResponseContractError(context, 'operation must agree with environmentChanges')
     }
     if (result.operation === 'updated') {
-        if (result.canUndo !== true || result.canRedo !== false) {
-            throw new BoardResponseContractError(
-                context,
-                'a committed Environment Pool update must be undoable and must clear redo history'
-            )
-        }
+        requireUndoableEdit(result, context, 'a committed Environment Pool update')
         requireBoardEditAvailability(result, context)
     } else if ((result.canUndo !== undefined && result.canUndo !== null)
         || (result.canRedo !== undefined && result.canRedo !== null) || result.editHistoryRevision != null) {
@@ -1336,15 +1329,7 @@ const parseDeviceDeletionResult = (
     context: string,
     expectedImpactToken?: string
 ): DeviceDeletionResult => {
-    const result = requireResponseRecord(value, context)
-    requireOperation(result, expectedOperation, context)
-    if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
-        throw new BoardResponseContractError(context, 'impactToken is required')
-    }
-    if (expectedOperation === 'deleted'
-        && result.impactToken.trim() !== String(expectedImpactToken || '').trim()) {
-        throw new BoardResponseContractError(context, 'impactToken does not match the confirmed preview')
-    }
+    const result = requireImpactOperation(value, expectedOperation, context, expectedImpactToken)
 
     const validateDevice = (candidate: unknown, field: string) =>
         validateBoardNodeResult(candidate, `${context}.${field}`)
@@ -1352,8 +1337,6 @@ const parseDeviceDeletionResult = (
         validateBackendRuleResult(candidate, `${context}.${field}`)
     const validateSpecification = (candidate: unknown, field: string) =>
         validateBoardSpecificationResult(candidate, `${context}.${field}`)
-    const validateEnvironment = (candidate: unknown, field: string) =>
-        validateEnvironmentVariable(candidate, `${context}.${field}`)
 
     const deletedDevice = validateDevice(result.deletedDevice, 'deletedDevice')
     if (deletedDevice.id !== expectedNodeId) {
@@ -1412,28 +1395,17 @@ const parseDeviceDeletionResult = (
     validateDeletionCollection(removedRules, currentRules, rule => Number(rule.id), 'Rules')
     validateDeletionCollection(removedSpecifications, currentSpecifications, specification => specification.id, 'Specifications')
 
-    const environmentVariables = requireResponseArray(result, context, 'environmentVariables')
-        .map((variable, index) => validateEnvironment(variable, `environmentVariables[${index}]`))
+    const environmentVariables = readEnvironmentVariables(result, context)
     if (new Set(environmentVariables.map(variable => variable.name)).size !== environmentVariables.length) {
         throw new BoardResponseContractError(context, 'environmentVariables contains duplicate names')
     }
-    const environmentChanges = requireResponseArray<EnvironmentVariableChange>(
-        result,
-        context,
-        'environmentChanges'
-    ).map((change, index) => validateEnvironmentChangeResult(
-        change,
-        `${context}.environmentChanges[${index}]`
-    ))
+    const environmentChanges = readEnvironmentChanges(result, context)
     if (new Set(environmentChanges.map(change => change.name)).size !== environmentChanges.length) {
         throw new BoardResponseContractError(context, 'environmentChanges contains duplicate names')
     }
     const editHistory = requireBoardEditAvailability(result, context)
-    if (expectedOperation === 'deleted' && (!editHistory.canUndo || editHistory.canRedo)) {
-        throw new BoardResponseContractError(
-            context,
-            'a committed device deletion must be undoable and must clear redo history'
-        )
+    if (expectedOperation === 'deleted') {
+        requireUndoableEdit(editHistory, context, 'a committed device deletion')
     }
     return {
         operation: expectedOperation,
@@ -1469,13 +1441,8 @@ const validateCollectionMutationResult = <T>(
             'reversible collection mutations must report boolean canUndo and canRedo values'
         )
     }
-    if (expectedOperation !== 'unchanged' && (!result.canUndo || result.canRedo)) {
-        throw new BoardResponseContractError(
-            context,
-            'a committed collection mutation must be undoable and must clear redo history'
-        )
-    }
     if (expectedOperation !== 'unchanged') {
+        requireUndoableEdit(result, context, 'a committed collection mutation')
         requireBoardEditAvailability(result, context)
     } else if (result.editHistoryRevision != null) {
         throw new BoardResponseContractError(context, 'an unchanged edit must not attest a history revision')
@@ -1559,14 +1526,7 @@ const parseBoardUndoResult = (
         .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
     requireUniqueIdentities(nodes, node => node.id, context, 'nodes')
 
-    const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(
-        raw,
-        context,
-        'environmentVariables'
-    ).map((variable, index) => validateEnvironmentVariable(
-        variable,
-        `${context}.environmentVariables[${index}]`
-    ))
+    const environmentVariables = readEnvironmentVariables(raw, context)
     requireUniqueIdentities(
         environmentVariables,
         variable => variable.name,
@@ -1677,26 +1637,15 @@ const validateBoardBatchResult = (value: unknown) => {
     const result = requireResponseRecord(value, context)
     const nodes = requireResponseArray<DeviceNode>(result, context, 'nodes')
         .map((node, index) => validateBoardNodeResult(node, `${context}.nodes[${index}]`))
-    if (new Set(nodes.map(node => node.id)).size !== nodes.length) {
-        throw new BoardResponseContractError(context, 'nodes contains duplicate ids')
-    }
-    const environmentVariables = requireResponseArray<ModelEnvironmentVariable>(result, context, 'environmentVariables')
-        .map((variable, index) => validateEnvironmentVariable(variable, `${context}.environmentVariables[${index}]`))
-    if (new Set(environmentVariables.map(variable => variable.name)).size !== environmentVariables.length) {
-        throw new BoardResponseContractError(context, 'environmentVariables contains duplicate names')
-    }
+    requireUniqueIdentities(nodes, node => node.id, context, 'nodes', 'ids')
+    const environmentVariables = readEnvironmentVariables(result, context)
+    requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables', 'names')
     const rules = requireResponseArray<RuleDto>(result, context, 'rules')
         .map((rule, index) => validateBackendRuleResult(rule, `${context}.rules[${index}]`))
     requireUniqueIdentities(rules, rule => Number(rule.id), context, 'rules')
-    const ruleIds = rules.map(rule => rule.id)
-    if (new Set(ruleIds).size !== ruleIds.length) {
-        throw new BoardResponseContractError(context, 'rules contains duplicate ids')
-    }
     const specs = requireResponseArray<Specification>(result, context, 'specs')
         .map((spec, index) => validateBoardSpecificationResult(spec, `${context}.specs[${index}]`))
-    if (new Set(specs.map(spec => spec.id)).size !== specs.length) {
-        throw new BoardResponseContractError(context, 'specs contains duplicate ids')
-    }
+    requireUniqueIdentities(specs, spec => spec.id, context, 'specs', 'ids')
     const createdTemplates = requireResponseArray<DeviceTemplate>(result, context, 'createdTemplates')
         .map((template, index) => validateDeviceTemplateResult(template, `${context}.createdTemplates[${index}]`))
     requireUniqueIdentities(
@@ -1832,15 +1781,7 @@ const validateDeviceTemplateDeletionResult = (
     const context = expectedOperation === 'preview'
         ? 'Device type deletion preview'
         : 'Device type deletion'
-    const result = requireResponseRecord(value, context)
-    requireOperation(result, expectedOperation, context)
-    if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
-        throw new BoardResponseContractError(context, 'impactToken is required')
-    }
-    if (expectedOperation === 'deleted'
-        && result.impactToken.trim() !== String(expectedImpactToken || '').trim()) {
-        throw new BoardResponseContractError(context, 'impactToken does not match the confirmed preview')
-    }
+    const result = requireImpactOperation(value, expectedOperation, context, expectedImpactToken)
     if (typeof result.canDelete !== 'boolean') {
         throw new BoardResponseContractError(context, 'canDelete must be boolean')
     }
@@ -2119,15 +2060,7 @@ const validateDefaultTemplateResetResult = (
     const context = expectedOperation === 'preview'
         ? 'Default device type reset preview'
         : 'Default device type reset'
-    const result = requireResponseRecord(value, context)
-    requireOperation(result, expectedOperation, context)
-    if (typeof result.impactToken !== 'string' || !result.impactToken.trim()) {
-        throw new BoardResponseContractError(context, 'impactToken is required')
-    }
-    if (expectedOperation === 'reset'
-        && result.impactToken.trim() !== String(expectedImpactToken || '').trim()) {
-        throw new BoardResponseContractError(context, 'impactToken does not match the confirmed preview')
-    }
+    const result = requireImpactOperation(value, expectedOperation, context, expectedImpactToken)
     if (typeof result.canApply !== 'boolean') {
         throw new BoardResponseContractError(context, 'canApply must be boolean')
     }
@@ -2137,11 +2070,7 @@ const validateDefaultTemplateResetResult = (
     const templateChanges = requireResponseArray<any>(result, context, 'templateChanges')
     const affectedDevices = requireResponseArray<any>(result, context, 'affectedDevices')
     const blockers = requireResponseArray<any>(result, context, 'blockers')
-    const environmentChanges = requireResponseArray<EnvironmentVariableChange>(result, context, 'environmentChanges')
-        .map((change, index) => validateEnvironmentChangeResult(
-            change,
-            `${context}.environmentChanges[${index}]`
-        ))
+    const environmentChanges = readEnvironmentChanges(result, context)
     const currentTemplates = requireResponseArray<DeviceTemplate>(result, context, 'currentTemplates')
     const currentNodes = requireResponseArray<DeviceNode>(result, context, 'currentNodes')
         .map((node, index) => validateBoardNodeResult(node, `${context}.currentNodes[${index}]`))
@@ -2235,9 +2164,7 @@ const validateDefaultTemplateResetResult = (
     requireUniqueIdentities(environmentVariables, variable => variable.name, context, 'environmentVariables')
 
     const environmentByName = new Map(environmentVariables.map(variable => [variable.name, variable]))
-    if (new Set(environmentChanges.map(change => change.name)).size !== environmentChanges.length) {
-        throw new BoardResponseContractError(context, 'environmentChanges contains duplicate names')
-    }
+    requireUniqueIdentities(environmentChanges, change => change.name, context, 'environmentChanges', 'names')
     environmentChanges.forEach((row) => {
         if (expectedOperation === 'reset') {
             const current = environmentByName.get(row.name)
@@ -2306,12 +2233,7 @@ const validateFixApplyResult = (
     if (typeof result.message !== 'string' || !result.message.trim()) {
         throw new BoardResponseContractError(context, 'message is required')
     }
-    if (result.canUndo !== true || result.canRedo !== false) {
-        throw new BoardResponseContractError(
-            context,
-            'an applied automatic fix must be undoable and must clear redo history'
-        )
-    }
+    requireUndoableEdit(result, context, 'an applied automatic fix')
     requireBoardEditAvailability(result, context)
     return { ...result, rules } as Omit<FixApplyResult, 'rules'> & { rules: RuleDto[] }
 }
@@ -2362,7 +2284,7 @@ export default {
             editHistory: requireBoardEditAvailability(snapshot.editHistory, `${context}.editHistory`)
         }
     },
-    getModelFingerprints: async (): Promise<{ fingerprints: BoardModelFingerprints; scene: BoardSemanticSnapshot }> => {
+    getModelFingerprints: async (): Promise<BoardModelComparison> => {
         const value = requireResponseRecord(
             unpack<unknown>(await api.get('/board/model-fingerprints')), 'Board model comparison'
         )
@@ -2607,12 +2529,7 @@ export default {
             )
         }
         requireCurrentCount(envelope, result, 'Rule reorder')
-        if (envelope.canUndo !== true || envelope.canRedo !== false) {
-            throw new BoardResponseContractError(
-                'Rule reorder',
-                'a committed reorder must be undoable and must clear redo history'
-            )
-        }
+        requireUndoableEdit(envelope, 'Rule reorder', 'a committed reorder')
         return {
             rules: result.map(fromRuleDto),
             canUndo: envelope.canUndo,
@@ -2762,14 +2679,29 @@ export default {
         return validateRuleSimilarityResult(unpack<unknown>(response));
     },
 
+    checkRuleSimilarityBatch: async (rules: readonly RuleForm[]): Promise<RuleSimilarityResult[]> => {
+        const candidates = rules.map(rule => {
+            assertRuleHasTrigger(rule)
+            return toRuleDto(rule)
+        })
+        const context = 'AI rule-similarity batch check'
+        const response = await api.post('/board/rules/check-similarity/batch', { rules: candidates })
+        const results = requireResponseArray<unknown>(unpack<unknown>(response), context)
+        if (results.length !== candidates.length) {
+            throw new BoardResponseContractError(context, 'expected one result per candidate')
+        }
+        return results.map(validateRuleSimilarityResult)
+    },
+
     // ==== 布局（包含面板状态、Canvas 缩放位移） ====
     getLayout: async (): Promise<BoardLayoutDto> => {
-        return unpack<BoardLayoutDto>(await api.get('/board/layout'));
+        return validateBoardLayoutResponse((await api.get('/board/layout')).data, 'Board layout');
     },
     saveLayout: async (dto: BoardLayoutDto, authToken: string): Promise<BoardLayoutDto> => {
-        return unpack<BoardLayoutDto>(await api.post('/board/layout', dto, {
+        const response = await api.post('/board/layout', dto, {
             headers: { Authorization: `Bearer ${authToken}` }
-        }));
+        });
+        return validateBoardLayoutResponse(response.data, 'Board layout save');
     },
 
     // ==== 设备模板 ====
@@ -2846,7 +2778,7 @@ export default {
         );
     },
     deleteTask: async (taskId: number): Promise<void> => {
-        return unpack<void>(await api.delete(`/verify/tasks/${taskId}`));
+        validateHistoryDeletionReceipt((await api.delete(`/verify/tasks/${taskId}`)).data);
     },
     getVerificationRuns: async (): Promise<VerificationRunSummary[]> => {
         return validateVerificationRunSummaryList(
@@ -2865,7 +2797,7 @@ export default {
         );
     },
     deleteVerificationRun: async (runId: number): Promise<void> => {
-        return unpack<void>(await api.delete(`/verify/runs/${runId}`));
+        validateHistoryDeletionReceipt((await api.delete(`/verify/runs/${runId}`)).data);
     },
     cancelTask: async (taskId: number): Promise<TaskCancellationResult> => {
         return validateTaskCancellationResult(

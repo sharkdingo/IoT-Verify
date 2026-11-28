@@ -56,6 +56,7 @@ import java.util.Map;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -76,53 +77,28 @@ class FuzzMapperTest {
     @Test
     void mapsCompletedRunWrittenWithVersionedSnapshotEnvelope() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.BUDGET_EXHAUSTED,
-                0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
         ModelInputSnapshot snapshot = inputSnapshot(List.of(specification));
         run.setModelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(snapshot));
 
         assertDoesNotThrow(() -> mapper.toRunDto(run, List.of()));
-        assertDoesNotThrow(() -> mapper.toRunSummaryDto(run, List.of()));
     }
 
     @Test
     void rejectsFuzzSnapshotsWithoutASemanticFingerprint() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.BUDGET_EXHAUSTED,
-                0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
         run.setModelSnapshotJson(JsonUtils.toJson(ModelRunSnapshotDto.captured(
                 run.getCreatedAt(), 0, 0, 1, 0, 0)));
 
-        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toTaskDto(run));
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
     }
 
     @Test
     void rejectsFrozenInputWhoseContentNoLongerMatchesItsFingerprint() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.BUDGET_EXHAUSTED, 0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
         SpecificationDto altered = supportedSpecification("spec-1");
         altered.getAConditions().get(0).setValue("off");
         run.setModelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(
@@ -130,7 +106,7 @@ class FuzzMapperTest {
 
         PersistedDataIntegrityException error = assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
 
         assertEquals("modelSnapshotJson", error.getField());
     }
@@ -138,25 +114,20 @@ class FuzzMapperTest {
     @Test
     void rejectsContradictoryTaskLifecycleMetadata() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.BUDGET_EXHAUSTED, 0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
 
         run.setStartedAt(null);
         run.setProcessingTimeMs(null);
         assertEquals("startedAt", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toTaskDto(run)).getField());
+                () -> mapper.toRunDto(run, List.of())).getField());
 
         run.setStartedAt(run.getCreatedAt());
         run.setProcessingTimeMs(2_000L);
         run.setCompletedAt(run.getCreatedAt().minusSeconds(1));
         assertEquals("completedAt", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toTaskSummaryDto(run)).getField());
+                () -> mapper.toRunDto(run, List.of())).getField());
 
         run.setCompletedAt(run.getCreatedAt().plusSeconds(2));
         run.setStatus(FuzzTaskPo.TaskStatus.FAILED);
@@ -164,7 +135,7 @@ class FuzzMapperTest {
         run.setErrorMessage(" ");
         assertEquals("errorMessage", assertThrows(
                 PersistedDataIntegrityException.class,
-                () -> mapper.toTaskDto(run)).getField());
+                () -> mapper.toRunDto(run, List.of())).getField());
     }
 
     @Test
@@ -173,12 +144,7 @@ class FuzzMapperTest {
         ModelInputSnapshot snapshot = provenanceSnapshot(specification);
         snapshot.devices().get(0).setTemplateName("  sWiTcH  ");
         snapshot.nodes().get(0).setTemplateName("  sWiTcH  ");
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.BUDGET_EXHAUSTED, 0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
         run.setModelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(snapshot));
         run.setModelSnapshotJson(JsonUtils.toJson(fuzzSnapshot(run.getCreatedAt(), snapshot)));
 
@@ -189,12 +155,7 @@ class FuzzMapperTest {
     void runDetailRejectsMalformedNestedStateAndForgedProvenance() {
         SpecificationDto specification = supportedSpecification("spec-1");
         ModelInputSnapshot snapshot = provenanceSnapshot(specification);
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.FOUND_VIOLATION, 1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         run.setModelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(snapshot));
         run.setModelSnapshotJson(JsonUtils.toJson(fuzzSnapshot(run.getCreatedAt(), snapshot)));
 
@@ -287,219 +248,102 @@ class FuzzMapperTest {
     }
 
     @Test
-    void mapsCompletedRunAndEmbedsFindingSummaries() {
-        LocalDateTime createdAt = LocalDateTime.of(2026, 7, 14, 9, 30);
+    void mapsPaperRunAndTaskProjections() {
         SpecificationDto specification = supportedSpecification("spec-1");
         specification.setName("Never unlock while away");
-        ModelInputSnapshot frozenInput = inputSnapshot(List.of(specification));
-        TraceStateDto state = TraceStateDto.builder()
-                .stateIndex(0)
-                .devices(List.of())
-                .triggeredRules(List.of())
-                .compromisedAutomationLinks(List.of())
-                .build();
-        FuzzFindingPo finding = FuzzFindingPo.builder()
-                .id(9L)
-                .userId(3L)
-                .fuzzTaskId(7L)
-                .violatedSpecId("spec-1")
-                .violatedSpecJson(JsonUtils.toJson(specification))
-                .firstViolationStep(0)
-                .statesJson(JsonUtils.toJson(List.of(state)))
-                .inputEventsJson(JsonUtils.toJson(List.of(FuzzInputEventDto.builder()
-                        .step(0)
-                        .kind("DEVICE_VARIABLE")
-                        .targetId("DoorLock")
-                        .property("battery")
-                        .value("80")
-                        .source("MODEL_CHOICE")
-                        .build())))
-                .seed(42L)
-                .stateCount(1)
-                .createdAt(createdAt.plusSeconds(1))
-                .build();
-        FuzzTaskPo task = FuzzTaskPo.builder()
-                .id(7L)
-                .userId(3L)
-                .status(FuzzTaskPo.TaskStatus.COMPLETED)
-                .createdAt(createdAt)
-                .startedAt(createdAt)
-                .completedAt(createdAt.plusSeconds(2))
-                .processingTimeMs(2_000L)
-                .progress(100)
-                .targetSpecIdsJson(JsonUtils.toJson(List.of("spec-1")))
-                .maxIterations(1000)
-                .pathLength(20)
-                .populationSize(10)
-                .explorationMode(FuzzExplorationMode.PAPER_COMPATIBLE)
-                .modelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(frozenInput))
-                .modelSnapshotJson(JsonUtils.toJson(fuzzSnapshot(createdAt, frozenInput)))
-                .outcome(FuzzOutcome.FOUND_VIOLATION)
-                .effectiveSeed(42L)
-                .iterations(12)
-                .generatedPaths(120L)
-                .elapsedMs(250L)
-                .eligibilityJson(JsonUtils.toJson(FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .eligibleSpecLabels(Map.of("spec-1", "Never unlock while away"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build()))
-                .limitationsJson(JsonUtils.toJson(
-                        FuzzLimitationContract.requiredCodes(FuzzExplorationMode.PAPER_COMPATIBLE)))
-                .findingCount(1)
-                .build();
+        FuzzTaskPo run = completedRunWithFinding(specification);
+        run.setExplorationMode(FuzzExplorationMode.PAPER_COMPATIBLE);
+        run.setLimitationsJson(JsonUtils.toJson(
+                FuzzLimitationContract.requiredCodes(FuzzExplorationMode.PAPER_COMPATIBLE)));
+        FuzzFindingPo finding = finding(run, specification);
+        finding.setInputEventsJson(JsonUtils.toJson(List.of(inputEvent(0, "MODEL_CHOICE"))));
+        var projectedTask = projectedRun(1, 1L, 1, 10);
+        when(projectedTask.getExplorationMode()).thenReturn(run.getExplorationMode());
+        when(projectedTask.getModelSnapshotJson()).thenReturn(run.getModelSnapshotJson());
+        when(projectedTask.getTargetSpecIdsJson()).thenReturn(run.getTargetSpecIdsJson());
+        when(projectedTask.getOutcome()).thenReturn(run.getOutcome());
+        when(projectedTask.getFindingCount()).thenReturn(run.getFindingCount());
 
-        FuzzRunSummaryDto dto = mapper.toRunSummaryDto(task, List.of(finding));
-        FuzzRunDto runDetail = mapper.toRunDto(task, List.of(finding));
-        FuzzTaskDto taskDetail = mapper.toTaskDto(task);
-        FuzzTaskSummaryDto taskSummary = mapper.toTaskSummaryDto(task);
+        FuzzRunDto detail = mapper.toRunDto(run, List.of(finding));
+        FuzzTaskDto taskDetail = mapper.toTaskDtoProjection(projectedTask);
+        FuzzTaskSummaryDto taskSummary = mapper.toTaskSummaryDtoProjection(projectedTask);
 
-        assertEquals(FuzzOutcome.FOUND_VIOLATION, dto.getOutcome());
-        assertEquals(FuzzExplorationMode.PAPER_COMPATIBLE, dto.getExplorationMode());
-        assertEquals(FuzzExplorationMode.PAPER_COMPATIBLE, runDetail.getExplorationMode());
+        assertEquals(FuzzOutcome.FOUND_VIOLATION, detail.getOutcome());
+        assertEquals(FuzzExplorationMode.PAPER_COMPATIBLE, detail.getExplorationMode());
         assertEquals(FuzzExplorationMode.PAPER_COMPATIBLE, taskDetail.getExplorationMode());
         assertEquals(FuzzExplorationMode.PAPER_COMPATIBLE, taskSummary.getExplorationMode());
-        assertEquals(42L, dto.getEffectiveSeed());
-        assertTrue(dto.isDataAvailable());
-        assertEquals(1, dto.getFindingCount());
-        assertEquals(1, dto.getFindings().size());
-        assertEquals("spec-1", dto.getFindings().get(0).getViolatedSpecId());
-        assertEquals(42L, dto.getFindings().get(0).getSeed());
-        assertEquals("MODEL_CHOICE", runDetail.getFindings().get(0)
-                .getInputEvents().get(0).getSource());
-        assertEquals(0, dto.getModelSnapshot().getDeviceCount());
+        assertEquals(42L, detail.getEffectiveSeed());
+        assertEquals(1, detail.getFindingCount());
+        assertEquals(1, detail.getFindings().size());
+        assertEquals("spec-1", detail.getFindings().get(0).getViolatedSpecId());
+        assertEquals(42L, detail.getFindings().get(0).getSeed());
+        assertEquals("MODEL_CHOICE", detail.getFindings().get(0).getInputEvents().get(0).getSource());
+        assertEquals(0, detail.getModelSnapshot().getDeviceCount());
         assertEquals(0, taskSummary.getModelSnapshot().getDeviceCount());
         assertEquals(List.of("spec-1"), taskSummary.getTargetSpecIds());
         assertEquals(Map.of("spec-1", "Never unlock while away"),
-                runDetail.getEligibility().getEligibleSpecLabels());
-        assertTrue(runDetail.getLimitations().contains(
-                "PAPER_PREDECESSOR_STATE_OUTPUTS_THREE_LEVELS_ONLY"));
-        assertTrue(runDetail.getLimitations().contains(
-                "PAPER_MULTI_TARGET_PRODUCT_EXTENSION"));
-        assertTrue(runDetail.getLimitations().contains(
-                "ATTACK_TRUST_PRIVACY_CONTENT_UNSUPPORTED"));
+                detail.getEligibility().getEligibleSpecLabels());
+        assertTrue(detail.getLimitations().contains("PAPER_PREDECESSOR_STATE_OUTPUTS_THREE_LEVELS_ONLY"));
+        assertTrue(detail.getLimitations().contains("PAPER_MULTI_TARGET_PRODUCT_EXTENSION"));
+        assertTrue(detail.getLimitations().contains("ATTACK_TRUST_PRIVACY_CONTENT_UNSUPPORTED"));
     }
+
 
     @Test
-    void findingSummaryRejectsInconsistentPersistedTraceMetadata() {
+    void findingDetailRejectsInconsistentPersistedTraceMetadata() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        TraceStateDto state = TraceStateDto.builder()
-                .stateIndex(0)
-                .devices(List.of())
-                .triggeredRules(List.of())
-                .compromisedAutomationLinks(List.of())
-                .build();
-        FuzzFindingPo finding = FuzzFindingPo.builder()
-                .id(10L)
-                .userId(3L)
-                .fuzzTaskId(7L)
-                .violatedSpecId("spec-1")
-                .violatedSpecJson(JsonUtils.toJson(specification))
-                .firstViolationStep(0)
-                .statesJson(JsonUtils.toJson(List.of(state)))
-                .inputEventsJson("[]")
-                .seed(42L)
-                .stateCount(2)
-                .createdAt(LocalDateTime.now())
-                .build();
+        FuzzTaskPo run = completedRunWithFinding(specification);
+        FuzzFindingPo finding = finding(run, specification);
+        String initialStates = finding.getStatesJson();
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingSummaryDto(finding));
-
-        finding.setStateCount(1);
-        finding.setInputEventsJson("[{\"step\":0,\"kind\":\"DEVICE_VARIABLE\","
-                + "\"targetId\":\"device-1\",\"property\":\"temperature\",\"value\":\"21\"}]");
-        assertThrows(PersistedDataIntegrityException.class, () -> mapper.toFindingDto(finding));
-
-        finding.setInputEventsJson("[{\"step\":0,\"kind\":\"DEVICE_VARIABLE\","
-                + "\"targetId\":\"device-1\",\"property\":\"temperature\",\"value\":\"21\","
-                + "\"source\":\"MODEL_CHOICE\"}]");
-        assertEquals("MODEL_CHOICE", mapper.toFindingDto(finding).getInputEvents().get(0).getSource());
-
-        TraceStateDto trailingState = TraceStateDto.builder()
-                .stateIndex(1)
-                .devices(List.of())
-                .triggeredRules(List.of())
-                .compromisedAutomationLinks(List.of())
-                .build();
-        finding.setStatesJson(JsonUtils.toJson(List.of(state, trailingState)));
         finding.setStateCount(2);
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
-        finding.setStatesJson(JsonUtils.toJson(List.of(state)));
+        assertInvalidFinding(run, finding, "stateCount");
+
+        finding.setStateCount(1);
+        finding.setInputEventsJson(JsonUtils.toJson(List.of(inputEvent(0, null))));
+        assertInvalidFinding(run, finding, "inputEventsJson");
+
+        finding.setInputEventsJson(JsonUtils.toJson(List.of(inputEvent(0, "MODEL_CHOICE"))));
+        assertEquals("MODEL_CHOICE", mapper.toFindingDto(run, finding, 1L).getInputEvents().get(0).getSource());
+
+        finding.setStatesJson(JsonUtils.toJson(List.of(emptyTraceState(0), emptyTraceState(1))));
+        finding.setStateCount(2);
+        assertInvalidFinding(run, finding, "firstViolationStep");
+        finding.setStatesJson(initialStates);
         finding.setStateCount(1);
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(FuzzInputEventDto.builder()
-                .step(0)
-                .kind("DEVICE_STATE")
-                .targetId("device-1")
-                .property("state")
-                .value("on")
-                .source("SEED_EVENT")
-                .build())));
-        assertEquals("SEED_EVENT",
-                mapper.toFindingDto(finding).getInputEvents().get(0).getSource());
+                .step(0).kind("DEVICE_STATE").targetId("device-1").property("state")
+                .value("on").source("SEED_EVENT").build())));
+        assertEquals("SEED_EVENT", mapper.toFindingDto(run, finding, 1L).getInputEvents().get(0).getSource());
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(FuzzInputEventDto.builder()
-                .step(0)
-                .kind("ENVIRONMENT_RATE")
-                .targetId("environment")
-                .property("temperature")
-                .value("rate:1")
-                .source("UNKNOWN_SOURCE")
-                .build())));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+                .step(0).kind("ENVIRONMENT_RATE").targetId("environment").property("temperature")
+                .value("rate:1").source("UNKNOWN_SOURCE").build())));
+        assertInvalidFinding(run, finding, "inputEventsJson");
 
         finding.setFirstViolationStep(1);
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingSummaryDto(finding));
-
+        assertInvalidFinding(run, finding, "firstViolationStep");
         finding.setFirstViolationStep(0);
-        finding.setInputEventsJson(JsonUtils.toJson(List.of(FuzzInputEventDto.builder()
-                .step(1)
-                .kind("DEVICE_VARIABLE")
-                .build())));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingSummaryDto(finding));
 
-        finding.setInputEventsJson(JsonUtils.toJson(List.of(FuzzInputEventDto.builder()
-                .step(0)
-                .kind("UNSUPPORTED_KIND")
-                .targetId("device-1")
-                .property("temperature")
-                .value("21")
-                .build())));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingSummaryDto(finding));
+        finding.setInputEventsJson(JsonUtils.toJson(List.of(inputEvent(1, "MODEL_CHOICE"))));
+        assertInvalidFinding(run, finding, "inputEventsJson");
+
+        FuzzInputEventDto event = inputEvent(0, "MODEL_CHOICE");
+        event.setKind("UNSUPPORTED_KIND");
+        finding.setInputEventsJson(JsonUtils.toJson(List.of(event)));
+        assertInvalidFinding(run, finding, "inputEventsJson");
     }
+
 
     @Test
     void findingRejectsInputEventsOutsideCausalOrder() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        TraceStateDto first = TraceStateDto.builder()
-                .stateIndex(0)
-                .devices(List.of())
-                .triggeredRules(List.of())
-                .compromisedAutomationLinks(List.of())
-                .build();
-        TraceStateDto second = TraceStateDto.builder()
-                .stateIndex(1)
-                .devices(List.of())
-                .triggeredRules(List.of())
-                .compromisedAutomationLinks(List.of())
-                .build();
-        FuzzFindingPo finding = FuzzFindingPo.builder()
-                .id(11L)
-                .violatedSpecId("spec-1")
-                .violatedSpecJson(JsonUtils.toJson(specification))
-                .firstViolationStep(1)
-                .statesJson(JsonUtils.toJson(List.of(first, second)))
-                .seed(42L)
-                .stateCount(2)
-                .createdAt(LocalDateTime.now())
-                .build();
+        FuzzTaskPo run = completedRunWithFinding(specification);
+        FuzzFindingPo finding = finding(run, specification);
+        finding.setStatesJson(JsonUtils.toJson(List.of(emptyTraceState(0), emptyTraceState(1))));
+        finding.setFirstViolationStep(1);
+        finding.setStateCount(2);
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(
                 inputEvent(0, "RANDOM_INITIAL_STATE"),
@@ -507,59 +351,48 @@ class FuzzMapperTest {
                 inputEvent(0, "MODEL_CHOICE"),
                 inputEvent(1, "SEED_EVENT"),
                 inputEvent(1, "MODEL_CHOICE"))));
-        assertDoesNotThrow(() -> mapper.toFindingDto(finding));
+        assertEquals(5, mapper.toFindingDto(run, finding, 1L).getInputEvents().size());
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(
                 inputEvent(1, "MODEL_CHOICE"), inputEvent(0, "MODEL_CHOICE"))));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+        assertInvalidFinding(run, finding, "inputEventsJson");
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(
                 inputEvent(0, "MODEL_CHOICE"), inputEvent(0, "SEED_EVENT"))));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+        assertInvalidFinding(run, finding, "inputEventsJson");
 
         finding.setInputEventsJson(JsonUtils.toJson(List.of(
                 inputEvent(1, "RANDOM_INITIAL_STATE"))));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+        assertInvalidFinding(run, finding, "inputEventsJson");
     }
+
 
     @Test
     void persistedRunRejectsInconsistentExecutionStatistics() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.BUDGET_EXHAUSTED,
-                0);
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
 
         run.setIterations(0);
         run.setGeneratedPaths(1L);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
         run.setIterations(1);
         run.setGeneratedPaths(0L);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
         run.setIterations(2);
         run.setGeneratedPaths(1L);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
         run.setGeneratedPaths(3L);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
         run.setPopulationSize(2);
         run.setGeneratedPaths(4L);
-        assertDoesNotThrow(() -> mapper.toRunSummaryDto(run, List.of()));
+        assertDoesNotThrow(() -> mapper.toRunDto(run, List.of()));
         run.setMaxIterations(1);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
     }
 
     @Test
@@ -584,82 +417,52 @@ class FuzzMapperTest {
     }
 
     @Test
-    void runSummaryRejectsOutcomeAndFindingCountContradictions() {
-        FuzzTaskPo run = FuzzTaskPo.builder()
-                .id(7L)
-                .status(FuzzTaskPo.TaskStatus.COMPLETED)
-                .outcome(FuzzOutcome.BUDGET_EXHAUSTED)
-                .findingCount(1)
-                .build();
-        FuzzFindingPo finding = FuzzFindingPo.builder().id(9L).build();
+    void runDetailRejectsOutcomeAndFindingCountContradictions() {
+        SpecificationDto specification = supportedSpecification("spec-1");
+        FuzzTaskPo run = completedRunWithFinding(specification);
+        FuzzFindingPo finding = finding(run, specification);
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of(finding)));
+        run.setOutcome(FuzzOutcome.BUDGET_EXHAUSTED);
+        assertEquals("findingCount", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(run, List.of(finding))).getField());
 
         run.setFindingCount(0);
         run.setOutcome(FuzzOutcome.FOUND_VIOLATION);
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+        assertEquals("findingCount", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(run, List.of())).getField());
 
-        run.setUserId(3L);
         run.setFindingCount(1);
-        FuzzFindingPo crossUserFinding = FuzzFindingPo.builder()
-                .id(10L)
-                .userId(4L)
-                .fuzzTaskId(7L)
-                .violatedSpecId("spec-1")
-                .build();
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of(crossUserFinding)));
+        finding.setUserId(4L);
+        assertEquals("findings", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(run, List.of(finding))).getField());
     }
 
-    @Test
-    void runSummaryRejectsMissingRequiredScalarsAndEligibilityCountDrift() {
-        LocalDateTime createdAt = LocalDateTime.of(2026, 7, 14, 12, 0);
-        ModelInputSnapshot frozenInput = inputSnapshot(List.of(supportedSpecification("spec-1")));
-        FuzzTaskPo run = FuzzTaskPo.builder()
-                .id(12L)
-                .userId(3L)
-                .status(FuzzTaskPo.TaskStatus.COMPLETED)
-                .createdAt(createdAt)
-                .startedAt(createdAt)
-                .completedAt(createdAt.plusSeconds(1))
-                .processingTimeMs(1_000L)
-                .progress(100)
-                .outcome(FuzzOutcome.BUDGET_EXHAUSTED)
-                .iterations(1)
-                .generatedPaths(1L)
-                .elapsedMs(1L)
-                .maxIterations(10)
-                .pathLength(2)
-                .populationSize(1)
-                .findingCount(0)
-                .targetSpecIdsJson("[]")
-                .modelInputSnapshotJson(FuzzModelInputSnapshotCodec.encode(frozenInput))
-                .modelSnapshotJson(JsonUtils.toJson(fuzzSnapshot(createdAt, frozenInput)))
-                .eligibilityJson(JsonUtils.toJson(FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build()))
-                .limitationsJson("[]")
-                .build();
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+    @Test
+    void runDetailRejectsMissingRequiredScalarsAndEligibilityCountDrift() {
+        SpecificationDto specification = supportedSpecification("spec-1");
+        FuzzEligibilityDto eligibility = FuzzEligibilityDto.builder()
+                .eligibleSpecIds(List.of("spec-1"))
+                .requestedSpecCount(1)
+                .eligibleSpecCount(1)
+                .build();
+        FuzzTaskPo run = completedRun(List.of(specification), List.of("spec-1"), eligibility,
+                FuzzOutcome.BUDGET_EXHAUSTED, 0);
+
+        run.setEffectiveSeed(null);
+        assertEquals("effectiveSeed", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(run, List.of())).getField());
 
         run.setEffectiveSeed(42L);
-        run.setEligibilityJson(JsonUtils.toJson(FuzzEligibilityDto.builder()
-                .eligibleSpecIds(List.of("spec-1"))
-                .requestedSpecCount(2)
-                .eligibleSpecCount(1)
-                .build()));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+        eligibility.setRequestedSpecCount(2);
+        run.setEligibilityJson(JsonUtils.toJson(eligibility));
+        assertEquals("eligibilityJson", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunDto(run, List.of())).getField());
     }
 
+
     @Test
-    void runSummaryRejectsUnsupportedEligibleTemplate() {
+    void runDetailRejectsUnsupportedEligibleTemplate() {
         SpecificationDto unsupported = supportedSpecification("spec-1");
         unsupported.setName("Safety requirement");
         unsupported.setTemplateId("6");
@@ -675,11 +478,11 @@ class FuzzMapperTest {
                 0);
 
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
     }
 
     @Test
-    void runSummaryRejectsTargetsAndFindingsOutsideFrozenSpecifications() {
+    void runDetailRejectsTargetsAndFindingsOutsideFrozenSpecifications() {
         SpecificationDto frozen = supportedSpecification("spec-1");
         FuzzTaskPo unknownTargetRun = completedRun(
                 List.of(frozen),
@@ -692,7 +495,7 @@ class FuzzMapperTest {
                 FuzzOutcome.BUDGET_EXHAUSTED,
                 0);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(unknownTargetRun, List.of()));
+                () -> mapper.toRunDto(unknownTargetRun, List.of()));
 
         FuzzTaskPo findingRun = completedRun(
                 List.of(frozen),
@@ -709,22 +512,13 @@ class FuzzMapperTest {
         FuzzFindingPo finding = finding(findingRun, alteredSnapshot);
 
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(findingRun, List.of(finding)));
+                () -> mapper.toRunDto(findingRun, List.of(finding)));
     }
 
     @Test
     void singleFindingDetailStillValidatesItsFrozenRunContext() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.FOUND_VIOLATION,
-                1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         FuzzFindingPo finding = finding(run, specification);
 
         assertEquals(finding.getId(), mapper.toFindingDto(run, finding, 1L).getId());
@@ -741,16 +535,7 @@ class FuzzMapperTest {
     @Test
     void singleFindingDetailRejectsAStoredCountThatDoesNotMatchActualRows() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.FOUND_VIOLATION,
-                1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         FuzzFindingPo finding = finding(run, specification);
 
         assertDoesNotThrow(() -> mapper.toFindingDto(run, finding, 1L));
@@ -764,16 +549,7 @@ class FuzzMapperTest {
     @Test
     void singleFindingDetailRejectsInvalidRunLifecycle() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.FOUND_VIOLATION,
-                1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         FuzzFindingPo finding = finding(run, specification);
         run.setProgress(99);
 
@@ -787,12 +563,7 @@ class FuzzMapperTest {
     @Test
     void findingDetailRejectsMissingAndDuplicateRuleEvidenceIndexes() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.FOUND_VIOLATION, 1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         FuzzFindingPo finding = finding(run, specification);
         TraceTriggeredRuleDto first = TraceTriggeredRuleDto.builder()
                 .ruleIndex(0)
@@ -812,25 +583,18 @@ class FuzzMapperTest {
                 .build();
         finding.setStatesJson(JsonUtils.toJson(List.of(state)));
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+        assertInvalidFinding(run, finding, "statesJson");
 
         first.setRuleIndex(null);
         state.setTriggeredRules(List.of(first));
         finding.setStatesJson(JsonUtils.toJson(List.of(state)));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toFindingDto(finding));
+        assertInvalidFinding(run, finding, "statesJson");
     }
 
     @Test
     void findingDetailRejectsRuleEvidenceOutsideOrDifferentFromFrozenRules() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification), List.of("spec-1"), FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(), FuzzOutcome.FOUND_VIOLATION, 1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         RuleDto frozenRule = RuleDto.builder()
                 .id(7L)
                 .conditions(List.of(RuleDto.Condition.builder()
@@ -907,16 +671,7 @@ class FuzzMapperTest {
     @Test
     void singleFindingDetailRejectsStateCountBeyondRunPathLength() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.FOUND_VIOLATION,
-                1);
+        FuzzTaskPo run = completedRunWithFinding(specification);
         run.setPathLength(1);
         FuzzFindingPo finding = finding(run, specification);
         TraceStateDto first = TraceStateDto.builder()
@@ -940,7 +695,7 @@ class FuzzMapperTest {
     }
 
     @Test
-    void runSummaryRejectsEligibilityThatDoesNotPartitionFrozenTargets() {
+    void runDetailRejectsEligibilityThatDoesNotPartitionFrozenTargets() {
         SpecificationDto first = supportedSpecification("spec-1");
         SpecificationDto second = supportedSpecification("spec-2");
         FuzzTaskPo run = completedRun(
@@ -955,32 +710,30 @@ class FuzzMapperTest {
                 0);
 
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
     }
 
     @Test
-    void runSummaryRejectsMissingSemanticLimitationDisclosure() {
+    void runDetailsAndHistoryRejectMissingSemanticLimitationDisclosure() {
         SpecificationDto specification = supportedSpecification("spec-1");
-        FuzzTaskPo run = completedRun(
-                List.of(specification),
-                List.of("spec-1"),
-                FuzzEligibilityDto.builder()
-                        .eligibleSpecIds(List.of("spec-1"))
-                        .requestedSpecCount(1)
-                        .eligibleSpecCount(1)
-                        .build(),
-                FuzzOutcome.BUDGET_EXHAUSTED,
-                0);
-        run.setLimitationsJson(JsonUtils.toJson(List.of(
+        FuzzTaskPo run = completedRunWithoutFinding(specification);
+        String incompleteLimitations = JsonUtils.toJson(List.of(
                 "FINITE_TRACE_TEMPLATES_1_3_4_ONLY",
-                "ATTACK_TRUST_PRIVACY_CONTENT_UNSUPPORTED")));
+                "ATTACK_TRUST_PRIVACY_CONTENT_UNSUPPORTED"));
+        run.setLimitationsJson(incompleteLimitations);
+        var historyRow = projectedRun(1, 1L, 1, 10);
+        when(historyRow.getLimitationsJson()).thenReturn(incompleteLimitations);
 
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+        assertAll(
+                () -> assertEquals("limitationsJson", assertThrows(PersistedDataIntegrityException.class,
+                        () -> mapper.toRunDto(run, List.of())).getField()),
+                () -> assertEquals("limitationsJson", assertThrows(PersistedDataIntegrityException.class,
+                        () -> mapper.toRunSummaryDtoFromTaskProjection(historyRow, List.of(), projectedPresentation()))
+                        .getField()));
     }
 
     @Test
-    void runSummaryRejectsUnboundedDiagnosticsAndLimitationCount() {
+    void runDetailRejectsUnboundedDiagnosticsAndLimitationCount() {
         SpecificationDto specification = supportedSpecification("spec-1");
         FuzzEligibilityDto eligibility = FuzzEligibilityDto.builder()
                 .eligibleSpecIds(List.of())
@@ -1002,17 +755,18 @@ class FuzzMapperTest {
                 0);
 
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
 
         eligibility.getIneligibleSpecs().get(0).setReason("Model is invalid");
         run.setEligibilityJson(JsonUtils.toJson(eligibility));
-        List<String> limitations = new java.util.ArrayList<>(FuzzLimitationContract.baseCodes());
+        List<String> limitations = new java.util.ArrayList<>(
+                FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT));
         for (int index = limitations.size(); index <= 32; index++) {
             limitations.add("FUTURE_LIMITATION_" + index);
         }
         run.setLimitationsJson(JsonUtils.toJson(limitations));
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(run, List.of()));
+                () -> mapper.toRunDto(run, List.of()));
     }
 
     @Test
@@ -1049,7 +803,7 @@ class FuzzMapperTest {
                 .eligibleSpecCount(1)
                 .build()));
         when(run.getLimitationsJson()).thenReturn(
-                JsonUtils.toJson(FuzzLimitationContract.baseCodes()));
+                JsonUtils.toJson(FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT)));
 
         assertEquals("targetSpecIdsJson", assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(), null)).getField());
@@ -1101,7 +855,7 @@ class FuzzMapperTest {
                 .eligibleSpecCount(1)
                 .build()));
         when(run.getLimitationsJson()).thenReturn(
-                JsonUtils.toJson(FuzzLimitationContract.baseCodes()));
+                JsonUtils.toJson(FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT)));
 
         FuzzFindingSummaryProjection finding = mock(FuzzFindingSummaryProjection.class);
         when(finding.getId()).thenReturn(31L);
@@ -1132,14 +886,14 @@ class FuzzMapperTest {
                 0);
         legacyRun.setExplorationMode(null);
 
+        var taskProjection = projectedRun(1, 1L, 1, 10);
+        when(taskProjection.getExplorationMode()).thenReturn(null);
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toTaskDto(legacyRun));
+                () -> mapper.toTaskDtoProjection(taskProjection));
         assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toTaskSummaryDto(legacyRun));
+                () -> mapper.toTaskSummaryDtoProjection(taskProjection));
         assertThrows(PersistedDataIntegrityException.class,
                 () -> mapper.toRunDto(legacyRun, List.of()));
-        assertThrows(PersistedDataIntegrityException.class,
-                () -> mapper.toRunSummaryDto(legacyRun, List.of()));
     }
 
     @Test
@@ -1310,9 +1064,19 @@ class FuzzMapperTest {
         LocalDateTime completedAt = run.getCompletedAt();
         when(finding.getCreatedAt()).thenReturn(completedAt);
         FuzzRunSummaryDto summary = mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation);
+        assertTrue(summary.isDataAvailable());
+        assertEquals(1, summary.getFindingCount());
+        assertEquals(1, summary.getFindings().size());
+        assertEquals("spec-1", summary.getFindings().get(0).getViolatedSpecId());
+        assertEquals(2, summary.getFindings().get(0).getStateCount());
         assertEquals(specification, summary.getFindings().get(0).getViolatedSpec());
         assertEquals(specification, summary.getEligibleSpecifications().get("spec-1"));
         assertEquals(Map.of("device-1", ModelTokenSource.BUNDLED), summary.getModelTokenSourcesByDeviceId());
+
+        when(finding.getFirstViolationStep()).thenReturn(0);
+        assertEquals("stateCount", assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toRunSummaryDtoFromTaskProjection(run, List.of(finding), presentation)).getField());
+        when(finding.getFirstViolationStep()).thenReturn(1);
 
         when(presentation.getModelTokenSourcesJson()).thenReturn("{\"missing-device\":\"BUNDLED\"}");
         assertThrows(PersistedDataIntegrityException.class,
@@ -1365,7 +1129,7 @@ class FuzzMapperTest {
                 .eligibleSpecCount(1)
                 .build()));
         when(run.getLimitationsJson()).thenReturn(
-                JsonUtils.toJson(FuzzLimitationContract.baseCodes()));
+                JsonUtils.toJson(FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT)));
         return run;
     }
 
@@ -1422,18 +1186,41 @@ class FuzzMapperTest {
                 .generatedPaths(1L)
                 .elapsedMs(1L)
                 .eligibilityJson(JsonUtils.toJson(eligibility))
-                .limitationsJson(JsonUtils.toJson(FuzzLimitationContract.baseCodes()))
+                .limitationsJson(JsonUtils.toJson(FuzzLimitationContract.requiredCodes(FuzzExplorationMode.BOARD_SNAPSHOT)))
                 .findingCount(findingCount)
                 .build();
     }
 
-    private FuzzFindingPo finding(FuzzTaskPo run, SpecificationDto specification) {
-        TraceStateDto state = TraceStateDto.builder()
-                .stateIndex(0)
+    private FuzzTaskPo completedRunWithoutFinding(SpecificationDto specification) {
+        return completedRun(specification, FuzzOutcome.BUDGET_EXHAUSTED, 0);
+    }
+
+    private FuzzTaskPo completedRunWithFinding(SpecificationDto specification) {
+        return completedRun(specification, FuzzOutcome.FOUND_VIOLATION, 1);
+    }
+
+    private FuzzTaskPo completedRun(SpecificationDto specification, FuzzOutcome outcome, int findingCount) {
+        String id = specification.getId();
+        return completedRun(List.of(specification), List.of(id), FuzzEligibilityDto.builder()
+                .eligibleSpecIds(List.of(id)).requestedSpecCount(1).eligibleSpecCount(1).build(),
+                outcome, findingCount);
+    }
+
+    private void assertInvalidFinding(FuzzTaskPo run, FuzzFindingPo finding, String field) {
+        assertEquals(field, assertThrows(PersistedDataIntegrityException.class,
+                () -> mapper.toFindingDto(run, finding, 1L)).getField());
+    }
+
+    private TraceStateDto emptyTraceState(int index) {
+        return TraceStateDto.builder()
+                .stateIndex(index)
                 .devices(List.of())
                 .triggeredRules(List.of())
                 .compromisedAutomationLinks(List.of())
                 .build();
+    }
+
+    private FuzzFindingPo finding(FuzzTaskPo run, SpecificationDto specification) {
         return FuzzFindingPo.builder()
                 .id(30L)
                 .userId(run.getUserId())
@@ -1441,7 +1228,7 @@ class FuzzMapperTest {
                 .violatedSpecId(specification.getId())
                 .violatedSpecJson(JsonUtils.toJson(specification))
                 .firstViolationStep(0)
-                .statesJson(JsonUtils.toJson(List.of(state)))
+                .statesJson(JsonUtils.toJson(List.of(emptyTraceState(0))))
                 .inputEventsJson("[]")
                 .seed(run.getEffectiveSeed())
                 .stateCount(1)

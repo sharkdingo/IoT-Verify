@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.SplittableRandom;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -116,26 +117,54 @@ public final class FuzzEngine {
                     limitations);
         }
 
+        SearchContext context = new SearchContext(config, effectiveSeed, progressReporter, cancellation,
+                deadline, eligible, eligibility, limitations, startedAt);
         if (config.explorationMode() == FuzzExplorationMode.PAPER_COMPATIBLE) {
-            return runPaperCompatible(
-                    Objects.requireNonNull(model),
-                    Objects.requireNonNull(paperEventDomain),
-                    config,
-                    effectiveSeed,
-                    progressReporter,
-                    cancellation,
-                    deadline,
-                    eligible,
-                    eligibility,
-                    limitations,
-                    startedAt);
+            return runPaperCompatible(Objects.requireNonNull(model), Objects.requireNonNull(paperEventDomain), context);
         }
+        return runAdaptive(model, random, context);
+    }
 
-        progressReporter.report(0, "Preparing deterministic population");
+    private FuzzEngineResult runAdaptive(FuzzModel model, SplittableRandom random, SearchContext context) {
+        var config = context.config();
+        context.progress().report(0, "Preparing deterministic population");
         int geneCount = model.geneCount(config.pathLength());
         List<Genome> population = initialPopulation(random, config.populationSize(), geneCount);
+        PopulationPolicy<Genome, GenomeParent> policy = new PopulationPolicy<>(
+                (genome, unresolved) -> model.simulate(
+                        genome.genes(), config.pathLength(), context.cancellation(), unresolved),
+                model::evaluate,
+                (genome, simulation, distance) -> new GenomeParent(
+                        genome.copy(), simulation.mutableChoiceBounds(), distance),
+                (parents, generation) -> nextPopulation(random, parents, config.populationSize(), geneCount, generation));
+        return runPopulation(population, policy, context);
+    }
+
+    private FuzzEngineResult runPaperCompatible(
+            FuzzModel model, PaperEventDomainSnapshot eventDomain, SearchContext context) {
+        var config = context.config();
+        context.progress().report(0, "Preparing paper-compatible Event population");
+        PaperSeedKernel seedKernel = new PaperSeedKernel(eventDomain, context.effectiveSeed());
+        List<PaperSeed> population = seedKernel.initialPopulation(config.populationSize());
+        PopulationPolicy<PaperSeed, PaperParent> policy = new PopulationPolicy<>(
+                (seed, unresolved) -> model.simulatePaperSeed(
+                        seed, eventDomain, config.pathLength(), context.cancellation(), unresolved),
+                (specification, simulation) -> model.evaluatePaper(specification, simulation, PAPER_SOLVER_LEVELS),
+                (seed, simulation, distance) -> new PaperParent(seed, distance),
+                (parents, generation) -> nextPaperPopulation(seedKernel, parents, config.populationSize(), generation));
+        return runPopulation(population, policy, context);
+    }
+
+    private <G, P extends RankedParent> FuzzEngineResult runPopulation(
+            List<G> population, PopulationPolicy<G, P> policy, SearchContext context) {
+        var config = context.config();
+        List<SpecificationDto> eligible = context.eligible();
+        BooleanSupplier cancellation = context.cancellation();
+        BooleanSupplier deadline = context.deadline();
+        boolean paper = config.explorationMode() == FuzzExplorationMode.PAPER_COMPATIBLE;
+        String iterationLabel = paper ? "Completed paper-compatible fuzz iteration " : "Completed fuzz iteration ";
         Map<String, FuzzFinding> findings = new LinkedHashMap<>();
-        Map<String, CandidateScore> bestBySpecification = new LinkedHashMap<>();
+        Map<String, P> bestBySpecification = new LinkedHashMap<>();
         long generatedPaths = 0;
         int completedIterations = 0;
         boolean wasCancelled = false;
@@ -146,15 +175,18 @@ public final class FuzzEngine {
                 wasCancelled = true;
                 break;
             }
-            // The deadline is cooperative between candidates; cancellation is also polled inside simulation.
-            // Expiration preserves completed findings rather than taking the cancellation path.
+            // The deadline is cooperative between candidates. Simulation also polls cancellation inside a path.
             if (deadline.getAsBoolean()) {
                 outOfTime = true;
                 break;
             }
+            // Paper re-selects parents per generation. Adaptive search keeps its best unresolved candidates.
+            if (paper) {
+                bestBySpecification.clear();
+            }
 
             boolean evaluatedAny = false;
-            for (Genome genome : population) {
+            for (G candidate : population) {
                 if (cancellation.getAsBoolean()) {
                     wasCancelled = true;
                     break;
@@ -164,42 +196,32 @@ public final class FuzzEngine {
                     break;
                 }
 
-                List<SpecificationDto> unresolvedSpecifications = eligible.stream()
+                List<SpecificationDto> unresolved = eligible.stream()
                         .filter(specification -> !findings.containsKey(specification.getId()))
                         .toList();
-                if (unresolvedSpecifications.isEmpty()) {
+                if (unresolved.isEmpty()) {
                     break;
                 }
-                FuzzModel.Simulation simulation = model.simulate(
-                        genome.genes(),
-                        config.pathLength(),
-                        cancellation,
-                        unresolvedSpecifications);
+                FuzzModel.Simulation simulation = policy.simulate().apply(candidate, unresolved);
                 if (simulation.cancelled()) {
                     wasCancelled = true;
                     break;
                 }
                 generatedPaths++;
                 evaluatedAny = true;
-                for (SpecificationDto specification : unresolvedSpecifications) {
-                    FuzzModel.SpecEvaluation evaluation = model.evaluate(specification, simulation);
+                for (SpecificationDto specification : unresolved) {
+                    String id = specification.getId();
+                    FuzzModel.SpecEvaluation evaluation = policy.evaluate().apply(specification, simulation);
                     if (evaluation.violationStep() >= 0) {
-                        int endExclusive = evaluation.violationStep() + 1;
-                        findings.put(specification.getId(), new FuzzFinding(
-                                specification,
-                                evaluation.violationStep(),
-                                simulation.traceStates().subList(0, endExclusive),
-                                simulation.eventsThrough(evaluation.violationStep())));
-                        bestBySpecification.remove(specification.getId());
+                        int step = evaluation.violationStep();
+                        findings.put(id, new FuzzFinding(specification, step,
+                                simulation.traceStates().subList(0, step + 1), simulation.eventsThrough(step)));
+                        bestBySpecification.remove(id);
                     } else {
-                        CandidateScore previous = bestBySpecification.get(specification.getId());
+                        P previous = bestBySpecification.get(id);
                         if (previous == null || evaluation.distance() < previous.distance()) {
-                            bestBySpecification.put(
-                                    specification.getId(),
-                                    new CandidateScore(
-                                            genome.copy(),
-                                            simulation.mutableChoiceBounds(),
-                                            evaluation.distance()));
+                            bestBySpecification.put(id,
+                                    policy.ranker().rank(candidate, simulation, evaluation.distance()));
                         }
                     }
                 }
@@ -211,204 +233,60 @@ public final class FuzzEngine {
             if (evaluatedAny) {
                 completedIterations = iteration + 1;
             }
-            int percent = config.maxIterations() == 0
-                    ? 100
-                    : Math.min(100, (int) (((long) completedIterations * 100L) / config.maxIterations()));
-            progressReporter.report(percent, "Completed fuzz iteration " + completedIterations);
+            int percent = Math.min(100, (int) (((long) completedIterations * 100L) / config.maxIterations()));
+            context.progress().report(percent, iterationLabel + completedIterations);
             if (wasCancelled || outOfTime || findings.size() == eligible.size()) {
                 break;
             }
-            List<CandidateScore> parents = eligible.stream()
+
+            List<P> parents = eligible.stream()
                     .filter(specification -> !findings.containsKey(specification.getId()))
                     .map(specification -> bestBySpecification.get(specification.getId()))
                     .filter(Objects::nonNull)
                     .toList();
-            population = nextPopulation(
-                    random,
-                    parents,
-                    config.populationSize(),
-                    geneCount,
-                    iteration + 1);
+            population = policy.advance().apply(parents, iteration + 1);
         }
 
-        FuzzEngineOutcome outcome;
-        if (wasCancelled) {
-            outcome = FuzzEngineOutcome.CANCELLED;
-        } else if (!findings.isEmpty()) {
-            outcome = FuzzEngineOutcome.FINDINGS_FOUND;
-        } else {
-            outcome = FuzzEngineOutcome.BUDGET_EXHAUSTED;
-        }
-        // Disclosed whenever the clock ended the search, including when findings were already located: the
-        // run stopped short of the requested budget either way, so a reader must not take its coverage for
-        // what was asked. Cancellation persists no result, so the code cannot mislead there.
-        if (outOfTime && !wasCancelled) {
-            limitations.add(TIME_BUDGET_EXHAUSTED_LIMITATION);
-        }
-        if (!wasCancelled) {
-            progressReporter.report(100, outOfTime
-                    ? "Time budget exhausted"
-                    : findings.isEmpty() ? "Search budget exhausted" : "Fuzz findings ready");
-        }
-        return result(
-                outcome,
-                effectiveSeed,
-                completedIterations,
-                generatedPaths,
-                startedAt,
-                new ArrayList<>(findings.values()),
-                eligibility,
-                limitations);
+        FuzzEngineOutcome outcome = finishSearch(config.explorationMode(), wasCancelled, outOfTime,
+                !findings.isEmpty(), context.limitations(), context.progress());
+        return result(outcome, context.effectiveSeed(), completedIterations, generatedPaths, context.startedAt(),
+                new ArrayList<>(findings.values()), context.eligibility(), context.limitations());
     }
 
-    private static FuzzEngineResult runPaperCompatible(
-            FuzzModel model,
-            PaperEventDomainSnapshot eventDomain,
-            FuzzEngineConfig config,
-            long effectiveSeed,
-            ProgressReporter progressReporter,
-            BooleanSupplier cancellation,
-            BooleanSupplier deadline,
-            List<SpecificationDto> eligible,
-            List<FuzzSpecEligibility> eligibility,
-            List<String> limitations,
-            long startedAt) {
-        progressReporter.report(0, "Preparing paper-compatible Event population");
-        PaperSeedKernel seedKernel = new PaperSeedKernel(eventDomain, effectiveSeed);
-        List<PaperSeed> population = seedKernel.initialPopulation(config.populationSize());
-        Map<String, FuzzFinding> findings = new LinkedHashMap<>();
-        long generatedPaths = 0;
-        int completedIterations = 0;
-        boolean wasCancelled = false;
-        boolean outOfTime = false;
-
-        for (int iteration = 0; iteration < config.maxIterations(); iteration++) {
-            if (cancellation.getAsBoolean()) {
-                wasCancelled = true;
-                break;
-            }
-            if (deadline.getAsBoolean()) {
-                outOfTime = true;
-                break;
-            }
-            Map<String, PaperCandidateScore> generationBest = new LinkedHashMap<>();
-            boolean evaluatedAny = false;
-            for (PaperSeed seed : population) {
-                if (cancellation.getAsBoolean()) {
-                    wasCancelled = true;
-                    break;
-                }
-                if (deadline.getAsBoolean()) {
-                    outOfTime = true;
-                    break;
-                }
-                List<SpecificationDto> unresolvedSpecifications = eligible.stream()
-                        .filter(specification -> !findings.containsKey(specification.getId()))
-                        .toList();
-                if (unresolvedSpecifications.isEmpty()) {
-                    break;
-                }
-                FuzzModel.Simulation simulation = model.simulatePaperSeed(
-                        seed,
-                        eventDomain,
-                        config.pathLength(),
-                        cancellation,
-                        unresolvedSpecifications);
-                if (simulation.cancelled()) {
-                    wasCancelled = true;
-                    break;
-                }
-                generatedPaths++;
-                evaluatedAny = true;
-                for (SpecificationDto specification : unresolvedSpecifications) {
-                    FuzzModel.SpecEvaluation evaluation = model.evaluatePaper(
-                            specification,
-                            simulation,
-                            PAPER_SOLVER_LEVELS);
-                    if (evaluation.violationStep() >= 0) {
-                        int endExclusive = evaluation.violationStep() + 1;
-                        findings.put(specification.getId(), new FuzzFinding(
-                                specification,
-                                evaluation.violationStep(),
-                                simulation.traceStates().subList(0, endExclusive),
-                                simulation.eventsThrough(evaluation.violationStep())));
-                    } else {
-                        PaperCandidateScore previous = generationBest.get(specification.getId());
-                        if (previous == null || evaluation.distance() < previous.distance()) {
-                            generationBest.put(
-                                    specification.getId(),
-                                    new PaperCandidateScore(seed, evaluation.distance()));
-                        }
-                    }
-                }
-                if (findings.size() == eligible.size()) {
-                    break;
-                }
-            }
-
-            if (evaluatedAny) {
-                completedIterations = iteration + 1;
-            }
-            int percent = Math.min(
-                    100,
-                    (int) (((long) completedIterations * 100L) / config.maxIterations()));
-            progressReporter.report(percent, "Completed paper-compatible fuzz iteration " + completedIterations);
-            if (wasCancelled || outOfTime || findings.size() == eligible.size()) {
-                break;
-            }
-
-            List<PaperSeed> parents = eligible.stream()
-                    .filter(specification -> !findings.containsKey(specification.getId()))
-                    .map(specification -> generationBest.get(specification.getId()))
-                    .filter(Objects::nonNull)
-                    .map(PaperCandidateScore::seed)
-                    .toList();
-            if (parents.isEmpty()) {
-                population = seedKernel.initialPopulation(config.populationSize());
-            } else {
-                List<PaperSeed> next = new ArrayList<>(config.populationSize());
-                for (int slot = 0; slot < config.populationSize(); slot++) {
-                    int parentIndex = paperParentIndexForSlot(
-                            iteration + 1,
-                            config.populationSize(),
-                            slot,
-                            parents.size());
-                    PaperSeed parent = parents.get(parentIndex);
-                    next.add(seedKernel.nextSeed(parent).seed());
-                }
-                population = List.copyOf(next);
-            }
+    private static List<PaperSeed> nextPaperPopulation(
+            PaperSeedKernel kernel, List<PaperParent> parents, int size, int nextGeneration) {
+        if (parents.isEmpty()) {
+            return kernel.initialPopulation(size);
         }
-
-        FuzzEngineOutcome outcome;
-        if (wasCancelled) {
-            outcome = FuzzEngineOutcome.CANCELLED;
-        } else if (!findings.isEmpty()) {
-            outcome = FuzzEngineOutcome.FINDINGS_FOUND;
-        } else {
-            outcome = FuzzEngineOutcome.BUDGET_EXHAUSTED;
+        List<PaperSeed> next = new ArrayList<>(size);
+        for (int slot = 0; slot < size; slot++) {
+            int parentIndex = paperParentIndexForSlot(nextGeneration, size, slot, parents.size());
+            next.add(kernel.nextSeed(parents.get(parentIndex).seed()).seed());
         }
-        if (outOfTime && !wasCancelled) {
+        return List.copyOf(next);
+    }
+
+    private static FuzzEngineOutcome finishSearch(
+            FuzzExplorationMode mode, boolean cancelled, boolean timedOut, boolean found,
+            List<String> limitations, ProgressReporter progressReporter) {
+        // A cancelled search publishes no final progress and the service does not persist its result.
+        if (cancelled) {
+            return FuzzEngineOutcome.CANCELLED;
+        }
+        FuzzEngineOutcome outcome = found ? FuzzEngineOutcome.FINDINGS_FOUND : FuzzEngineOutcome.BUDGET_EXHAUSTED;
+        boolean paper = mode == FuzzExplorationMode.PAPER_COMPATIBLE;
+        String message;
+        if (timedOut) {
+            // Disclose early termination even when the search already found a counterexample.
             limitations.add(TIME_BUDGET_EXHAUSTED_LIMITATION);
+            message = paper ? "Paper-compatible time budget exhausted" : "Time budget exhausted";
+        } else if (found) {
+            message = paper ? "Paper-compatible fuzz findings ready" : "Fuzz findings ready";
+        } else {
+            message = paper ? "Paper-compatible search budget exhausted" : "Search budget exhausted";
         }
-        if (!wasCancelled) {
-            progressReporter.report(
-                    100,
-                    outOfTime
-                            ? "Paper-compatible time budget exhausted"
-                            : findings.isEmpty()
-                                    ? "Paper-compatible search budget exhausted"
-                                    : "Paper-compatible fuzz findings ready");
-        }
-        return result(
-                outcome,
-                effectiveSeed,
-                completedIterations,
-                generatedPaths,
-                startedAt,
-                new ArrayList<>(findings.values()),
-                eligibility,
-                limitations);
+        progressReporter.report(100, message);
+        return outcome;
     }
 
     private static void validateInput(FuzzEngineInput input) {
@@ -546,7 +424,7 @@ public final class FuzzEngine {
 
     private static List<Genome> nextPopulation(
             SplittableRandom random,
-            List<CandidateScore> parents,
+            List<GenomeParent> parents,
             int size,
             int geneCount,
             int nextGeneration) {
@@ -557,7 +435,7 @@ public final class FuzzEngine {
                 continue;
             }
             long parentOrdinal = parentOrdinalForSlot(nextGeneration, size, slot);
-            CandidateScore parent = parents.get((int) Math.floorMod(parentOrdinal, parents.size()));
+            GenomeParent parent = parents.get((int) Math.floorMod(parentOrdinal, parents.size()));
             Genome mutated = mutatedCopy(random, parent);
             next.add(mutated == null ? randomGenome(random, geneCount) : mutated);
         }
@@ -592,7 +470,7 @@ public final class FuzzEngine {
         return new Genome(genes);
     }
 
-    private static Genome mutatedCopy(SplittableRandom random, CandidateScore parent) {
+    private static Genome mutatedCopy(SplittableRandom random, GenomeParent parent) {
         if (parent.mutableChoiceBounds().isEmpty()) {
             return null;
         }
@@ -689,13 +567,33 @@ public final class FuzzEngine {
         }
     }
 
-    private record CandidateScore(
-            Genome genome,
-            Map<Integer, Integer> mutableChoiceBounds,
-            double distance) {
+    private interface RankedParent {
+        double distance();
     }
 
-    private record PaperCandidateScore(PaperSeed seed, double distance) {
+    private record GenomeParent(Genome genome, Map<Integer, Integer> mutableChoiceBounds, double distance)
+            implements RankedParent {
+    }
+
+    private record PaperParent(PaperSeed seed, double distance) implements RankedParent {
+    }
+
+    @FunctionalInterface
+    private interface CandidateRanker<G, P extends RankedParent> {
+        P rank(G candidate, FuzzModel.Simulation simulation, double distance);
+    }
+
+    private record PopulationPolicy<G, P extends RankedParent>(
+            BiFunction<G, List<SpecificationDto>, FuzzModel.Simulation> simulate,
+            BiFunction<SpecificationDto, FuzzModel.Simulation, FuzzModel.SpecEvaluation> evaluate,
+            CandidateRanker<G, P> ranker,
+            BiFunction<List<P>, Integer, List<G>> advance) {
+    }
+
+    private record SearchContext(
+            FuzzEngineConfig config, long effectiveSeed, ProgressReporter progress,
+            BooleanSupplier cancellation, BooleanSupplier deadline, List<SpecificationDto> eligible,
+            List<FuzzSpecEligibility> eligibility, List<String> limitations, long startedAt) {
     }
 
     private record Selection(List<SpecificationDto> specifications) {

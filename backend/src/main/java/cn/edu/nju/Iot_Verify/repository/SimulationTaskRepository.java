@@ -203,25 +203,4 @@ public interface SimulationTaskRepository extends JpaRepository<SimulationTaskPo
                                @Param("stage") TaskProgressStage stage,
                                @Param("workerId") String workerId,
                                @Param("currentTime") LocalDateTime currentTime);
-
-    /** Persist the assumptions under which this task will run without replacing task state. */
-    @Transactional
-    @Modifying(clearAutomatically = true)
-    @Query("UPDATE SimulationTaskPo t SET t.isAttack = :isAttack, "
-         + "t.attackBudget = :attackBudget, t.enablePrivacy = :enablePrivacy, "
-         + "t.modeledDeviceAttackPointCount = :devicePointCount, "
-         + "t.modeledFalsifiableReadingDeviceCount = :falsifiableReadingDeviceCount, "
-         + "t.modeledAutomationLinkAttackPointCount = :linkPointCount, "
-         + "t.modelSnapshotJson = :modelSnapshotJson, "
-         + "t.modelSemanticsJson = :modelSemanticsJson "
-         + "WHERE t.id = :taskId")
-    int updateModelContext(@Param("taskId") Long taskId,
-                           @Param("isAttack") boolean isAttack,
-                           @Param("attackBudget") int attackBudget,
-                           @Param("enablePrivacy") boolean enablePrivacy,
-                           @Param("devicePointCount") int devicePointCount,
-                           @Param("falsifiableReadingDeviceCount") int falsifiableReadingDeviceCount,
-                           @Param("linkPointCount") int linkPointCount,
-                           @Param("modelSnapshotJson") String modelSnapshotJson,
-                           @Param("modelSemanticsJson") String modelSemanticsJson);
 }

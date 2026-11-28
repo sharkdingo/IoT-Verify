@@ -1,5 +1,7 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import org.springframework.test.util.ReflectionTestUtils;
+
 import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.Map;
@@ -12,9 +14,8 @@ final class LeaseConfirmationTestSupport {
 
     static void ageExecutionLease(
             Object service, String executionMapField, Object executionKey, Duration elapsed) throws Exception {
-        Field mapField = service.getClass().getDeclaredField(executionMapField);
-        mapField.setAccessible(true);
-        Object execution = ((Map<?, ?>) mapField.get(service)).get(executionKey);
+        Map<?, ?> executions = (Map<?, ?>) ReflectionTestUtils.getField(service, executionMapField);
+        Object execution = executions.get(executionKey);
         if (execution == null) {
             throw new AssertionError("No local execution registered for " + executionKey);
         }

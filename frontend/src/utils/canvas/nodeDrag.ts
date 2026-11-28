@@ -42,17 +42,6 @@ export const updateNodeDrag = (
     return true
 }
 
-/**
- * Get the current drag position (temporary during drag, committed position after drag ends).
- * Used for rendering the dragging node at its visual position.
- */
-export const getNodeDragPosition = (node: DeviceNode, dragState: NodeDragState): { x: number; y: number } => {
-    if (dragState.node === node && dragState.tempPosition) {
-        return dragState.tempPosition
-    }
-    return node.position
-}
-
 export const endNodeDrag = (dragState: NodeDragState): DeviceNode | null => {
     const node = dragState.node
     if (node && dragState.tempPosition) {

@@ -24,8 +24,7 @@ class AiToolResponseHelperTest {
 
         String result = AiToolResponseHelper.success(
                 failingMapper,
-                Map.of("message", "ok"),
-                "Operation accepted.");
+                Map.of("message", "ok"));
 
         JsonNode json = new ObjectMapper().readTree(result);
         assertEquals("RESULT_UNAVAILABLE", json.path("resultStatus").asText());

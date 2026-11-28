@@ -201,8 +201,7 @@ public class AiToolManager {
                     : "Tool result details exceeded the safe size limit. Retry with a narrower filter or request fewer details.");
             body.put("resultBytes", resultBytes);
             body.put("maxResultBytes", chatExecutionConfig.getMaxToolResultBytes());
-            return AiToolResponseHelper.success(objectMapper, body, "Tool result exceeded the safe size limit.",
-                    mutationMayHaveCommitted);
+            return AiToolResponseHelper.success(objectMapper, body, mutationMayHaveCommitted);
         }
         if (AiToolResultContract.isMutationCapable(functionName) && !isNonEmptyJsonObject(safeResult)) {
             log.warn("Mutation-capable AI tool '{}' returned an unusable result", functionName);
@@ -265,8 +264,7 @@ public class AiToolManager {
         body.put("mutationMayHaveCommitted", true);
         body.put("errorCode", errorCode);
         body.put("message", message);
-        return AiToolResponseHelper.success(objectMapper, body,
-                "Tool execution outcome is unavailable.", true);
+        return AiToolResponseHelper.success(objectMapper, body, true);
     }
 
     private String errorJson(String message, String errorCode, int status) {

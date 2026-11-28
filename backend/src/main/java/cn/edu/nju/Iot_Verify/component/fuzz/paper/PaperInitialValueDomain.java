@@ -88,25 +88,7 @@ public record PaperInitialValueDomain(
                     ? legalValues.get(random.nextInt(legalValues.size()))
                     : PaperRandomChoice.different(random, legalValues, excluded);
         }
-        long size = (long) upperBound - lowerBound + 1L;
-        long excludedOffset = numericOffset(excluded);
-        long available = excludedOffset >= 0L ? size - 1L : size;
-        if (available <= 0L) return Integer.toString(lowerBound);
-        long offset = random.nextLong(available);
-        if (excludedOffset >= 0L && offset >= excludedOffset) offset++;
-        return Long.toString((long) lowerBound + offset);
-    }
-
-    private long numericOffset(String value) {
-        if (value == null) return -1L;
-        try {
-            long numeric = Long.parseLong(value);
-            return numeric < lowerBound || numeric > upperBound
-                    ? -1L
-                    : numeric - lowerBound;
-        } catch (NumberFormatException exception) {
-            return -1L;
-        }
+        return Long.toString(PaperRandomChoice.numeric(random, lowerBound, upperBound, excluded));
     }
 
     private static List<String> immutableValues(List<String> input) {

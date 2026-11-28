@@ -73,6 +73,19 @@ link stays meaningful for anyone with access to that run.
   constraints. Multiple candidates offer Apply All alongside individual actions.
   Apply All uses sequential targeted writes with one undo entry per item; it stops
   on cancellation, failure, an unconfirmed outcome, or a changed scene/account.
+  A lost write response triggers a Board snapshot read in the same queue slot. If
+  that snapshot contains the item, the UI shows it on the Board and keeps it out of
+  the batch's confirmed count. The batch stops before submitting the next item.
+  Rule batches run a single read-only [similarity preflight](../api/board.md#recommendation-duplicate-check-and-ai-similarity-check)
+  before any writes. An exact match stops the batch at that candidate. Advisory AI
+  similarity asks for confirmation at the candidate's turn. A failed preflight writes nothing.
+  After a lost rule-save response, the editor or candidate retains an unconfirmed notice
+  and blocks another submission of that draft. Returning to the same draft restores the
+  notice. A server check can locate an equivalent rule after the Board refresh, while the
+  original write receipt remains unconfirmed.
+  Requirement creation keeps the editor draft or recommendation card with its unconfirmed
+  result. An equivalent requirement on the refreshed Board appears in the inspector. The draft
+  or card stays blocked from repeat submission, and only a confirmed receipt marks it applied.
   Confirmed items remain visible with an applied count. The completed/stopped batch
   cannot be submitted again; generating fresh recommendations clears its state.
   Receipts belong to each recommendation kind; starting or cancelling another kind
@@ -93,6 +106,8 @@ link stays meaningful for anyone with access to that run.
 
 - **One authority per value.** The URL owns `run`/`trace`/`finding`. History openers navigate
   and load the addressed artifact; refresh and browser navigation use the same loaders.
+  Repeatedly opening the same pending artifact starts one read. Only the current visit may
+  present its result or read failure, even when Back or Forward returns to the same address.
   Closing the list or changing its selection discards its pending detail and clears only that run
   address. These actions leave a load started by an incoming URL in progress.
   A verification completion adopts its received verdict, staleness evidence and confirmed saved
@@ -128,13 +143,18 @@ link stays meaningful for anyone with access to that run.
   transition that preserves the URL; `dismiss*` clears the result target it owns while playback
   is absent. Dismissing an unrelated error must preserve the replay URL. Replay teardown must also clear the URL
   so the watcher cannot reopen deleted evidence.
+  History deletes verification, observation, and exploration results by saved ID. If the
+  delete receipt is missing or reports that the result is already absent, read the addressed
+  result directly. A 404 removes the row and its views and notifies other tabs, while the
+  original delete remains unconfirmed. Keep the row and its page when the result is still
+  readable or the check is inconclusive. The recovery read does not submit another delete.
   On a history invalidation from another tab or the assistant, check the saved record addressed
   by the open link independently of the history lists. For a verification replay this is the
   counterexample itself, which can be deleted separately from its run. A confirmed 404 closes
   that result or replay, preserves unrelated URL parameters, and leaves newer navigation alone.
   If only a counterexample was deleted, an open verification result keeps the verdict and
-  removes the deleted counterexample from its replay actions. A pending result read reloads
-  the addressed evidence so it cannot open with the deleted action.
+  removes the deleted counterexample from its replay actions. A pending result read uses the
+  checked run and reloads its evidence so it cannot open with the deleted action.
   A foreground exploration result opened by task completion checks its own saved run ID
   when there is no run address in the URL.
   Preserve replay when the only signal is an empty or paginated list or a temporary read failure.
@@ -203,8 +223,13 @@ user must act**.
   Rejected changes explain that preserving already-satisfied requirements is part of acceptance.
   Confirmed apply adopts the returned rules through the shared semantic commit, including canvas
   edges, inspector focus, verdict staleness and journal availability; it does not read rules again.
-  The apply request and receipt share the Board's edit queue so a refresh from another tab can
-  reconcile the scene after the receipt has been applied.
+  An unconfirmed apply reads one complete Board snapshot inside the same edit queue slot.
+  It adopts the current collections and undo revision while keeping the apply outcome
+  unconfirmed. The dialog locks apply until recovery settles. The current Board session
+  withdraws that trace's Fix action from the verdict and History. Other eligible traces in
+  the same run remain repairable while the refreshed model matches the run. When the model
+  differs, both surfaces require fresh verification before any trace in the run can be repaired.
+  A refresh queued from another tab can proceed after the receipt or recovery has settled.
   The success message names the applied edit and undo availability; the proposal owns its evidence
   and remaining violations. Condition-change and removed-rule names wrap inside narrow cards.
   Fault-localization and strategy-request failures retain message keys and diagnostic snapshots;
@@ -216,8 +241,7 @@ user must act**.
   card while tracking still owns the request.
   Typed preflight unavailability or a busy formal-operation permit keeps the signed proposal
   available for retrying apply;
-  a changed model still requires verification and a new proposal. Unclassified infrastructure errors
-  remain unconfirmed writes and trigger reconciliation. Failure acknowledgements do not repeat an
+  a changed model still requires verification and a new proposal. Failure acknowledgements do not repeat an
   identical title as their body summary. The close icon uses the shared keyboard-accessible hint.
   When a search cannot confirm the template comparison, its recovery action reruns the selected
   strategy. Apply becomes available after a new result confirms the templates still match.
@@ -291,6 +315,10 @@ user must act**.
   next step. Do not repeat the cause in the expandable section or list hypothetical causes.
   A confirmed template import with an unavailable catalog leaves the page's Retry
   control reachable and retries the catalog read, never the confirmed write.
+  An unconfirmed template import recovers the Board from one snapshot and keeps the
+  outcome beside file selection. Re-selecting the same template name in the current
+  Board shows that outcome without another write. The name becomes available again
+  when the catalog shows that the previously visible template was removed.
   A failed recommendation is distinct from a successful response with no candidates.
   Applying a candidate has its own failure feedback beside that candidate; it does not
   turn a successful generation into a failed generation. Exact duplicate-rule rejection
@@ -370,11 +398,11 @@ ends up destroying work.
   its edit (or vice versa) would offer an undo to a state that never existed.
 - **Undo never overwrites newer work.** If the affected record changed after the edit was recorded,
   the undo is refused with a conflict and the board is left untouched.
-- **A failed undo response is not proof that no write committed.** A non-`409` transport or response-
-  contract failure is an unconfirmed outcome. Reconcile the complete authoritative snapshot through
-  the board-mutation queue before reporting it; if refresh also fails, say the outcome is unknown
-  and do not invite an immediate retry. A `409` proves this request wrote nothing but still requires
-  refresh because the conflict proves the local board may be stale.
+- **Undo and redo distinguish a rejection from a lost receipt.** A conflict (`409`) or an unconfirmed
+  response reads one complete Board snapshot in the mutation queue. Other definite rejections
+  report the failure directly. A lost response remains unconfirmed, and the same direction stays
+  blocked while its requested history revision is still current. A newer observed revision allows
+  another deliberate action. Late responses belong only to the Board and session that sent them.
 - **A new edit invalidates redo.** Redoing an abandoned branch would silently overwrite the new
   edit, so the branch is discarded rather than left as a trap.
 - **Nothing to undo is a normal outcome**, not an error, which makes repeated presses idempotent.
@@ -399,6 +427,10 @@ ends up destroying work.
   checks the same active layout ownership before queueing and again when its queue slot is reached,
   so server history cannot change underneath an uncommitted drag or resize. While undo/redo is pending,
   the existing canvas interaction lock prevents a new node gesture from starting before reconciliation.
+  A completed gesture shows its layout immediately and submits it once in the Board queue. A lost
+  receipt reads one snapshot in that slot and adopts its undo version. Newer pending layouts and held
+  gestures keep their geometry while the snapshot is adopted. Cancelling a held gesture reveals the
+  latest saved layout. A current lost receipt stays unconfirmed even when its layout matches the snapshot.
 - **Never intercept a keystroke in a text field, a `contenteditable` region, or during an IME
   composition.** A user fixing a typo must not resurrect a deleted rule.
 - **Undoability follows the user's unit of work, not the storage shape.** Rule reorder changes no
@@ -418,8 +450,36 @@ ends up destroying work.
   edit history and the current verdict. Partial and full refreshes reuse the same focus reconciliation rule, so
   an item removed by another tab or by a response-lost mutation cannot remain selected.
 - **Device deletion adopts one snapshot.** The preview pairs the reviewed impact with the current Board.
-  The confirmation receipt pairs the committed result with the updated Board. An expired confirmation
-  closes and asks for a new review after a successful refresh.
+  The queued write rechecks the reviewed Board state before sending the impact token. The confirmation
+  receipt supplies the updated Board. An expired confirmation closes and asks for a new review after a
+  successful refresh. An unconfirmed deletion reads one snapshot in the same queue slot and reports
+  whether the device is still present. The same impact token stays blocked while its result is
+  unconfirmed and the device remains. The snapshot supplies the revision for compound undo.
+- **Rule and specification deletion rechecks the reviewed item in the queue.** A stale
+  confirmation requires a new review. A lost receipt reads one Board snapshot in the same queue
+  slot. The list shows the item from that snapshot and blocks repeating the same deletion while
+  the reviewed item remains and the outcome is unknown. If the item is gone, the message reports
+  its absence and keeps the deletion unconfirmed. Undo uses the snapshot's journal revision to
+  restore the deleted item at its recorded position.
+- **Rule priority follows the displayed order.** Each up/down press uses the order visible at
+  the time of the click. A queued move expires if that order changes. The arrows stay disabled
+  through the write and any recovery read. A conflict adopts the current order and asks for a
+  fresh move. A lost receipt keeps the outcome unconfirmed and reads one snapshot with the
+  current order and undo revision. If the order still matches the submitted baseline or recovery
+  fails, further moves stay paused until a different order is loaded or the board is reloaded.
+- **Environment Pool drafts keep their opening baseline.** If another tab changes the variable
+  during editing, a stale save refreshes the Board, preserves the draft, and shows the conflict
+  beside its value. Revising the rejected draft uses the newly displayed baseline. A lost receipt
+  reads one Board snapshot in the mutation queue and keeps the draft even when the snapshot matches it.
+  The same submission stays blocked against the recovered values. Undo uses the recovered journal
+  revision to restore the previous values and lets the user submit a fresh edit.
+  [Changes to which variables exist](../api/board.md#boardenvironmentvariabledto) follow the
+  receipt and undo of the underlying device or scene operation.
+- **Scene replacement preserves the recovered journal.** Import and clear read one Board snapshot
+  in the write queue after an unconfirmed response. The snapshot supplies the scene, catalog,
+  and undo availability together. A match with the requested scene can describe the current
+  Board while the write remains unconfirmed. The same preview cannot be resubmitted in the
+  current session. A new preview reflects any intervening change to the Board, library, or journal.
 - **Whoever changes the journal must re-read it.** The journal is the authority for what is
   reversible. Scene replacement and clear explicitly mark it empty. Applied reversible edits carry the current history with their
   receipt, and a full Board refresh adopts history from its snapshot. The origin tab applies its
@@ -428,12 +488,12 @@ ends up destroying work.
   so their edits are also reversible.
   Verified end-to-end
   against the real model in `e2e/live-ai-no-mock.spec.ts`.
-- **Clearing unusable history is explicit.** After an undo/redo conflict, the UI may offer to clear
-  the journal only after explaining that the current Board stays unchanged and all undo/redo entries
-  will be removed. It first reads `/board/edits/clear-preview`; `POST /board/edits/clear` carries that
-  opaque impact token, so another tab's edit/undo/redo during confirmation causes `409` instead of
-  deleting newly changed history. A successful clear returns empty collections and both availability
-  flags false; it is not itself an undoable Board edit.
+- **Clearing unusable history is explicit.** The confirmation shows the number of entries that
+  will be removed and explains that the current Board stays unchanged. If history changes during
+  confirmation, the [preview token](../api/board.md#boardundoresultdto) requires a fresh review.
+  A lost or incomplete response reads one Board snapshot in the mutation queue and reports the
+  clear as unconfirmed. Undo and redo use the revision paired with that snapshot, and the same
+  unconfirmed preview stays blocked in the current session.
 - **The assistant cannot silently delete.** Destructive AI tool actions are gated behind an explicit
   two-step confirmation token (`AiDestructiveActionGuard`), so a single turn can create a rule but
   not remove one. Do not write tests or features that assume otherwise. Confirmation buttons expose
@@ -1009,9 +1069,14 @@ and shared role state selectors own their appearance explicitly; use §6's share
 ## 10. Replay uses a shared bottom terminal
 
 `PlaybackTerminal.vue` owns the layout and interaction controls for simulation,
-formal counterexample and exploration-finding replay. `SimulationTimeline.vue` and
-`Board.vue` retain their run-specific state and playback timers. The canvas renders
-the frozen scene; the bottom terminal reserves space instead of covering it.
+formal counterexample and exploration-finding replay. The Board uses `usePlaybackCursor`
+for the selected step and autoplay timer across all three kinds. The canvas, timeline
+and step details read that selection against one active replay, which owns the frozen
+scene and the read-only lock. A switch stops autoplay and starts the next replay on
+its own initial step. Frozen viewport fitting runs after the layout updates and
+only while a replay is active.
+`SimulationTimeline.vue` renders simulation-specific information and forwards playback controls.
+The bottom terminal reserves space instead of covering the canvas.
 Simulation replay states are derived directly from the adopted run. Its manifest, diagnostics,
 and trajectory share one owner even while playback is hidden; no separately writable state copy
 may outlive or disagree with that run.
@@ -1221,9 +1286,11 @@ Separate presentation records add geometry, density, focus and interaction state
 resizing do not repeat unchanged semantic formatting or icon selection. Position stays outside
 both records. The node loop memoizes each subtree by its presentation record and visual coordinates,
 so a held drag does not rebuild unchanged node content or repeat its formatting.
-The loop still compares O(N) memo entries and computes O(E) connection geometry per painted drag
-frame; it does not claim constant-time rendering. Runtime edits, playback transitions, resizing,
-focus and locale changes invalidate the affected presentation inputs normally.
+Each connection reads its own endpoint geometry, including the held drag preview. The resting
+stroke, hit target, playback animation and detail anchor share that geometry. Moving or resizing
+one node recalculates only its incident connections. The render lists still compare memo entries
+on a changed drag frame. Runtime edits, playback transitions, focus and locale changes invalidate
+their presentation inputs normally.
 Content counter-scaling clamps before writing its inherited style value, so zooming above full size
 does not invalidate an already unchanged scale. The scale and label-line limit are scoped to card
 content, so changes below full size do not inherit into sibling resize handles or node decorations.
@@ -1242,11 +1309,14 @@ The minimap, edge popovers and native zoom-input constraint use geometry capture
 Node bounds, panel state, shell insets and window dimensions refresh that capture; a border-box
 ResizeObserver also covers actual canvas-container size changes and disconnects on unmount.
 Navigation commands still measure live geometry. A zoom command shares one freshly measured frame
-across its fitted minimum, clamping, world-center calculation and new pan. Rendering capture likewise
+across its fitted minimum, clamping, world-center calculation and new pan. It reuses the current
+scene bounds until committed node positions or sizes change. Rendering capture likewise
 uses the same frame for its published geometry and input constraint. Do not cache navigation frames
 across commands: resized windows, panels and playback insets must take effect on the next input.
 Pan and zoom do not resize the frame, so their
 rendering must not remeasure it or the popover viewport between node-style writes.
+The minimap keeps its node and rule marks when the projection stays the same. Within that projection,
+panning only updates the viewport rectangle. Moving beyond the scene can expand the map as before.
 Both world layers are absolutely positioned at the same canvas origin. Navigation padding reserves
 visible space without shifting either layer. Fit and map calculations use the actual free space below
 the navigation and playback-strip inset. The dock already reduces the canvas container height;
@@ -1426,6 +1496,11 @@ finishes narrowing and keeps its expanded width during the transition; leaving c
 Both sides use the same panel duration and easing, with motion disabled under reduced motion.
 On narrow screens, a panel opened during initial loading stays open when the saved layout arrives.
 This temporary overlay does not change the saved desktop layout.
+Returning to a desktop viewport restores the pan, zoom and panels captured before narrowing.
+An older save response cannot replace that capture. Narrowing flushes a pending desktop edit
+with its usual save feedback, and resizing alone sends no extra layout write.
+Layout reads and saves require a complete server response. An incomplete initial read offers
+Retry before autosave starts. An unconfirmed save keeps the edits visible without retrying the write.
 Likewise, manual canvas pan or zoom during loading takes precedence over the initial narrow-screen
 fit; automatic fitting applies only while the user has not moved the viewport.
 
@@ -1614,7 +1689,8 @@ counts. The workspace loading strip reserves vertical space above side-panel hea
 History and task-list read failures retain diagnostics, with localized summaries rendered in the current
 language and raw causes and fields kept in one collapsed technical disclosure. Failed reads do not imply
 an empty collection. Warn about stale results only when a failed source still has retained rows;
-unrelated successfully loaded results do not earn that warning. History action locks identify a pending
+unrelated successfully loaded results do not earn that warning. Exploration filter and paging failures
+stay with the results list when a request settles after the panel closes. History action locks identify a pending
 deletion separately from playback. Historical result openers use localized failure copy and log service diagnostics.
 Environment initial-value guidance appears only when there are values to edit; conceptual help
 remains attached to the section heading.
@@ -1644,7 +1720,17 @@ remain in one technical disclosure. A generic failure heading is not repeated in
 Completed tasks with unreadable results direct users to reopen history rather than rerun. Exhausting
 status polling means tracking stopped, not that execution timed out. Resuming a task clears its old
 failure, and resuming exploration also clears the previous settings or recovery notice.
-An unconfirmed cancellation restores the latest known phase without replacing a newer poll response.
+When a background dispatch is unconfirmed and returns a task ID for the submitted kind, the
+Board checks that ID with the regular progress poller. It keeps the run slot while checking,
+and a task status read supplies the first task row. A missing response without an ID reports an
+unconfirmed submission and directs the user to Background Tasks or Results before retrying.
+Dismissal applies to failed or cancelled task records. A missing or unconfirmed dismissal receipt
+checks that task by ID. A 404 removes the matching row and notifies other tabs, while the original
+dismissal remains unconfirmed. A readable task or an inconclusive check keeps the row and reports
+what was observed. Recovery sends no additional delete request.
+When a cancellation has no usable receipt, the Board reads that task's status directly. If its
+outcome remains unknown, both Task Status and progress use the same unconfirmed feedback and retain
+the latest known phase.
 A confirmed cancellation updates the matching inbox row and watched progress immediately.
 Older active reads cannot overwrite that receipt, including when the user starts watching while
 the cancellation request is pending. A confirmed cancellation from polling also takes precedence
@@ -1663,8 +1749,9 @@ share one foreground panel selection. The history dock button closes an open his
 either tab. The Board logo returns to the canvas while tracked tasks keep running. Watching a task
 opens that task's progress view. If the same kind of task is already active, Watch for a different
 task and actions to retry or reuse settings explain the conflict and keep the current view.
-After a successful Retry, history acknowledges unread exploration updates for the visible layer and
-result filter.
+Task Status applies each successful list read independently. A failed list keeps its last known
+rows and the retry guidance remains visible. After a successful Retry, history acknowledges unread
+exploration updates for the visible layer and result filter.
 Exploration keeps tracking the task until the server reports a terminal outcome, including
 completion while the cancellation request is outstanding.
 Cancellation confirmations use the matching task status in the inbox or progress panel. If that
@@ -1672,11 +1759,11 @@ task is out of view, the confirmation names its ID. Polling the same local cance
 second toast. Cancellation observed from another session still receives a notification. If local
 tracking ends while a task is still active on the server, the compact list falls back to its inbox row.
 The inbox and progress view show the same pending cancellation and prevent a second request for that task.
-An unconfirmed cancellation keeps its retry guidance. Blocking diagnostics require the matching
-progress view both when cancellation starts and when its response arrives, with any current replay,
-modal, or pending history result taking precedence.
-A late cancellation response that confirms completion adds no notice over the matching visible
-verification result or simulation trajectory. Results belonging to another task do not suppress it.
+Blocking cancellation diagnostics require the originating task list or matching progress view to
+still own the interaction. A current replay, modal, or pending history result takes precedence.
+When completion wins, an existing watch delivers the result. If the originating task list is still
+selected and the result is addressable, it opens that result. A late completion notice yields to an
+already visible result for the same task.
 Simulation completion opens its trajectory without an additional completion toast over the timeline.
 Deferred results still notify users when their trajectory is not shown.
 Exploration seed help qualifies reproducibility by model, settings, and the time limit. Candidate-free
@@ -1741,9 +1828,10 @@ Irreversible replacement and the exact undo-history loss stay visible; template 
 rule-order handling expand
 separately. Template import uses a keyboard-operable button, with format and repository guidance in
 contextual help. Template loading describes a read, not default initialization. Reset summaries count
-processed templates without claiming all definitions changed. If the reset response is lost, the
-Board reloads the full scene and keeps the reset outcome unconfirmed. Blocked deletion shows the
-referencing devices with wrapping names instead of an irrelevant irreversibility notice.
+processed templates without claiming all definitions changed. After an unconfirmed reset or deletion,
+one Board snapshot supplies the current catalog, scene and undo revision. The reviewed impact stays
+blocked in this session while its write is unconfirmed. A delete conflict uses the validated current
+preview when available. Blocked deletion shows the referencing devices with wrapping names.
 Contextual help's enlarged pointer target must leave adjacent actions clickable; check both locales
 because longer text can wrap the controls and conceal an overlap in the other locale.
 Verification mode explanations have one visible owner beside the mode controls, without repeating

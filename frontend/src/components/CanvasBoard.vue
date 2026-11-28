@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowReactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { DeviceNode } from '../types/node'
@@ -10,7 +10,6 @@ import { presentRule } from '@/utils/modelPresentation'
 import type { CanvasPan } from '../types/canvas'
 import type { ModelTokenSource } from '../types/modelToken'
 
-import { updateEdgesForNode } from '../utils/canvas/geometry'
 import { createGeneratedDeviceIcon, indexDeviceTemplates } from '../utils/device'
 
 import { getLinkPoints, getSelfLoopPath } from '../utils/rule'
@@ -40,8 +39,7 @@ import {
   beginNodeDrag,
   cancelNodeDrag,
   updateNodeDrag,
-  endNodeDrag,
-  getNodeDragPosition
+  endNodeDrag
 } from '../utils/canvas/nodeDrag'
 
 import {
@@ -88,13 +86,6 @@ let reducedMotionQuery: MediaQueryList | null = null
 const syncReducedMotionPreference = () => {
   prefersReducedMotion.value = reducedMotionQuery?.matches === true
 }
-
-/**
- * Check if edge flow animation should render (memoized accessor).
- * Uses the same cache as getEdgePlaybackClass to avoid redundant calculations.
- */
-const shouldRenderEdgeFlow = (edge: DeviceEdge) =>
-  edgePlaybackStateCache.value.get(edge)?.shouldAnimate ?? false
 
 const fallbackDeviceIcon = createGeneratedDeviceIcon('Device')
 
@@ -270,53 +261,58 @@ const nodeMap = computed(() => {
 
 const templatesByName = computed(() => indexDeviceTemplates(props.deviceTemplates || []))
 
-// 预计算所有边的调整后坐标，避免模板中重复计算
-const edgesWithAdjustedPoints = computed(() => {
-  return props.edges.map((edge, index) => {
-    // During drag, use temporary position for the dragging node
-    let fromNode = nodeMap.value.get(edge.from)
-    let toNode = nodeMap.value.get(edge.to)
+const getEdgeEndpoint = (id: string) => {
+  const node = nodeMap.value.get(id)
+  if (!node) return undefined
+  const position = getNodeRenderPosition(node)
+  return position === node.position ? node : { ...node, position }
+}
 
-    // Create temporary node objects with drag positions if nodes are being dragged
-    if (fromNode && nodeDragState.node === fromNode && nodeDragState.tempPosition) {
-      fromNode = { ...fromNode, position: nodeDragState.tempPosition }
-    }
-    if (toNode && nodeDragState.node === toNode && nodeDragState.tempPosition) {
-      toNode = { ...toNode, position: nodeDragState.tempPosition }
-    }
-
+// A connection reads only its two endpoints. Viewport changes are applied to the world layer.
+const edgeItemsById = computed(() => new Map(props.edges.map((edge, index) => {
+  const geometry = computed(() => {
+    const fromNode = getEdgeEndpoint(edge.from)
+    const toNode = getEdgeEndpoint(edge.to)
     const adjustedPoints = getAdjustedLinkPoints(fromNode, toNode, edge)
-    // Every edge layer and its label must share the node's preview geometry until pointerup commits it.
-    const selfLoopPath = edge.from === edge.to && fromNode ? getSelfLoopPath(fromNode) : ''
-    const labelPoint = edge.from === edge.to && fromNode
-      ? { x: fromNode.position.x + fromNode.width / 2, y: fromNode.position.y - 16 }
+    const loop = edge.from === edge.to ? fromNode : undefined
+    const selfLoopPath = loop ? getSelfLoopPath(loop) : ''
+    const labelPoint = loop
+      ? { x: loop.position.x + loop.width / 2, y: loop.position.y - 16 }
       : {
           x: (adjustedPoints.fromPoint.x + adjustedPoints.toPoint.x) / 2,
           y: (adjustedPoints.fromPoint.y + adjustedPoints.toPoint.y) / 2 - 10
         }
 
-    // 预计算边的样式属性，避免重复查找节点
+    return { adjustedPoints, selfLoopPath, labelPoint }
+  })
+  const item = computed(() => {
     const sourceNode = nodeMap.value.get(edge.from)
     const colorIndex = sourceNode ? getNodeColorIndex(sourceNode.id) : 0
     const isInternal = isInternalVariableEdge(edge)
     const sourceColor = sourceNode ? getNodeAccentColor(sourceNode.id) : 'var(--iot-node-accent-0)'
+    const playback = edgePlaybackStateCache.value.get(edge)
+    const flow = playback?.shouldAnimate
 
     return {
       edge,
-      fromNode: sourceNode,
-      toNode: nodeMap.value.get(edge.to),
-      adjustedPoints,
-      selfLoopPath,
-      labelPoint,
-      index, // Pre-computed index to avoid O(E) indexOf() in template
-      // 预计算样式
+      ...geometry.value,
+      index,
+      isInternal,
+      ariaLabel: getFullEdgeLabel(edge),
+      describedBy: !isInternal && openEdgeId.value === edge.id ? 'canvas-edge-details' : undefined,
+      playbackClass: playback?.classes,
+      flow,
+      flowStep: flow ? props.highlightedTrace?.selectedStateIndex : undefined,
+      particleRadius: flow && edge.from !== edge.to ? getParticleSize(index) / props.zoom : undefined,
       baseColor: isInternal ? 'var(--text-muted)' : sourceColor,
       particleColor: isInternal ? 'var(--text-muted)' : `url(#node-gradient-${colorIndex})`,
       arrowMarker: isInternal ? '' : `url(#node-arrow-${colorIndex})`,
       particleFillColor: sourceColor
     }
   })
-})
+  return [edge.id, item] as const
+})))
+const edgeItems = computed(() => Array.from(edgeItemsById.value.values(), item => item.value))
 
 const getLatestTraceVariableValueForNode = (nodeId: string, variableName: string): string | null => {
   const variable = getLatestTraceVariableForNode(nodeId, variableName)
@@ -360,12 +356,6 @@ const computeEdgePlaybackState = (
   }
 }
 
-/**
- * Memoized cache of edge playback state.
- * Recalculates when edges, trace state, or trace selection changes.
- * Eliminates redundant calls: the template calls getEdgePlaybackClass() and shouldRenderEdgeFlow()
- * multiple times per edge, but this computed ensures we only calculate once per edge per render.
- */
 const edgePlaybackStateCache = computed(() => {
   const cache = new Map<DeviceEdge, ReturnType<typeof computeEdgePlaybackState>>()
   for (const [edge, state] of buildTraceEdgePlaybackStates(props.edges, props.highlightedTrace)) {
@@ -373,14 +363,6 @@ const edgePlaybackStateCache = computed(() => {
   }
   return cache
 })
-
-/**
- * Get edge playback CSS classes (memoized accessor).
- * Called multiple times per edge in the template but only computes once per render.
- */
-const getEdgePlaybackClass = (edge: DeviceEdge) => {
-  return edgePlaybackStateCache.value.get(edge)?.classes ?? {}
-}
 
 // 判断是否有反例路径动画在进行
 const isTraceActive = computed(() => {
@@ -469,9 +451,47 @@ const emit = defineEmits<{
   (e: 'node-layout-interaction-end', nodeId: string): void
 }>()
 
+type LayoutPointerListeners = {
+  move: (event: PointerEvent) => void
+  up: (event: PointerEvent) => void
+  cancel: (event: PointerEvent) => void
+}
+
+const addLayoutPointerListeners = (target: HTMLElement, pointerId: number, listeners: LayoutPointerListeners) => {
+  try {
+    target.setPointerCapture?.(pointerId)
+  } catch {
+    // The window listeners still settle the interaction when capture fails.
+  }
+  target.addEventListener('lostpointercapture', listeners.cancel)
+  window.addEventListener('pointermove', listeners.move)
+  window.addEventListener('pointerup', listeners.up)
+  window.addEventListener('pointercancel', listeners.cancel)
+}
+
+const removeLayoutPointerListeners = (
+  target: HTMLElement | null,
+  pointerId: number | null,
+  listeners: LayoutPointerListeners
+) => {
+  target?.removeEventListener('lostpointercapture', listeners.cancel)
+  if (target && pointerId !== null) {
+    try {
+      target.releasePointerCapture(pointerId)
+    } catch {
+      // Capture may already have been released before the completion event reaches the window.
+    }
+  }
+  window.removeEventListener('pointermove', listeners.move)
+  window.removeEventListener('pointerup', listeners.up)
+  window.removeEventListener('pointercancel', listeners.cancel)
+}
+
 /* ====== 节点拖拽状态 ====== */
 
 const nodeDragState = reactive(createNodeDragState())
+// Keyed reads keep a held preview from making unrelated connections dirty.
+const dragPreviewByNode = shallowReactive(new Map<string, { node: DeviceNode; position: DeviceNode['position'] }>())
 let activeDragPointerId: number | null = null
 let activeDragTarget: HTMLElement | null = null
 let activeDragNodeId: string | null = null
@@ -495,40 +515,20 @@ const flushDragPreview = () => {
   }
 }
 
-const removeDragListeners = () => {
-  window.removeEventListener('pointermove', onNodePointerMove)
-  window.removeEventListener('pointerup', onNodePointerUp)
-  window.removeEventListener('pointercancel', onNodePointerCancel)
-}
-
 const releaseDragPointer = () => {
   clearDragPreview()
   const target = activeDragTarget
   const pointerId = activeDragPointerId
   const nodeId = activeDragNodeId
+  if (nodeId !== null) dragPreviewByNode.delete(nodeId)
   activeDragPointerId = null
   activeDragTarget = null
   activeDragNodeId = null
   activeDragStartPoint = null
   activeDragLastPoint = null
   activeDragMoved = false
-  target?.removeEventListener('lostpointercapture', onNodeLostPointerCapture)
-  if (target && pointerId !== null) {
-    try {
-      target.releasePointerCapture(pointerId)
-    } catch {
-      // The browser may release capture before pointerup/cancel reaches the window.
-    }
-  }
-  removeDragListeners()
+  removeLayoutPointerListeners(target, pointerId, dragPointerListeners)
   if (nodeId) emit('node-layout-interaction-end', nodeId)
-}
-
-const onNodeLostPointerCapture = (e: PointerEvent) => {
-  if (e.pointerId !== activeDragPointerId) return
-  const restored = cancelNodeDrag(nodeDragState)
-  if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
-  releaseDragPointer()
 }
 
 const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
@@ -547,6 +547,7 @@ const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
   }
   // 只处理节点自身拖拽，不影响画布平移（事件在模板里用了 .stop）
   beginNodeDrag(e, node, nodeDragState)
+  dragPreviewByNode.set(node.id, { node, position: nodeDragState.tempPosition! })
   activeDragPointerId = e.pointerId
   activeDragTarget = e.currentTarget as HTMLElement
   activeDragNodeId = node.id
@@ -555,15 +556,7 @@ const onNodePointerDown = (e: PointerEvent, node: DeviceNode) => {
   activeDragMoved = false
   emit('node-layout-interaction-start', node.id)
   activeDragTarget.focus({ preventScroll: true })
-  try {
-    activeDragTarget.setPointerCapture?.(e.pointerId)
-  } catch {
-    // Pointer capture is an enhancement; window listeners still complete the drag.
-  }
-  activeDragTarget.addEventListener('lostpointercapture', onNodeLostPointerCapture)
-  window.addEventListener('pointermove', onNodePointerMove)
-  window.addEventListener('pointerup', onNodePointerUp)
-  window.addEventListener('pointercancel', onNodePointerCancel)
+  addLayoutPointerListeners(activeDragTarget, e.pointerId, dragPointerListeners)
 }
 
 const onNodePointerMove = (e: PointerEvent) => {
@@ -602,10 +595,10 @@ const onNodePointerUp = (e: PointerEvent) => {
   const movedEnough = activeDragMoved
   const moved = endNodeDrag(nodeDragState)
   if (moved) {
-    // 拖拽结束立即同步更新边，确保最终位置准确
-    updateEdgesForNode(moved.id, props.nodes, props.edges)
     if (movedEnough) {
-      emit('node-moved-or-resized', moved.id)
+      if (moved.position.x !== nodeDragState.origin.x || moved.position.y !== nodeDragState.origin.y) {
+        emit('node-moved-or-resized', moved.id)
+      }
     } else {
       emit('node-open', moved)
     }
@@ -615,9 +608,14 @@ const onNodePointerUp = (e: PointerEvent) => {
 
 const onNodePointerCancel = (e: PointerEvent) => {
   if (e.pointerId !== activeDragPointerId) return
-  const restored = cancelNodeDrag(nodeDragState)
-  if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
+  cancelNodeDrag(nodeDragState)
   releaseDragPointer()
+}
+
+const dragPointerListeners: LayoutPointerListeners = {
+  move: onNodePointerMove,
+  up: onNodePointerUp,
+  cancel: onNodePointerCancel
 }
 
 /* ====== 节点缩放状态 ====== */
@@ -628,12 +626,6 @@ let activeResizeTarget: HTMLElement | null = null
 let activeResizeNodeId: string | null = null
 let activeResizeLastPoint: { x: number; y: number } | null = null
 
-const removeResizeListeners = () => {
-  window.removeEventListener('pointermove', onPointerMoveResize)
-  window.removeEventListener('pointerup', onPointerUpResize)
-  window.removeEventListener('pointercancel', onPointerCancelResize)
-}
-
 const releaseResizePointer = () => {
   const target = activeResizeTarget
   const pointerId = activeResizePointerId
@@ -642,23 +634,8 @@ const releaseResizePointer = () => {
   activeResizeTarget = null
   activeResizeNodeId = null
   activeResizeLastPoint = null
-  target?.removeEventListener('lostpointercapture', onResizeLostPointerCapture)
-  if (target && pointerId !== null) {
-    try {
-      target.releasePointerCapture(pointerId)
-    } catch {
-      // Capture may already be released by the browser after pointerup/cancel.
-    }
-  }
-  removeResizeListeners()
+  removeLayoutPointerListeners(target, pointerId, resizePointerListeners)
   if (nodeId) emit('node-layout-interaction-end', nodeId)
-}
-
-const onResizeLostPointerCapture = (e: PointerEvent) => {
-  if (e.pointerId !== activeResizePointerId) return
-  const restored = cancelNodeResize(resizeState)
-  if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
-  releaseResizePointer()
 }
 
 const onPointerDownResize = (
@@ -676,15 +653,7 @@ const onPointerDownResize = (
   activeResizeNodeId = node.id
   activeResizeLastPoint = { x: e.clientX, y: e.clientY }
   emit('node-layout-interaction-start', node.id)
-  try {
-    activeResizeTarget.setPointerCapture?.(e.pointerId)
-  } catch {
-    // Pointer capture is optional; window listeners still complete the resize.
-  }
-  activeResizeTarget.addEventListener('lostpointercapture', onResizeLostPointerCapture)
-  window.addEventListener('pointermove', onPointerMoveResize)
-  window.addEventListener('pointerup', onPointerUpResize)
-  window.addEventListener('pointercancel', onPointerCancelResize)
+  addLayoutPointerListeners(activeResizeTarget, e.pointerId, resizePointerListeners)
 }
 
 const onPointerMoveResize = (e: PointerEvent) => {
@@ -693,10 +662,7 @@ const onPointerMoveResize = (e: PointerEvent) => {
     activeResizeLastPoint.x = e.clientX
     activeResizeLastPoint.y = e.clientY
   }
-  const changed = updateNodeResize(e, resizeState, props.zoom)
-  if (!changed || !resizeState.node) return
-
-  updateEdgesForNode(resizeState.node.id, props.nodes, props.edges)
+  updateNodeResize(e, resizeState, props.zoom)
 }
 
 const onPointerUpResize = (e: PointerEvent) => {
@@ -706,7 +672,8 @@ const onPointerUpResize = (e: PointerEvent) => {
     onPointerMoveResize(e)
   }
   const resized = endNodeResize(resizeState)
-  if (resized) {
+  if (resized && (resized.position.x !== resizeState.originPos.x || resized.position.y !== resizeState.originPos.y
+    || resized.width !== resizeState.originSize.w || resized.height !== resizeState.originSize.h)) {
     emit('node-moved-or-resized', resized.id)
   }
   releaseResizePointer()
@@ -714,20 +681,23 @@ const onPointerUpResize = (e: PointerEvent) => {
 
 const onPointerCancelResize = (e: PointerEvent) => {
   if (e.pointerId !== activeResizePointerId) return
-  const restored = cancelNodeResize(resizeState)
-  if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
+  cancelNodeResize(resizeState)
   releaseResizePointer()
+}
+
+const resizePointerListeners: LayoutPointerListeners = {
+  move: onPointerMoveResize,
+  up: onPointerUpResize,
+  cancel: onPointerCancelResize
 }
 
 watch(
   () => props.interactionLocked,
   locked => {
     if (!locked) return
-    const restoredDrag = cancelNodeDrag(nodeDragState)
-    if (restoredDrag) updateEdgesForNode(restoredDrag.id, props.nodes, props.edges)
+    cancelNodeDrag(nodeDragState)
     releaseDragPointer()
-    const restoredResize = cancelNodeResize(resizeState)
-    if (restoredResize) updateEdgesForNode(restoredResize.id, props.nodes, props.edges)
+    cancelNodeResize(resizeState)
     releaseResizePointer()
   }
 )
@@ -870,7 +840,8 @@ const getNodeResizeHandleGeometry = (node: DeviceNode) => {
  * The preview leaves the parent's committed scene unchanged until release.
  */
 const getNodeRenderPosition = (node: DeviceNode) => {
-  return getNodeDragPosition(node, nodeDragState)
+  const preview = dragPreviewByNode.get(node.id)
+  return preview?.node === node ? preview.position : node.position
 }
 
 /**
@@ -1324,11 +1295,16 @@ const getFullEdgeLabel = (edge: DeviceEdge) => {
     : presentation.description
 }
 
-const activeEdgeDetail = computed(() => {
+const openEdgeId = computed(() => {
   const id = hoveredEdgeId.value || focusedEdgeId.value
-  if (!id || dismissedEdgeId.value === id) return null
-  const item = edgesWithAdjustedPoints.value.find(item => item.edge.id === id)
-  if (!item || isInternalVariableEdge(item.edge)) return null
+  return id && dismissedEdgeId.value !== id ? id : null
+})
+
+const activeEdgeDetail = computed(() => {
+  const id = openEdgeId.value
+  if (!id) return null
+  const item = edgeItemsById.value.get(id)?.value
+  if (!item || item.isInternal) return null
   return { ...item, presentation: edgePresentations.value.get(id)! }
 })
 
@@ -1491,10 +1467,10 @@ const nodeContentCache = computed(() => new Map(props.nodes.map(node => {
 })))
 
 // Position stays outside presentation so held dragging and panning reuse unchanged subtrees.
-const nodePresentations = computed(() => new Map(props.nodes.map(node => {
+const nodePresentation = (node: DeviceNode) => {
   const attacked = isDeviceAttacked(node.id)
   const inTrace = isNodeInTrace(node)
-  return [node.id, {
+  return {
     ...nodeContentCache.value.get(node.id)!,
     classes: [getNodeVisualTierClass(node), {
       'trace-active': inTrace,
@@ -1518,15 +1494,21 @@ const nodePresentations = computed(() => new Map(props.nodes.map(node => {
       + `--node-name-lines:${node.height * props.zoom >= 60 ? 3 : 2}`,
     resizeStyle: getNodeResizeHandleGeometry(node),
     label: getNodeVisualTier(node) === 'compact' ? getCompactNodeLabel(node) : node.label
-  }]
-})))
+  }
+}
 
-const getNodePresentation = (node: DeviceNode) => nodePresentations.value.get(node.id)!
+const nodeItems = computed(() => props.nodes.map(node => {
+  const presentation = computed(() => nodePresentation(node))
+  return computed(() => {
+    const { x, y } = getNodeRenderPosition(node)
+    return { node, x, y, presentation: presentation.value }
+  })
+}))
+const nodeRenderItems = computed(() => nodeItems.value.map(item => item.value))
 
 const moveNodeByKeyboard = (node: DeviceNode, dx: number, dy: number) => {
   node.position.x += dx
   node.position.y += dy
-  updateEdgesForNode(node.id, props.nodes, props.edges)
   emit('node-moved-or-resized', node.id)
 }
 
@@ -1536,7 +1518,6 @@ const resizeNodeByKeyboard = (node: DeviceNode, dw: number, dh: number) => {
   if (width === node.width && height === node.height) return
   node.width = width
   node.height = height
-  updateEdgesForNode(node.id, props.nodes, props.edges)
   emit('node-moved-or-resized', node.id)
 }
 
@@ -1590,11 +1571,9 @@ const onNodeKeydown = (event: KeyboardEvent, node: DeviceNode) => {
 
 onBeforeUnmount(() => {
   if (nodeAnimationResetTimer) clearTimeout(nodeAnimationResetTimer)
-  const restoredDrag = cancelNodeDrag(nodeDragState)
-  if (restoredDrag) updateEdgesForNode(restoredDrag.id, props.nodes, props.edges)
+  cancelNodeDrag(nodeDragState)
   releaseDragPointer()
-  const restored = cancelNodeResize(resizeState)
-  if (restored) updateEdgesForNode(restored.id, props.nodes, props.edges)
+  cancelNodeResize(resizeState)
   releaseResizePointer()
   reducedMotionQuery?.removeEventListener?.('change', syncReducedMotionPreference)
 })
@@ -1655,8 +1634,10 @@ onMounted(() => {
         </defs>
 
         <g data-testid="canvas-edge-world" :transform="`scale(${zoom})`">
+          <g v-memo="[edgeItems]">
           <g
-              v-for="edgeItem in edgesWithAdjustedPoints"
+              v-for="edgeItem in edgeItems"
+              v-memo="[edgeItem]"
               :key="edgeItem.edge.id"
               @pointerenter="setHoveredEdge(edgeItem.edge.id, $event)"
               @pointerleave="setHoveredEdge(null)"
@@ -1666,24 +1647,24 @@ onMounted(() => {
             <path
                 v-if="edgeItem.edge.from === edgeItem.edge.to"
                 class="edge-base-line"
-                :class="getEdgePlaybackClass(edgeItem.edge)"
+                :class="edgeItem.playbackClass"
                 :d="edgeItem.selfLoopPath"
                 fill="none"
                 :stroke="edgeItem.baseColor"
-                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
+                :stroke-dasharray="edgeItem.isInternal ? '6,6' : ''"
                 :marker-end="edgeItem.arrowMarker"
             />
             <line
                 v-else
                 class="edge-base-line"
-                :class="getEdgePlaybackClass(edgeItem.edge)"
+                :class="edgeItem.playbackClass"
                 :x1="edgeItem.adjustedPoints.fromPoint.x"
                 :y1="edgeItem.adjustedPoints.fromPoint.y"
                 :x2="edgeItem.adjustedPoints.toPoint.x"
                 :y2="edgeItem.adjustedPoints.toPoint.y"
                 fill="none"
                 :stroke="edgeItem.baseColor"
-                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '6,6' : ''"
+                :stroke-dasharray="edgeItem.isInternal ? '6,6' : ''"
                 :marker-end="edgeItem.arrowMarker"
             />
 
@@ -1694,8 +1675,8 @@ onMounted(() => {
                 :d="edgeItem.selfLoopPath"
                 role="img"
                 tabindex="0"
-                :aria-label="getFullEdgeLabel(edgeItem.edge)"
-                :aria-describedby="activeEdgeDetail?.edge.id === edgeItem.edge.id ? 'canvas-edge-details' : undefined"
+                :aria-label="edgeItem.ariaLabel"
+                :aria-describedby="edgeItem.describedBy"
                 @pointerenter="setHoveredEdge(edgeItem.edge.id, $event)"
                 @pointerleave="setHoveredEdge(null)"
                 @focus="focusEdgeDetail(edgeItem.edge.id)"
@@ -1707,8 +1688,8 @@ onMounted(() => {
                 :data-rule-id="edgeItem.edge.ruleId || undefined"
                 role="img"
                 tabindex="0"
-                :aria-label="getFullEdgeLabel(edgeItem.edge)"
-                :aria-describedby="activeEdgeDetail?.edge.id === edgeItem.edge.id ? 'canvas-edge-details' : undefined"
+                :aria-label="edgeItem.ariaLabel"
+                :aria-describedby="edgeItem.describedBy"
                 :x1="edgeItem.adjustedPoints.fromPoint.x"
                 :y1="edgeItem.adjustedPoints.fromPoint.y"
                 :x2="edgeItem.adjustedPoints.toPoint.x"
@@ -1722,25 +1703,25 @@ onMounted(() => {
             <!-- During model playback, motion represents a backend-reported delivered automation. -->
             <!-- Key includes selectedStateIndex to remount and restart animation on each state transition -->
             <path
-                v-if="edgeItem.edge.from === edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
-                :key="`edge-flow-loop-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                v-if="edgeItem.edge.from === edgeItem.edge.to && edgeItem.flow"
+                :key="`edge-flow-loop-${edgeItem.edge.id}-${edgeItem.flowStep ?? -1}`"
                 class="edge-line particle-line"
-                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
-                :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
+                :data-playback-state="edgeItem.flowStep"
+                :class="[getParticleOpacity(edgeItem.index), edgeItem.playbackClass]"
                 :d="edgeItem.selfLoopPath"
                 fill="none"
                 filter="url(#glow)"
                 :stroke="edgeItem.particleColor"
                 stroke-width="2"
-                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
+                :stroke-dasharray="edgeItem.isInternal ? '5,5' : ''"
                 :marker-end="edgeItem.arrowMarker"
             />
             <line
-                v-else-if="shouldRenderEdgeFlow(edgeItem.edge)"
-                :key="`edge-flow-line-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                v-else-if="edgeItem.flow"
+                :key="`edge-flow-line-${edgeItem.edge.id}-${edgeItem.flowStep ?? -1}`"
                 class="edge-line particle-line"
-                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
-                :class="[getParticleOpacity(edgeItem.index), getEdgePlaybackClass(edgeItem.edge)]"
+                :data-playback-state="edgeItem.flowStep"
+                :class="[getParticleOpacity(edgeItem.index), edgeItem.playbackClass]"
                 :x1="edgeItem.adjustedPoints.fromPoint.x"
                 :y1="edgeItem.adjustedPoints.fromPoint.y"
                 :x2="edgeItem.adjustedPoints.toPoint.x"
@@ -1749,19 +1730,19 @@ onMounted(() => {
                 filter="url(#glow)"
                 :stroke="edgeItem.particleColor"
                 stroke-width="2"
-                :stroke-dasharray="isInternalVariableEdge(edgeItem.edge) ? '5,5' : ''"
+                :stroke-dasharray="edgeItem.isInternal ? '5,5' : ''"
                 :marker-end="edgeItem.arrowMarker"
             />
 
             <!-- One particle per delivered connection, replayed for the selected transition. -->
             <circle
-                v-if="edgeItem.edge.from !== edgeItem.edge.to && shouldRenderEdgeFlow(edgeItem.edge)"
-                :key="`edge-flow-particle-${edgeItem.edge.id}-${props.highlightedTrace?.selectedStateIndex ?? -1}`"
+                v-if="edgeItem.edge.from !== edgeItem.edge.to && edgeItem.flow"
+                :key="`edge-flow-particle-${edgeItem.edge.id}-${edgeItem.flowStep ?? -1}`"
                 class="trace-flow-particle"
-                :data-playback-state="props.highlightedTrace?.selectedStateIndex"
+                :data-playback-state="edgeItem.flowStep"
                 :fill="edgeItem.particleFillColor"
                 filter="url(#glow)"
-                :r="getParticleSize(edgeItem.index) / props.zoom"
+                :r="edgeItem.particleRadius"
             >
               <animateMotion
                   :dur="TRACE_FLOW_DURATION"
@@ -1779,6 +1760,7 @@ onMounted(() => {
               />
             </circle>
           </g>
+          </g>
         </g>
       </svg>
 
@@ -1789,21 +1771,22 @@ onMounted(() => {
         transformOrigin: '0 0'
       }"
     >
+      <div class="contents" v-memo="[nodeRenderItems]">
       <!-- 设备节点 -->
       <div
-          v-for="node in nodes"
+          v-for="{ node, x, y, presentation } in nodeRenderItems"
           :key="node.id"
-          v-memo="[getNodePresentation(node), getNodeRenderPosition(node).x, getNodeRenderPosition(node).y]"
+          v-memo="[node, presentation, x, y]"
           :data-node-id="node.id"
           class="device-node"
           tabindex="0"
           role="button"
           :aria-disabled="interactionLocked ? 'true' : undefined"
-          :aria-label="getNodePresentation(node).ariaLabel"
+          :aria-label="presentation.ariaLabel"
           aria-describedby="canvas-node-keyboard-instructions"
-          :title="getNodePresentation(node).title"
-          :class="getNodePresentation(node).classes"
-          :style="`left:${getNodeRenderPosition(node).x}px;top:${getNodeRenderPosition(node).y}px;${getNodePresentation(node).style}`"
+          :title="presentation.title"
+          :class="presentation.classes"
+          :style="`left:${x}px;top:${y}px;${presentation.style}`"
           @pointerdown.stop="onNodePointerDown($event, node)"
           @contextmenu.stop.prevent="onNodeContextInternal(node, $event)"
           @keydown="onNodeKeydown($event, node)"
@@ -1817,14 +1800,14 @@ onMounted(() => {
           <span class="material-symbols-outlined">arrow_downward</span>
           <span>{{ t('app.attacked') }}</span>
         </div>
-        <div class="device-node-content" :style="getNodePresentation(node).contentStyle">
+        <div class="device-node-content" :style="presentation.contentStyle">
           <!-- 上部分：图标 -->
           <div class="device-top-row">
             <Transition name="trace-device-icon">
               <img
-                  :key="getNodePresentation(node).stateKey"
+                  :key="presentation.stateKey"
                   class="device-img iot-device-artwork"
-                  :src="getNodePresentation(node).icon"
+                  :src="presentation.icon"
                   :alt="node.label"
                   draggable="false"
                   @error="handleImageError($event)"
@@ -1834,24 +1817,24 @@ onMounted(() => {
           <!-- 名字 -->
           <div class="device-label-wrapper">
             <div class="device-label" :title="node.label">
-              {{ getNodePresentation(node).label }}
+              {{ presentation.label }}
             </div>
           </div>
           <!-- 下部分：设备状态显示 -->
-          <div class="device-state" :class="getNodePresentation(node).stateClass" :title="getNodePresentation(node).stateTitle">
+          <div class="device-state" :class="presentation.stateClass" :title="presentation.stateTitle">
             <span class="device-state-dot"></span>
             <span class="device-reading-slot">
               <Transition name="trace-device-state">
-                <span :key="getNodePresentation(node).stateKey" class="device-state-value">{{ getNodePresentation(node).stateText }}</span>
+                <span :key="presentation.stateKey" class="device-state-value">{{ presentation.stateText }}</span>
               </Transition>
             </span>
           </div>
           <div
-            v-if="getNodePresentation(node).runtime.badges.length > 0"
+            v-if="presentation.runtime.badges.length > 0"
             class="device-runtime-strip"
           >
             <span
-                v-for="badge in getNodePresentation(node).runtime.badges"
+                v-for="badge in presentation.runtime.badges"
                 :key="badge.label"
                 class="device-runtime-chip"
                 :class="{ 'device-runtime-chip--changed': badge.changed }"
@@ -1863,18 +1846,18 @@ onMounted(() => {
             </span>
             <!-- Name the variables omitted from the compact strip. -->
             <HintTooltip
-              v-if="getNodePresentation(node).runtime.hiddenVariableCount > 0"
-              :content="getNodePresentation(node).hiddenVariableNames"
+              v-if="presentation.runtime.hiddenVariableCount > 0"
+              :content="presentation.hiddenVariableNames"
             >
               <span
                 class="device-runtime-chip device-runtime-chip--overflow"
-                :aria-label="getNodePresentation(node).hiddenVariableLabel"
-              >+{{ getNodePresentation(node).runtime.hiddenVariableCount }}</span>
+                :aria-label="presentation.hiddenVariableLabel"
+              >+{{ presentation.runtime.hiddenVariableCount }}</span>
             </HintTooltip>
           </div>
-          <div v-if="getNodePresentation(node).security.length > 0" class="device-node-actions">
+          <div v-if="presentation.security.length > 0" class="device-node-actions">
             <span
-              v-for="badge in getNodePresentation(node).security"
+              v-for="badge in presentation.security"
               :key="badge.kind"
               class="device-node-trust"
               :class="`device-node-trust--${badge.kind}`"
@@ -1891,31 +1874,32 @@ onMounted(() => {
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle tl"
-            :style="getNodePresentation(node).resizeStyle"
+            :style="presentation.resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'tl')"
         ></div>
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle tr"
-            :style="getNodePresentation(node).resizeStyle"
+            :style="presentation.resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'tr')"
         ></div>
         <div
             v-if="!interactionLocked && canShowAllPointerResizeHandles(node)"
             class="resize-handle bl"
-            :style="getNodePresentation(node).resizeStyle"
+            :style="presentation.resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'bl')"
         ></div>
         <div
             v-if="!interactionLocked"
             class="resize-handle br"
-            :style="getNodePresentation(node).resizeStyle"
+            :style="presentation.resizeStyle"
             aria-hidden="true"
             @pointerdown.stop="onPointerDownResize($event, node, 'br')"
         ></div>
+      </div>
       </div>
     </div>
     <section

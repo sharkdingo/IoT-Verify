@@ -5,8 +5,7 @@ import {
   getNodeCenter,
   getLinkPoints,
   getSelfLoopPath,
-  ruleSimilarityReasonKey,
-  updateRulesForNodeRename
+  ruleSimilarityReasonKey
 } from '../rule'
 import { i18n } from '@/assets/i18n'
 import type { DuplicateRuleReasonCode, RuleSimilarityReasonCode } from '@/types/rule'
@@ -86,17 +85,6 @@ describe('rule utils', () => {
     expect(typeof path).toBe('string')
     expect(path.startsWith('M')).toBe(true)
     expect(path.includes('C')).toBe(true)
-  })
-
-  it('updateRulesForNodeRename updates labels and returns true when changed', () => {
-    const rules: any[] = [
-      { id: 'e1', from: 'n1', to: 'n2', fromLabel: 'old', toLabel: 't' },
-      { id: 'e2', from: 'n3', to: 'n1', fromLabel: 'f', toLabel: 'old' }
-    ]
-    const changed = updateRulesForNodeRename(rules as any, 'n1', 'newLabel')
-    expect(changed).toBe(true)
-    expect(rules[0].fromLabel).toBe('newLabel')
-    expect(rules[1].toLabel).toBe('newLabel')
   })
 
   it('allows full-state triggers without a UI attribute but still requires a value', () => {

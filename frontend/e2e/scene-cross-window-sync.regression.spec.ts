@@ -2,18 +2,10 @@ import { expandCreation } from './support/controlCenter'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { type Page } from '@playwright/test'
-import { apiBaseURL, createAuthenticatedUser, expect, test, type AuthUser } from './support/auth'
+import { apiBaseURL, createAuthenticatedUser, seedBrowserSession, expect, test, type AuthUser } from './support/auth'
 
 const openBoard = async (page: Page, auth: AuthUser) => {
-  await page.addInitScript(({ token, user }) => {
-    localStorage.setItem('iot_verify_token', token)
-    localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    localStorage.setItem('locale', 'en')
-    localStorage.setItem('iot_verify_theme', 'light')
-  }, {
-    token: auth.token,
-    user: { userId: auth.userId, phone: auth.phone, username: auth.username }
-  })
+  await seedBrowserSession(page, auth, { locale: 'en', theme: 'light' })
   await page.goto('/#/board')
   await expect(page.getByTestId('scene-import')).toBeEnabled({ timeout: 30_000 })
   expect(await page.evaluate(() => document.visibilityState)).toBe('visible')

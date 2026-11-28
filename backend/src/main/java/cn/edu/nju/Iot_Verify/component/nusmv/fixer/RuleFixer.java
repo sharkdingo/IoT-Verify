@@ -125,42 +125,6 @@ public class RuleFixer {
                             List<TraceStateDto> states,
                             List<RuleDto> rules,
                             List<DeviceVerificationDto> devices,
-                            List<SpecificationDto> specs,
-                            Map<String, DeviceSmvData> deviceSmvMap,
-                            Long userId,
-                            AttackScenarioDto attackScenario,
-                            boolean enablePrivacy,
-                            List<String> strategies,
-                            int maxAttempts,
-                            Map<String, PreferredRange> preferredRanges) {
-        return fix(traceId, violatedSpecId, states, rules, devices, List.of(), specs, deviceSmvMap,
-                userId, attackScenario, enablePrivacy, strategies, maxAttempts, preferredRanges);
-    }
-
-    public FixResultDto fix(Long traceId,
-                            String violatedSpecId,
-                            List<TraceStateDto> states,
-                            List<RuleDto> rules,
-                            List<DeviceVerificationDto> devices,
-                            List<BoardEnvironmentVariableDto> environmentVariables,
-                            List<SpecificationDto> specs,
-                            Map<String, DeviceSmvData> deviceSmvMap,
-                            Long userId,
-                            AttackScenarioDto attackScenario,
-                            boolean enablePrivacy,
-                            List<String> strategies,
-                            int maxAttempts,
-                            Map<String, PreferredRange> preferredRanges) {
-        return fix(traceId, violatedSpecId, states, rules, devices, environmentVariables, specs,
-                deviceSmvMap, userId, attackScenario, enablePrivacy, strategies, maxAttempts,
-                preferredRanges, () -> { });
-    }
-
-    public FixResultDto fix(Long traceId,
-                            String violatedSpecId,
-                            List<TraceStateDto> states,
-                            List<RuleDto> rules,
-                            List<DeviceVerificationDto> devices,
                             List<BoardEnvironmentVariableDto> environmentVariables,
                             List<SpecificationDto> specs,
                             Map<String, DeviceSmvData> deviceSmvMap,

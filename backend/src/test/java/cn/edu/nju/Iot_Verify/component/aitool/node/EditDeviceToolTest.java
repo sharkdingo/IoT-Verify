@@ -11,6 +11,7 @@ import cn.edu.nju.Iot_Verify.exception.DeviceLayoutConflictException;
 import cn.edu.nju.Iot_Verify.exception.DeviceRuntimeConflictException;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
+import cn.edu.nju.Iot_Verify.util.mapper.DeviceNodeMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -122,12 +123,14 @@ class EditDeviceToolTest {
                 .thenReturn(DeviceUpdateResultDto.builder()
                         .operation("updated")
                         .mutationType("runtime")
-                        .changedFields(List.of("state"))
+                        .changedFields(List.of("state", "privacies"))
                         .currentDevice(updated)
                         .build());
 
-        JsonNode json = objectMapper.readTree(tool.execute(
-                "{\"id\":\"d1\",\"field\":\"runtime\",\"state\":\"off\"}"));
+        JsonNode json = objectMapper.readTree(tool.execute("""
+                {"id":"d1","field":"runtime","state":"off",
+                 "privacies":[{"name":"temperature","privacy":" PRIVATE "}]}
+                """));
 
         assertEquals("updated", json.path("operation").asText());
         assertEquals("off", json.path("device").path("state").asText());
@@ -137,6 +140,30 @@ class EditDeviceToolTest {
         verify(boardStorageService).updateNodeRuntime(eq(1L), eq("d1"), captor.capture());
         assertEquals("on", captor.getValue().getExpected().getState());
         assertEquals("off", captor.getValue().getDesired().getState());
+        assertEquals("temperature", captor.getValue().getDesired().getPrivacies().get(0).getName());
+        assertEquals("private", captor.getValue().getDesired().getPrivacies().get(0).getPrivacy());
+    }
+
+    @Test
+    void editRuntime_preservesAbsentStoredVariableTrust() throws Exception {
+        DeviceNodeDto original = device("d1", "Sensor");
+        original.setVariables(List.of(new VariableStateDto("temperature", "20", null)));
+        DeviceNodeMapper mapper = new DeviceNodeMapper();
+        DeviceNodeDto current = mapper.toDto(mapper.toEntity(original, 1L));
+        when(boardStorageService.getNodes(1L)).thenReturn(List.of(current));
+        when(boardStorageService.updateNodeRuntime(eq(1L), eq("d1"), any()))
+                .thenReturn(DeviceUpdateResultDto.builder().operation("updated")
+                        .changedFields(List.of("variables")).currentDevice(current).build());
+
+        JsonNode result = objectMapper.readTree(tool.execute("""
+                {"id":"d1","field":"runtime","variables":[{"name":"temperature","value":"21"}]}
+                """));
+
+        assertEquals("updated", result.path("operation").asText(), result.toString());
+        ArgumentCaptor<DeviceRuntimeUpdateDto> update = ArgumentCaptor.forClass(DeviceRuntimeUpdateDto.class);
+        verify(boardStorageService).updateNodeRuntime(eq(1L), eq("d1"), update.capture());
+        assertEquals(List.of(new VariableStateDto("temperature", "20", null)), update.getValue().getExpected().getVariables());
+        assertEquals(List.of(new VariableStateDto("temperature", "21", null)), update.getValue().getDesired().getVariables());
     }
 
     @Test
@@ -168,8 +195,17 @@ class EditDeviceToolTest {
         JsonNode explicitNull = objectMapper.readTree(tool.execute(
                 "{\"id\":\"d1\",\"field\":\"runtime\",\"state\":null}"));
 
+        JsonNode nullVariableTrust = objectMapper.readTree(tool.execute("""
+                {"id":"d1","field":"runtime","variables":[{"name":"temperature","value":"21","trust":null}]}
+                """));
+
         assertEquals("VALIDATION_ERROR", empty.path("errorCode").asText());
         assertEquals("VALIDATION_ERROR", explicitNull.path("errorCode").asText());
+        assertEquals("VALIDATION_ERROR", nullVariableTrust.path("errorCode").asText());
+        assertEquals(400, nullVariableTrust.path("status").asInt());
+        assertEquals("variables[0].trust must be one of: trusted, untrusted.",
+                nullVariableTrust.path("error").asText());
+        verify(boardStorageService, never()).getNodes(any());
         verify(boardStorageService, never()).updateNodeRuntime(any(), any(), any());
     }
 

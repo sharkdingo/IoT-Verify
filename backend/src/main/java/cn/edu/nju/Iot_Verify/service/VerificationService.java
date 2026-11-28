@@ -2,7 +2,6 @@ package cn.edu.nju.Iot_Verify.service;
 
 import cn.edu.nju.Iot_Verify.dto.model.RunDeletionImpactDto;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto;
-import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.dto.trace.TraceDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationRequestDto;
 import cn.edu.nju.Iot_Verify.dto.verification.VerificationResultDto;
@@ -124,15 +123,6 @@ public interface VerificationService {
      * @return 本次请求是否改变任务，以及任务的实际状态
      */
     TaskCancellationResultDto cancelTask(Long userId, Long taskId);
-
-    /**
-     * 更新任务进度
-     *
-     * @param taskId 任务ID
-     * @param progress 进度 (0-100)
-     * @param stage stable, localizable execution phase
-     */
-    void updateTaskProgress(Long taskId, int progress, TaskProgressStage stage);
 
     /**
      * 获取任务进度

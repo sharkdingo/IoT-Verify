@@ -1,4 +1,4 @@
-import { STREAM_REFRESH_TARGETS, type AssistantAction } from '@/types/chat'
+import type { AssistantAction, StreamRefreshTarget } from '@/types/chat'
 import type { BoardInvalidationScope } from '@/utils/boardInvalidation'
 
 /**
@@ -10,29 +10,23 @@ import type { BoardInvalidationScope } from '@/utils/boardInvalidation'
  * table keeps that parity explicit instead of leaving it to remember-to-call discipline at each
  * handler.
  *
- * The target names themselves come from `types/chat.ts`, which is the wire contract; keeping a second
- * copy here let the two drift.
+ * The target names come from the stream contract in `types/chat.ts`.
  */
-export const ASSISTANT_REFRESH_TARGETS = STREAM_REFRESH_TARGETS
-
-export type AssistantRefreshTarget = typeof ASSISTANT_REFRESH_TARGETS[number]
-
-export const isAssistantRefreshTarget = (value: unknown): value is AssistantRefreshTarget =>
-  typeof value === 'string' && (ASSISTANT_REFRESH_TARGETS as readonly string[]).includes(value)
-
 export interface AssistantRefreshEffects {
   /** The `defineExpose` method on the board view that reloads this target. */
-  method: string
-  invalidationScope: BoardInvalidationScope
+  readonly method: 'refreshBoardSnapshot' | 'refreshAllBoardState' | 'refreshRunHistory'
+  readonly invalidationScope: BoardInvalidationScope
 }
 
-const EFFECTS: Record<AssistantRefreshTarget, AssistantRefreshEffects> = {
-  rule_list: { method: 'refreshRules', invalidationScope: 'board' },
-  spec_list: { method: 'refreshSpecifications', invalidationScope: 'board' },
+const BOARD_SNAPSHOT: AssistantRefreshEffects = { method: 'refreshBoardSnapshot', invalidationScope: 'board' }
+
+const EFFECTS: Record<StreamRefreshTarget, AssistantRefreshEffects> = {
+  rule_list: BOARD_SNAPSHOT,
+  spec_list: BOARD_SNAPSHOT,
   board_state: { method: 'refreshAllBoardState', invalidationScope: 'board' },
-  device_list: { method: 'refreshDevices', invalidationScope: 'board' },
-  environment_list: { method: 'refreshEnvironmentVariables', invalidationScope: 'board' },
-  template_list: { method: 'refreshDeviceTemplates', invalidationScope: 'board' },
+  device_list: BOARD_SNAPSHOT,
+  environment_list: BOARD_SNAPSHOT,
+  template_list: BOARD_SNAPSHOT,
   run_history: { method: 'refreshRunHistory', invalidationScope: 'run-history' }
 }
 
@@ -41,11 +35,11 @@ const TASK_STARTED_ACTIONS = new Set<AssistantAction>([
 ])
 
 export const assistantRefreshEffects = (
-  target: AssistantRefreshTarget
+  target: StreamRefreshTarget
 ): AssistantRefreshEffects => EFFECTS[target]
 
 export const assistantStreamInvalidationScope = (
-  target: AssistantRefreshTarget,
+  target: StreamRefreshTarget,
   action?: AssistantAction
 ): BoardInvalidationScope => {
   if (target === 'run_history' && action && TASK_STARTED_ACTIONS.has(action)) return 'tasks'

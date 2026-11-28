@@ -1,7 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.ai;
 
 import cn.edu.nju.Iot_Verify.component.ai.state.AiSessionStateStore;
-import cn.edu.nju.Iot_Verify.component.ai.state.InMemoryAiSessionStateStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -32,10 +31,6 @@ public class AiTaskContinuationStore {
     @Autowired
     public AiTaskContinuationStore(AiSessionStateStore stateStore) {
         this(stateStore, Clock.systemUTC());
-    }
-
-    AiTaskContinuationStore(Clock clock) {
-        this(new InMemoryAiSessionStateStore(), clock);
     }
 
     AiTaskContinuationStore(AiSessionStateStore stateStore, Clock clock) {
@@ -98,10 +93,6 @@ public class AiTaskContinuationStore {
                 pending.pendingToolName(),
                 pending.pendingResult(),
                 pending.expiresAt()));
-    }
-
-    public Optional<String> pendingObjective(Long userId, String sessionId) {
-        return pendingContext(userId, sessionId).map(ContinuationContext::originalObjective);
     }
 
     public void clear(Long userId, String sessionId) {

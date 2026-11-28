@@ -7,6 +7,8 @@ import type { DeviceNode } from '@/types/node'
 import type { DeviceTemplate } from '@/types/device'
 import type { RuleForm } from '@/types/rule'
 import type { Specification } from '@/types/spec'
+import { BOARD_ITEM_EDIT_OUTCOME_UNKNOWN } from '@/composables/useUnconfirmedBoardItemEdit'
+import type { ApiErrorDetails } from '@/utils/userMessage'
 
 const devices: DeviceNode[] = [
   {
@@ -150,6 +152,46 @@ describe('environment value correction ownership', () => {
     expect(wrapper.props('environmentVariables')).toEqual([{ name: 'temperature', value: '20', trust: 'trusted', privacy: 'private' }])
     wrapper.unmount()
   })
+
+  it('keeps the original value baseline until a rejected draft is revised', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    try {
+      const input = wrapper.get<HTMLInputElement>('[data-testid="environment-value-temperature"]')
+      input.element.value = '25'
+      await input.trigger('input')
+      await wrapper.setProps({ environmentVariables: [{ ...wrapper.props('environmentVariables')![0], value: '24' }] })
+      await input.trigger('change')
+      const [updates, complete] = wrapper.emitted('save-environment')!.at(-1)!
+      expect(updates).toMatchObject([{ expected: { value: '20' }, desired: { value: '25' } }])
+      const reject = complete as (saved: boolean, failure: ApiErrorDetails) => void
+      reject(false, { reasonCode: 'ENVIRONMENT_VARIABLE_STALE', cause: 'Review the current value', details: [], fields: {} })
+      await flushPromises()
+      expect(input.element.value).toBe('25')
+      expect(wrapper.get('[data-testid="environment-value-failure-temperature"]').text()).toContain('Review the current value')
+      await input.setValue('26')
+      expect(wrapper.emitted('save-environment')!.at(-1)![0]).toMatchObject([
+        { expected: { value: '24' }, desired: { value: '26' } }
+      ])
+    } finally { wrapper.unmount() }
+  })
+
+  it('keeps the unconfirmed draft when recovery matches it and an undo changes the actual value', async () => {
+    const wrapper = await mountEnvironmentEditor()
+    const original = wrapper.props('environmentVariables')!
+    const input = wrapper.get('[data-testid="environment-value-temperature"]')
+    await input.setValue('25')
+    const complete = wrapper.emitted('save-environment')!.at(-1)![1] as (saved: boolean, failure?: ApiErrorDetails) => void
+
+    await wrapper.setProps({ environmentVariables: [{ ...original[0], value: '25' }] })
+    complete(false, { reasonCode: BOARD_ITEM_EDIT_OUTCOME_UNKNOWN, cause: 'Change unconfirmed', details: [], fields: {} })
+    await wrapper.setProps({ environmentVariables: original })
+
+    expect(wrapper.get('[data-testid="environment-save-unconfirmed"]').text()).toBe('Change unconfirmed')
+    expect(wrapper.get('article button').text()).toContain('20')
+    expect(input.element).toHaveProperty('value', '25')
+    expect(input.attributes('aria-invalid')).toBeUndefined()
+    wrapper.unmount()
+  })
   it('preserves an invalid value draft when saving only its trust label', async () => {
     const wrapper = await mountEnvironmentEditor()
     const input = wrapper.get('[data-testid="environment-value-temperature"]')
@@ -197,10 +239,16 @@ describe('inspector environment inventory', () => {
     expect(wrapper.get('[data-testid="environment-value-failure-temperature"]').text()).toContain('0 to 100')
     vi.useFakeTimers()
     try {
-      await wrapper.get('[data-testid="inspector-search-environment"]').setValue('Hall sensor')
+      const environmentSearch = '[data-testid="inspector-search-environment"]'
+      await wrapper.get(environmentSearch).setValue('Hall sensor')
+      await wrapper.setProps({ activeSection: 'devices' })
+      expect(wrapper.find(environmentSearch).exists()).toBe(false)
+      expect(wrapper.get<HTMLInputElement>('[data-testid="inspector-search-devices"]').element.value).toBe('')
+      await wrapper.setProps({ activeSection: 'environment' })
+      expect(wrapper.get<HTMLInputElement>(environmentSearch).element.value).toBe('Hall sensor')
       await vi.advanceTimersByTimeAsync(200)
       expect(wrapper.findAll('[data-environment-name]')).toHaveLength(1)
-      await wrapper.get('[data-testid="inspector-search-environment"]').setValue('absent')
+      await wrapper.get(environmentSearch).setValue('absent')
       await vi.advanceTimersByTimeAsync(200)
       expect(wrapper.findAll('[data-environment-name]')).toHaveLength(0)
       expect(wrapper.text()).toContain('No matching environment variables')
@@ -296,8 +344,12 @@ describe('SystemInspector rule execution order', () => {
     try {
       const clearSelector = `button[aria-label="${i18n.global.t('app.clearSearch')}"]`
       expect(wrapper.find(clearSelector).exists()).toBe(false)
-      const input = wrapper.get(`[data-testid="inspector-search-${section}"]`)
-      await input.setValue('Hall')
+      const input = wrapper.get<HTMLInputElement>(`[data-testid="inspector-search-${section}"]`)
+      await input.trigger('compositionstart')
+      input.element.value = 'Hall'
+      await input.trigger('input')
+      expect(wrapper.find(clearSelector).exists()).toBe(false)
+      await input.trigger('compositionend')
       await wrapper.get(clearSelector).trigger('click')
       expect((input.element as HTMLInputElement).value).toBe('')
       expect(wrapper.find(clearSelector).exists()).toBe(false)

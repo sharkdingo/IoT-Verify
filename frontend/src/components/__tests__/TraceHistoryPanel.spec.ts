@@ -6,111 +6,22 @@ import { describe, expect, it, vi } from 'vitest'
 import TraceHistoryPanel from '../TraceHistoryPanel.vue'
 import type { AvailableVerificationRunSummary, TraceSummary, VerificationRunSummary, VerificationTaskSummary } from '@/types/verify'
 import type { AvailableSimulationTraceSummary, SimulationTaskSummary, SimulationTraceSummary } from '@/types/simulation'
-import type { FuzzingRunSummary, FuzzingTaskSummary } from '@/types/fuzzing'
+import type { AvailableFuzzingRunSummary, FuzzingFindingSummary, FuzzingRunSummary, FuzzingTaskSummary } from '@/types/fuzzing'
 import type { ModelRunSnapshot } from '@/types/modelSemantics'
 import type { Specification } from '@/types/spec'
 import actualI18n from '@/assets/i18n'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 
-const i18n = createI18n({
+const historyI18n = (locale: 'en' | 'zh-CN' = 'en') => createI18n({
   legacy: false,
-  locale: 'en',
+  locale,
+  fallbackLocale: 'en',
   messages: {
-    en: {
-      household: actualI18n.global.getLocaleMessage('en').household,
-      app: {
-        ...actualI18n.global.getLocaleMessage('en').app,
-        runHistory: 'Run History',
-        runInitiatedByAssistant: 'Started by AI assistant',
-        runInitiatorUnknown: 'Source unavailable',
-        // Real copy, so assertions read the sentence the user sees rather than a raw key: with
-        // these absent, `t()` echoed the key and the tests passed on untranslated output.
-        runAssumptionsLabel: 'Run assumptions',
-        runAssumptionNoAttack: 'No attack modeled',
-        runAssumptionAttackBudget: 'Up to {count} of {total} compromised',
-        runAssumptionAttackPoints: '{count} chosen attack points',
-        runAssumptionPrivacy: 'Sensitivity propagation tracked',
-        historicalFixMayFailIfBoardChanged:
-          'This fix was found for the board as it was; it may no longer apply.',
-        // Real copy for the same reason as the block above: without it, `t()` echoes the key and intlify
-        // logs a missing-key warning that reads exactly like a product defect. It is not — both locales
-        // carry this key — but the warning was reported as one, which is the cost of a partial fixture.
-        adjustAndRunAgain: 'Adjust settings',
-        close: 'Close',
-        taskStatusLayer: 'Task Status',
-        historyResultsLayer: 'History Results',
-        pendingTaskSummary: '{active} active, {unresolved} without a result',
-        refresh: 'Refresh',
-        loadingTasks: 'Loading tasks',
-        noPendingTasks: 'No tasks need attention',
-        noPendingTasksHint: 'Completed runs move to history.',
-        runningTasks: 'Running Tasks',
-        tasksWithoutResults: 'No Result Produced',
-        verification: 'Verification',
-        fuzzSearch: 'Counterexample Search',
-        simulation: 'Simulation',
-        taskStatusRunning: 'Running',
-        taskStatusFailed: 'Failed',
-        taskStatusCancelled: 'Cancelled',
-        taskInitializing: 'Initializing',
-        progress: 'Progress',
-        watchTask: 'Watch',
-        cancel: 'Cancel',
-        failedTaskNoResult: 'The task failed without a result.',
-        cancelledTaskNoResult: 'The task was cancelled without a result.',
-        technicalDetails: 'Technical Details',
-        dismissTask: 'Dismiss',
-        allResults: 'All',
-        loadingRunResults: 'Loading history results',
-        loadMoreFuzzingResults: 'Load more counterexample results',
-        loadingMoreFuzzingResults: 'Loading more counterexample results',
-        noRunResults: 'No history results',
-        noRunResultsHint: 'Completed results appear here.',
-        verificationRunResult: 'Verification Result',
-        simulationRunResult: 'Simulation Result',
-        fuzzRunResult: 'Counterexample search result',
-        fuzzModeBoard: 'Board snapshot',
-        fuzzModePaper: 'Random state and events',
-        fuzzModeBoardDescription: 'Starts from the frozen Board initial state.',
-        fuzzModePaperDescription: 'Starts from a legal random state and searches reproducible inputs; it is not a proof.',
-        fuzzViolationFound: 'Candidate violation found',
-        fuzzBudgetExhausted: 'Search budget exhausted',
-        fuzzInconclusive: 'Search inconclusive',
-        fuzzRunCounts: '{iterations} iterations, {paths} paths, {elapsed}',
-        fuzzBoardScopeChanged: 'Current Board scope changed.',
-        fuzzNoViolationWithinBudget: 'No violation was found within this budget. This is not a safety proof.',
-        fuzzFindingsCount: '{count} candidate findings',
-        fuzzFirstViolationStep: 'First violation: step {step}',
-        verificationPassed: 'Checked specifications passed',
-        verificationPassedWithGenerationWarnings: 'Checked specifications satisfied; model incomplete',
-        verificationFailedWithViolations: 'Found {count} specification violation(s)',
-        verificationInconclusiveSummary: 'Verification inconclusive',
-        inconclusiveEvidenceSummary: '{counterexamples} saved counterexample(s) are partial evidence, not a complete verdict.',
-        incompleteModel: 'Incomplete model',
-        runScopeCounts: '{devices} devices, {rules} rules, {specs} specs',
-        simulationHistoryCounts: 'Requested {requested}, produced {steps}, {states} states',
-        openResult: 'Open Result',
-        delete: 'Delete',
-        violationEvidenceSummary: '{violations} violations, {counterexamples} counterexamples',
-        someViolationsHaveNoReplayableCounterexample: 'Some violations have no replayable counterexample.',
-        unknownSpecification: 'Unknown specification',
-        statesCount: '{count} states',
-        replay: 'Replay',
-        fix: 'Fix',
-        fixRules: 'Fix rules',
-        unknownModelItem: 'Unknown item',
-        unknownOmissionReason: 'Unknown reason',
-        generationIssueSpecUnknownDevice: 'The referenced device is unavailable.',
-        historyActionsLockedHint: 'Close playback first.',
-        historyItemUnavailable: 'History item unavailable',
-        historyItemUnavailableDetail: 'This saved result is damaged and cannot be opened.',
-        historyTraceUnavailableDetail: 'This counterexample is damaged and cannot be replayed.',
-        historyFindingUnavailableDetail: 'This candidate trace is damaged and cannot be used.',
-        retry: 'Retry'
-      }
-    }
+    en: actualI18n.global.getLocaleMessage('en'),
+    'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
   }
 })
+const i18n = historyI18n()
 
 const snapshot = (specificationCount: number) => ({
   capturedAt: '2026-07-13T10:00:00',
@@ -122,6 +33,77 @@ const snapshot = (specificationCount: number) => ({
   modelFingerprint: 'a'.repeat(64),
   modelSemanticsVersion: 1,
   templatesFrozen: true as const
+})
+
+const foundFuzzingRun = (id: number, findings: FuzzingFindingSummary[]): AvailableFuzzingRunSummary => ({
+  eligibleSpecifications: {},
+  modelTokenSourcesByDeviceId: {},
+  id,
+  initiator: 'USER',
+  explorationMode: 'BOARD_SNAPSHOT',
+  outcome: 'FOUND_VIOLATION',
+  effectiveSeed: 42,
+  iterations: 1,
+  generatedPaths: 1,
+  elapsedMs: 10,
+  modelSnapshot: snapshot(1),
+  eligibility: {
+    eligibleSpecIds: ['spec-1'],
+    eligibleSpecLabels: { 'spec-1': 'Frozen door safety label' },
+    ineligibleSpecs: [],
+    requestedSpecCount: 1,
+    eligibleSpecCount: 1
+  },
+  limitations: [],
+  maxIterations: 10,
+  pathLength: 2,
+  populationSize: 1,
+  createdAt: '2026-07-13T11:00:00',
+  completedAt: '2026-07-13T11:00:01',
+  findingCount: findings.length,
+  findings,
+  dataAvailable: true
+})
+
+const budgetExhaustedFuzzingRun = (id: number, effectiveSeed: number): AvailableFuzzingRunSummary => ({
+  eligibleSpecifications: {},
+  modelTokenSourcesByDeviceId: {},
+  id,
+  initiator: 'USER',
+  explorationMode: 'BOARD_SNAPSHOT',
+  outcome: 'BUDGET_EXHAUSTED',
+  effectiveSeed,
+  iterations: 10,
+  generatedPaths: 20,
+  elapsedMs: 100,
+  modelSnapshot: snapshot(1),
+  eligibility: {
+    eligibleSpecIds: ['spec-1'],
+    eligibleSpecLabels: { 'spec-1': 'Door remains closed' },
+    ineligibleSpecs: [],
+    requestedSpecCount: 1,
+    eligibleSpecCount: 1
+  },
+  limitations: [],
+  maxIterations: 10,
+  pathLength: 5,
+  populationSize: 2,
+  createdAt: '2026-07-13T11:00:00',
+  completedAt: '2026-07-13T11:00:01',
+  findingCount: 0,
+  findings: [],
+  dataAvailable: true
+})
+
+const unavailableVerificationRun = (initiator: VerificationRunSummary['initiator']): VerificationRunSummary => ({
+  id: 99,
+  initiator,
+  createdAt: '2026-07-13T10:00:00',
+  completedAt: '2026-07-13T10:00:02',
+  counterexampleCount: 0,
+  counterexamples: [],
+  dataAvailable: false,
+  unavailableReasonCode: 'PERSISTED_SEMANTIC_DATA_INVALID'
 })
 
 const semantics = {
@@ -156,9 +138,7 @@ const baseProps = {
 
 describe('TraceHistoryPanel two-layer semantics', () => {
   it.each(['en', 'zh-CN'] as const)('keeps a passing summary neutral until trigger evidence is opened in %s', locale => {
-    const translations = createI18n({ legacy: false, locale, messages: {
-      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
-    } })
+    const translations = historyI18n(locale)
     const wrapper = mount(TraceHistoryPanel, {
       props: { ...baseProps, activeLayer: 'results', verificationRuns: [runWithSnapshot(31, snapshot(1))] },
       global: { plugins: [translations] }
@@ -356,9 +336,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
 
   it('keeps exploration outcomes, duration and contextual help consistent', async () => {
     const locale = 'en'
-    const translations = createI18n({ legacy: false, locale, messages: {
-      en: actualI18n.global.getLocaleMessage('en'), 'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
-    } })
+    const translations = historyI18n(locale)
     const run: FuzzingRunSummary = {
       id: 55, initiator: 'USER', dataAvailable: true, explorationMode: 'BOARD_SNAPSHOT',
       outcome: 'BUDGET_EXHAUSTED', effectiveSeed: 1, iterations: 2, generatedPaths: 4, elapsedMs: 5000,
@@ -487,9 +465,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   it('shows an English cause and field diagnostics under Chinese failure copy without claiming an empty inbox', () => {
-    const chinese = createI18n({ legacy: false, locale: 'zh-CN', messages: {
-      'zh-CN': actualI18n.global.getLocaleMessage('zh-CN')
-    } })
+    const chinese = historyI18n('zh-CN')
     const wrapper = mount(TraceHistoryPanel, {
       props: { ...baseProps, activeLayer: 'tasks', taskError: {
         cause: 'Task storage could not be read',
@@ -559,12 +535,12 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     wrapper.unmount()
   })
 
-  it('keeps simulation omissions visible without a redundant complete-model badge', () => {
-    const normal: AvailableSimulationTraceSummary = { id: 91, initiator: 'USER', dataAvailable: true,
+  it('keeps simulation omissions visible without a redundant complete-model badge', async () => {
+    const normal: AvailableSimulationTraceSummary = { id: 91, initiator: 'USER', dataAvailable: true, hasSmvModel: false,
       modelComplete: true, disabledRuleCount: 0, generationIssues: [], requestedSteps: 2, steps: 2,
       isAttack: false, attackBudget: 0, enablePrivacy: false, createdAt: '2026-07-13T10:00:00',
       modelSnapshot: { ...snapshot(0), ruleCount: 0 } }
-    const incomplete: AvailableSimulationTraceSummary = { ...normal, id: 92, modelComplete: false,
+    const incomplete: AvailableSimulationTraceSummary = { ...normal, id: 92, modelComplete: false, hasSmvModel: true,
       disabledRuleCount: 1, modelSnapshot: { ...snapshot(0), ruleCount: 1 }, generationIssues: [{
         issueType: 'RULE_DISABLED', itemLabel: 'Missing device', reasonCode: 'RULE_UNRESOLVABLE_TRIGGER_CONDITION',
         reason: 'The trigger references an unavailable device.'
@@ -575,9 +551,17 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       const complete = wrapper.get('[data-testid="history-result-simulation-91"]')
       expect(complete.text()).not.toContain('All rules included')
       expect(complete.text()).not.toContain('Incomplete model')
-      expect(complete.text()).toContain('Requested 2, produced 2, 3 states')
+      expect(complete.text()).toContain('Steps: 2 / 2 requested · Model states: 3')
       expect(complete.get('[data-testid="replay-simulation-trace-91"]').attributes('disabled')).toBeUndefined()
-      expect(wrapper.get('[data-testid="history-result-simulation-92"] .history-badge').text()).toBe('Incomplete model')
+      const partial = wrapper.get('[data-testid="history-result-simulation-92"]')
+      expect(partial.get('.history-badge').text()).toBe('Incomplete model')
+      const downloads = wrapper.findAll('[data-testid^="download-simulation-trace-smv-"]')
+      expect(downloads).toHaveLength(1)
+      const download = partial.get('[data-testid="download-simulation-trace-smv-92"]')
+      expect(download.text()).toBe('Download SMV Model')
+      expect(download.attributes('disabled')).toBeUndefined()
+      await download.trigger('click')
+      expect(wrapper.emitted('download-simulation-trace-smv')).toEqual([[92]])
     } finally { wrapper.unmount() }
   })
 
@@ -665,8 +649,9 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
+    expect(wrapper.find('[data-testid="history-task-verification-2"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('1 active, 1 without a result')
-    expect(wrapper.text()).toContain('The task failed without a result.')
+    expect(wrapper.text()).toContain('The task failed, so it produced no result to inspect.')
     // The reported cause must be visible, not folded into a collapsed disclosure. It previously sat
     // inside `<details>`; `wrapper.text()` includes collapsed content, so this file asserted the
     // message was "shown" while a real browser showed only the summary — two reviews of an actual
@@ -674,7 +659,6 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     const failureReason = wrapper.get('[data-testid="task-failure-reason-simulation-3"]')
     expect(failureReason.text()).toContain('NuSMV could not start')
     expect(wrapper.find('details').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('Checked specifications passed')
     expect(wrapper.findAll('button').some(button => button.text().includes('Dismiss'))).toBe(true)
     const cancelButton = wrapper.findAll('button').find(button => button.text().includes('Cancel'))!
     const dismissButton = wrapper.findAll('button').find(button => button.text().includes('Dismiss'))!
@@ -683,7 +667,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     expect(dismissButton.attributes('disabled')).toBeDefined()
     expect(dismissButton.attributes('aria-busy')).toBe('true')
     const progressbar = wrapper.get('[role="progressbar"]')
-    expect(progressbar.attributes('aria-label')).toBe('Verification Progress')
+    expect(progressbar.attributes('aria-label')).toBe('Check Progress')
     expect(progressbar.attributes('aria-valuenow')).toBe('40')
     expect(wrapper.text()).toContain('7/13/2026')
     expect(wrapper.text()).toContain('Started by AI assistant')
@@ -807,11 +791,11 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     })
 
     const plain = wrapper.get('[data-testid="verification-run-assumptions-11"]')
-    expect(plain.text()).toContain('No attack modeled')
-    expect(plain.attributes('aria-label')).toBe('Run assumptions')
+    expect(plain.text()).toContain('No compromise modeled')
+    expect(plain.attributes('aria-label')).toBe('Assumptions for this run')
 
     const attacked = wrapper.get('[data-testid="verification-run-assumptions-12"]')
-    expect(attacked.text()).toContain('Up to 2 of 5 compromised')
+    expect(attacked.text()).toContain('Up to 2/5 compromised')
     expect(attacked.text()).toContain('Sensitivity propagation tracked')
 
     const exact = wrapper.get('[data-testid="verification-run-assumptions-13"]')
@@ -868,32 +852,17 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   it.each([
-    ['UNCHANGED', 'a'.repeat(64), currentModels, false, 'it may no longer apply'],
-    ['CHANGED', 'b'.repeat(64), currentModels, false, 'Results apply to the run snapshot'],
+    ['UNCHANGED', 'a'.repeat(64), currentModels, false, 'applying the fix may be rejected'],
+    ['CHANGED', 'b'.repeat(64), currentModels, false, 'Verify again'],
     ['UNAVAILABLE', 'a'.repeat(64), null, false, 'could not be read'],
     ['UNAVAILABLE', 'a'.repeat(64), null, true, 'Comparing the current board'],
-    ['NOT_COMPARED', null, currentModels, false, 'lacks model comparison data']
+    ['NOT_COMPARED', null, currentModels, false, 'has no model comparison evidence']
   ] as const)('allows historical Fix only with an %s match and keeps replay available', async (comparison, fingerprint, current, loading, detail) => {
     const run: VerificationRunSummary = {
-      id: 30,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
-      startedAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      isAttack: false,
-      attackBudget: 0,
-      enablePrivacy: false,
-      modelSemantics: semantics,
-      modelSnapshot: { ...snapshot(2), modelFingerprint: fingerprint },
+      ...runWithSnapshot(30, { ...snapshot(2), modelFingerprint: fingerprint }),
       outcome: 'VIOLATED',
-      modelComplete: true,
       violatedSpecCount: 1,
-      counterexampleCount: 1,
-      disabledRuleCount: 0,
-      skippedSpecCount: 0,
-      generationIssues: [],
-      dataAvailable: true,
-      counterexamples: []
+      counterexampleCount: 1
     }
     run.counterexamples = [{
       id: 41,
@@ -919,35 +888,23 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     await fix.trigger('click')
     expect(wrapper.emitted('fix-verification-trace')?.length ?? 0).toBe(comparison === 'UNCHANGED' ? 1 : 0)
     if (comparison === 'UNCHANGED') {
-      await wrapper.setProps({ rejectedVerificationRepairTraceIds: new Set([41]) })
+      await wrapper.setProps({ verificationRepairBlocks: new Map([[41, 'app.runBoardSemanticsChanged']]) })
       expect(fix.attributes('disabled')).toBeDefined()
       expect(wrapper.get(`#${fix.attributes('aria-describedby')}`).text()).toContain('modeling version')
       expect(wrapper.get('[data-testid="view-verification-trace-41"]').attributes('disabled')).toBeUndefined()
+      await wrapper.setProps({ verificationRepairBlocks: new Map([[41, 'app.fixApplyUnconfirmedReverify']]) })
+      expect(fix.attributes('disabled')).toBeDefined()
+      expect(wrapper.get(`#${fix.attributes('aria-describedby')}`).text()).toContain('could not be confirmed')
     }
     wrapper.unmount()
   })
 
   it('groups counterexamples under one verification result and distinguishes violations from replayable evidence', () => {
     const run: VerificationRunSummary = {
-      id: 11,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
-      startedAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      isAttack: false,
-      attackBudget: 0,
-      enablePrivacy: false,
-      modelSemantics: semantics,
-      modelSnapshot: snapshot(2),
+      ...runWithSnapshot(11, snapshot(2)),
       outcome: 'VIOLATED',
-      modelComplete: true,
       violatedSpecCount: 2,
-      counterexampleCount: 1,
-      disabledRuleCount: 0,
-      skippedSpecCount: 0,
-      generationIssues: [],
-      dataAvailable: true,
-      counterexamples: []
+      counterexampleCount: 1
     }
     const trace = {
       id: 21,
@@ -968,9 +925,9 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('Found 2 specification violation(s)')
+    expect(wrapper.text()).toContain('2 specifications violated')
     expect(wrapper.text()).toContain('1 counterexample')
-    expect(wrapper.text()).toContain('Some violations have no replayable counterexample.')
+    expect(wrapper.text()).toContain('Some violations have no replayable trace.')
     expect(wrapper.findAll('button').some(button => button.text() === 'Replay')).toBe(true)
     expect(wrapper.findAll('button').some(button => button.text() === 'Fix rules')).toBe(true)
   })
@@ -989,25 +946,9 @@ describe('TraceHistoryPanel two-layer semantics', () => {
    */
   it('explains a violated run that produced no replayable counterexample', () => {
     const run: VerificationRunSummary = {
-      id: 15,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
-      startedAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      isAttack: false,
-      attackBudget: 0,
-      enablePrivacy: false,
-      modelSemantics: semantics,
-      modelSnapshot: snapshot(2),
+      ...runWithSnapshot(15, snapshot(2)),
       outcome: 'VIOLATED',
-      modelComplete: true,
-      violatedSpecCount: 2,
-      counterexampleCount: 0,
-      disabledRuleCount: 0,
-      skippedSpecCount: 0,
-      generationIssues: [],
-      dataAvailable: true,
-      counterexamples: []
+      violatedSpecCount: 2
     }
 
     const wrapper = mount(TraceHistoryPanel, {
@@ -1016,10 +957,10 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     })
 
     expect(wrapper.text(), 'the violation count must still be stated')
-      .toContain('Found 2 specification violation(s)')
+      .toContain('2 specifications violated')
     expect(wrapper.text()).toContain('0 counterexamples')
     expect(wrapper.text(), 'and the reason nothing is replayable must be stated too')
-      .toContain('Some violations have no replayable counterexample.')
+      .toContain('Some violations have no replayable trace.')
     expect(
       wrapper.findAll('button').some(button => button.text() === 'Replay'),
       'with no trace there is nothing to replay'
@@ -1028,21 +969,11 @@ describe('TraceHistoryPanel two-layer semantics', () => {
 
   it('keeps replayable counterexamples visible when the overall verification is inconclusive', () => {
     const run: VerificationRunSummary = {
-      id: 14,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
-      startedAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      isAttack: false,
-      attackBudget: 0,
-      enablePrivacy: false,
-      modelSemantics: semantics,
-      modelSnapshot: snapshot(2),
+      ...runWithSnapshot(14, snapshot(2)),
       outcome: 'INCONCLUSIVE',
       modelComplete: false,
       violatedSpecCount: 1,
       counterexampleCount: 1,
-      disabledRuleCount: 0,
       skippedSpecCount: 1,
       generationIssues: [{
         issueType: 'SPECIFICATION_SKIPPED',
@@ -1050,7 +981,6 @@ describe('TraceHistoryPanel two-layer semantics', () => {
         reasonCode: 'SPEC_UNKNOWN_DEVICE',
         reason: 'The referenced device is unavailable.'
       }],
-      dataAvailable: true,
       counterexamples: [{
         id: 22,
         verificationTaskId: 14,
@@ -1070,11 +1000,11 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('Verification inconclusive')
-    expect(wrapper.text()).toContain('1 saved counterexample(s) are partial evidence')
+    expect(wrapper.text()).toContain('Verification is inconclusive')
+    expect(wrapper.text()).toContain('1 parsed counterexamples are available as partial evidence')
     expect(wrapper.find('[data-testid="view-verification-trace-22"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="fix-verification-trace-22"]').exists()).toBe(true)
-    expect(wrapper.text()).not.toContain('1 violations, 1 counterexamples')
+    expect(wrapper.text()).not.toContain('1 specification violated')
   })
 
   it('shows the selected exploration mode on active fuzz tasks', () => {
@@ -1101,36 +1031,23 @@ describe('TraceHistoryPanel two-layer semantics', () => {
 
     const badge = wrapper.get('[data-testid="fuzzing-task-mode-7"]')
     expect(badge.text()).toContain('Random state and events')
-    expect(badge.getComponent(InfoTooltip).props('text')).toContain('legal random state')
+    expect(badge.getComponent(InfoTooltip).props('text')).toContain('random legal state')
     expect(badge.attributes('title')).toBeUndefined()
   })
 
   it('renders localized omission copy instead of the backend technical diagnostic', () => {
     const run: VerificationRunSummary = {
-      id: 12,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
+      ...runWithSnapshot(12, snapshot(1)),
       startedAt: '2026-07-13T10:00:01',
-      completedAt: '2026-07-13T10:00:02',
-      isAttack: false,
-      attackBudget: 0,
-      enablePrivacy: false,
-      modelSemantics: semantics,
-      modelSnapshot: snapshot(1),
       outcome: 'INCONCLUSIVE',
       modelComplete: false,
-      violatedSpecCount: 0,
-      counterexampleCount: 0,
-      disabledRuleCount: 0,
       skippedSpecCount: 1,
       generationIssues: [{
         issueType: 'SPECIFICATION_SKIPPED',
         itemLabel: 'Keep camera off',
         reasonCode: 'SPEC_UNKNOWN_DEVICE',
         reason: "device 'camera_7' not found in deviceSmvMap"
-      }],
-      dataAvailable: true,
-      counterexamples: []
+      }]
     }
 
     const wrapper = mount(TraceHistoryPanel, {
@@ -1142,21 +1059,12 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('The referenced device is unavailable.')
+    expect(wrapper.text()).toContain('references a device that is missing or no longer matches the current board')
     expect(wrapper.text()).not.toContain('deviceSmvMap')
   })
 
   it('keeps an unavailable history item visible but exposes only deletion', () => {
-    const unavailableRun: VerificationRunSummary = {
-      id: 99,
-      initiator: 'UNKNOWN',
-      createdAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      counterexampleCount: 0,
-      counterexamples: [],
-      dataAvailable: false,
-      unavailableReasonCode: 'PERSISTED_SEMANTIC_DATA_INVALID'
-    }
+    const unavailableRun = unavailableVerificationRun('UNKNOWN')
 
     const wrapper = mount(TraceHistoryPanel, {
       props: {
@@ -1167,24 +1075,15 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('History item unavailable')
-    expect(wrapper.text()).toContain('This saved result is damaged and cannot be opened.')
+    expect(wrapper.text()).toContain('This saved result is unavailable')
+    expect(wrapper.text()).toContain('Saved data is incomplete or damaged.')
     expect(wrapper.get('[data-testid="delete-verification-run-99"]').attributes('aria-label')).toBe('Delete')
     expect(wrapper.findAll('button').some(button => button.text() === 'Open Result')).toBe(false)
     expect(wrapper.findAll('button').some(button => button.text() === 'Replay')).toBe(false)
   })
 
   it('disables a result delete action while that exact deletion is pending', async () => {
-    const unavailableRun: VerificationRunSummary = {
-      id: 99,
-      initiator: 'USER',
-      createdAt: '2026-07-13T10:00:00',
-      completedAt: '2026-07-13T10:00:02',
-      counterexampleCount: 0,
-      counterexamples: [],
-      dataAvailable: false,
-      unavailableReasonCode: 'PERSISTED_SEMANTIC_DATA_INVALID'
-    }
+    const unavailableRun = unavailableVerificationRun('USER')
     const wrapper = mount(TraceHistoryPanel, {
       props: {
         ...baseProps,
@@ -1223,52 +1122,24 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('History item unavailable')
+    expect(wrapper.text()).toContain('This saved result is unavailable')
     expect(wrapper.get('[data-testid="delete-fuzzing-run-100"]').attributes('aria-label')).toBe('Delete')
     expect(wrapper.findAll('button').some(button => button.text() === 'Open Result')).toBe(false)
     expect(wrapper.findAll('button').some(button => button.text() === 'Replay')).toBe(false)
-    expect(wrapper.findAll('button').some(button => button.text() === 'Verify formally')).toBe(false)
+    expect(wrapper.find('[data-testid^="verify-fuzzing-finding-"]').exists()).toBe(false)
   })
 
   it('treats fuzz findings as metadata-only summaries and validates evidence on action', async () => {
-    const run: FuzzingRunSummary = {
-      eligibleSpecifications: {},
-      modelTokenSourcesByDeviceId: {},
-      id: 40,
-      initiator: 'USER',
-      explorationMode: 'BOARD_SNAPSHOT',
-      outcome: 'FOUND_VIOLATION',
-      effectiveSeed: 42,
-      iterations: 1,
-      generatedPaths: 1,
-      elapsedMs: 10,
-      modelSnapshot: snapshot(1),
-      eligibility: {
-        eligibleSpecIds: ['spec-1'],
-        eligibleSpecLabels: { 'spec-1': 'Frozen door safety label' },
-        ineligibleSpecs: [],
-        requestedSpecCount: 1,
-        eligibleSpecCount: 1
-      },
-      limitations: [],
-      maxIterations: 10,
-      pathLength: 2,
-      populationSize: 1,
-      createdAt: '2026-07-13T11:00:00',
-      completedAt: '2026-07-13T11:00:01',
-      findingCount: 1,
-      findings: [{
-        id: 401,
-        fuzzTaskId: 40,
-        violatedSpecId: 'spec-1',
-        specificationLabel: 'Frozen door safety label',
-        firstViolationStep: 0,
-        seed: 42,
-        createdAt: '2026-07-13T11:00:01',
-        stateCount: 1
-      }],
-      dataAvailable: true
-    }
+    const run = foundFuzzingRun(40, [{
+      id: 401,
+      fuzzTaskId: 40,
+      violatedSpecId: 'spec-1',
+      specificationLabel: 'Frozen door safety label',
+      firstViolationStep: 0,
+      seed: 42,
+      createdAt: '2026-07-13T11:00:01',
+      stateCount: 1
+    }])
 
     const wrapper = mount(TraceHistoryPanel, {
       props: {
@@ -1315,35 +1186,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       dataAvailable: true as const,
       unavailableReasonCode: undefined
     }
-    const run: FuzzingRunSummary = {
-      eligibleSpecifications: {},
-      modelTokenSourcesByDeviceId: {},
-      id: 40,
-      initiator: 'USER',
-      explorationMode: 'BOARD_SNAPSHOT',
-      outcome: 'FOUND_VIOLATION',
-      effectiveSeed: 42,
-      iterations: 1,
-      generatedPaths: 1,
-      elapsedMs: 10,
-      modelSnapshot: snapshot(1),
-      eligibility: {
-        eligibleSpecIds: ['spec-1'],
-        eligibleSpecLabels: { 'spec-1': 'Frozen door safety label' },
-        ineligibleSpecs: [],
-        requestedSpecCount: 1,
-        eligibleSpecCount: 1
-      },
-      limitations: [],
-      maxIterations: 10,
-      pathLength: 2,
-      populationSize: 1,
-      createdAt: '2026-07-13T11:00:00',
-      completedAt: '2026-07-13T11:00:01',
-      findingCount: 2,
-      findings: [unavailableFinding, availableFinding],
-      dataAvailable: true
-    }
+    const run = foundFuzzingRun(40, [unavailableFinding, availableFinding])
 
     const wrapper = mount(TraceHistoryPanel, {
       props: {
@@ -1355,7 +1198,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
       global: { plugins: [i18n] }
     })
 
-    expect(wrapper.text()).toContain('This candidate trace is damaged and cannot be used.')
+    expect(wrapper.text()).toContain('This candidate trace is incomplete, so replay and formal verification are disabled.')
     expect(wrapper.get('[data-testid="view-fuzzing-finding-402"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="verify-fuzzing-finding-402"]').attributes('disabled')).toBeDefined()
     const replay = wrapper.get('[data-testid="view-fuzzing-finding-403"]')
@@ -1369,34 +1212,16 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   it('presents budget exhaustion as a neutral heuristic result, not a proof or fix target', () => {
-    const run: FuzzingRunSummary = {
-      eligibleSpecifications: {},
-      modelTokenSourcesByDeviceId: {},
-      id: 41,
-      initiator: 'USER',
-      explorationMode: 'BOARD_SNAPSHOT',
-      outcome: 'BUDGET_EXHAUSTED',
-      effectiveSeed: 42,
+    const run = {
+      ...budgetExhaustedFuzzingRun(41, 42),
       iterations: 500,
       generatedPaths: 5000,
       elapsedMs: 1200,
-      modelSnapshot: snapshot(1),
-      eligibility: {
-        eligibleSpecIds: ['spec-1'],
-        eligibleSpecLabels: { 'spec-1': 'Door remains closed' },
-        ineligibleSpecs: [],
-        requestedSpecCount: 1,
-        eligibleSpecCount: 1
-      },
       limitations: ['Finite heuristic search.'],
       maxIterations: 500,
       pathLength: 20,
       populationSize: 10,
-      createdAt: '2026-07-13T11:00:00',
-      completedAt: '2026-07-13T11:00:02',
-      findingCount: 0,
-      findings: [],
-      dataAvailable: true
+      completedAt: '2026-07-13T11:00:02'
     }
 
     const wrapper = mount(TraceHistoryPanel, {
@@ -1411,43 +1236,15 @@ describe('TraceHistoryPanel two-layer semantics', () => {
     })
 
     expect(wrapper.text()).toContain('Search budget exhausted')
-    expect(wrapper.get('[data-testid="fuzzing-history-mode-41"]').text()).toContain('Board snapshot')
-    expect(wrapper.text()).toContain('This is not a safety proof.')
+    expect(wrapper.get('[data-testid="fuzzing-history-mode-41"]').text()).toContain('Board initial state')
+    expect(wrapper.text()).toContain('Specification satisfaction remains undetermined.')
     expect(wrapper.get('[data-testid="fuzzing-history-model-comparison-41"]').attributes('data-state')).toBe('UNAVAILABLE')
     expect(wrapper.findAll('button').some(button => button.text() === 'Fix rules')).toBe(false)
-    expect(wrapper.findAll('button').some(button => button.text() === 'Verify formally')).toBe(false)
+    expect(wrapper.find('[data-testid^="verify-fuzzing-finding-"]').exists()).toBe(false)
   })
 
   it('detects semantic drift when counts match but model fingerprints differ', () => {
-    const run: FuzzingRunSummary = {
-      eligibleSpecifications: {},
-      modelTokenSourcesByDeviceId: {},
-      id: 42,
-      initiator: 'USER',
-      explorationMode: 'BOARD_SNAPSHOT',
-      outcome: 'BUDGET_EXHAUSTED',
-      effectiveSeed: 42,
-      iterations: 10,
-      generatedPaths: 20,
-      elapsedMs: 100,
-      modelSnapshot: { ...snapshot(1), modelFingerprint: 'a'.repeat(64) },
-      eligibility: {
-        eligibleSpecIds: ['spec-1'],
-        eligibleSpecLabels: { 'spec-1': 'Door remains closed' },
-        ineligibleSpecs: [],
-        requestedSpecCount: 1,
-        eligibleSpecCount: 1
-      },
-      limitations: [],
-      maxIterations: 10,
-      pathLength: 5,
-      populationSize: 2,
-      createdAt: '2026-07-13T11:00:00',
-      completedAt: '2026-07-13T11:00:01',
-      findingCount: 0,
-      findings: [],
-      dataAvailable: true
-    }
+    const run = budgetExhaustedFuzzingRun(42, 42)
 
     const wrapper = mount(TraceHistoryPanel, {
       props: {
@@ -1465,35 +1262,7 @@ describe('TraceHistoryPanel two-layer semantics', () => {
   })
 
   it('does not claim a fingerprinted run is unchanged when the current fingerprint is unavailable', () => {
-    const run: FuzzingRunSummary = {
-      eligibleSpecifications: {},
-      modelTokenSourcesByDeviceId: {},
-      id: 43,
-      initiator: 'USER',
-      explorationMode: 'BOARD_SNAPSHOT',
-      outcome: 'BUDGET_EXHAUSTED',
-      effectiveSeed: 43,
-      iterations: 10,
-      generatedPaths: 20,
-      elapsedMs: 100,
-      modelSnapshot: { ...snapshot(1), modelFingerprint: 'a'.repeat(64) },
-      eligibility: {
-        eligibleSpecIds: ['spec-1'],
-        eligibleSpecLabels: { 'spec-1': 'Door remains closed' },
-        ineligibleSpecs: [],
-        requestedSpecCount: 1,
-        eligibleSpecCount: 1
-      },
-      limitations: [],
-      maxIterations: 10,
-      pathLength: 5,
-      populationSize: 2,
-      createdAt: '2026-07-13T11:00:00',
-      completedAt: '2026-07-13T11:00:01',
-      findingCount: 0,
-      findings: [],
-      dataAvailable: true
-    }
+    const run = budgetExhaustedFuzzingRun(43, 43)
 
     const wrapper = mount(TraceHistoryPanel, {
       props: {

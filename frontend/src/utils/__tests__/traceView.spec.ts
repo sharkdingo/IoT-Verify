@@ -1,43 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import {
-  canOpenTracePlayback,
   deriveTraceContext,
   formatTraceSpec,
   collectPlaybackDeviceIds,
-  isPlaybackDeviceAttacked,
   playbackDeviceChanged,
   playbackDeviceChangeDetails,
   playbackEnvironmentChangeDetails,
   playbackDeviceSecurityFacts,
-  playbackDeviceSummaryParts,
   formatPlaybackSecurityLabel
 } from '../traceView'
 
-describe('canOpenTracePlayback', () => {
-  it('allows playback when no conflicting panel is open', () => {
-    const r = canOpenTracePlayback({ simulationVisible: false, recommendationPanelVisible: false })
-    expect(r.allowed).toBe(true)
-    expect(r.reasonCode).toBeNull()
-  })
-
-  it('blocks playback while the simulation timeline is visible', () => {
-    const r = canOpenTracePlayback({ simulationVisible: true, recommendationPanelVisible: false })
-    expect(r.allowed).toBe(false)
-    expect(r.reasonCode).toBe('SIMULATION_VISIBLE')
-  })
-
-  it('blocks playback while the recommendations panel is visible', () => {
-    const r = canOpenTracePlayback({ simulationVisible: false, recommendationPanelVisible: true })
-    expect(r.allowed).toBe(false)
-    expect(r.reasonCode).toBe('RECOMMENDATION_VISIBLE')
-  })
-
-  it('prefers the simulation message when both are open', () => {
-    const r = canOpenTracePlayback({ simulationVisible: true, recommendationPanelVisible: true })
-    expect(r.allowed).toBe(false)
-    expect(r.reasonCode).toBe('SIMULATION_VISIBLE')
-  })
-
+describe('formatTraceSpec', () => {
   it('formats all specification template shapes for trace feedback', () => {
     const condition = {
       deviceId: 'door_1',
@@ -207,47 +180,10 @@ describe('playback device facts', () => {
     ]
   }
 
-  it('keeps user-facing state, values, and compromise status separate', () => {
-    expect(playbackDeviceSummaryParts(idle)).toEqual(['idle', 'temperature=20'])
-    expect(isPlaybackDeviceAttacked(idle)).toBe(false)
-  })
-
-  // An affect-only shared declaration (`Reads: false`) reaches the client as `observed: false` with an
-  // empty value, because the model never constrained it and NuSMV printed an arbitrary domain member.
-  // It must vanish from the summary rather than read `illuminance=N/A`: `N/A` claims a reading was
-  // expected and went missing, while this device never took one. The real value is on the environment
-  // strip. Omitting the flag must keep the old meaning, so a persisted trace still renders.
-  it('omits an unobserved variable from the summary and keeps observed ones', () => {
-    expect(playbackDeviceSummaryParts({
-      deviceId: 'light_1',
-      state: 'on',
-      variables: [
-        { name: 'illuminance', value: '', observed: false },
-        { name: 'temperature', value: '20' }
-      ]
-    })).toEqual(['on', 'temperature=20'])
-  })
-
-  it('formats playback summaries and structured security labels without mutating trace data', () => {
-    const device = {
-      deviceId: 'camera_1',
-      state: 'on',
-      mode: 'MachineState',
-      variables: [{ name: 'weather', value: 'sunny' }]
-    }
-    const snapshot = structuredClone(device)
-    const labels: Record<string, string> = {
-      on: '开启',
-      MachineState: '设备状态',
-      weather: '天气',
-      sunny: '晴朗'
-    }
-    const format = (value: string) => labels[value] || value
-
-    expect(playbackDeviceSummaryParts(device, format))
-      .toEqual(['开启', '设备状态', '天气=晴朗'])
-    expect(formatPlaybackSecurityLabel('MachineState: on', format)).toBe('设备状态: 开启')
-    expect(device).toEqual(snapshot)
+  it('formats the mode and state in a structured security label separately', () => {
+    const labels: Record<string, string> = { MachineState: '设备状态', on: '开启' }
+    expect(formatPlaybackSecurityLabel('MachineState: on', value => labels[value] || value))
+      .toBe('设备状态: 开启')
   })
 
   it('distinguishes current Board devices that were not represented in the saved trace', () => {
@@ -268,7 +204,6 @@ describe('playback device facts', () => {
         { name: 'temperature', value: '24' }
       ]
     }
-    expect(isPlaybackDeviceAttacked(attacked)).toBe(true)
     expect(playbackDeviceChanged(attacked, idle)).toBe(true)
     expect(playbackDeviceChanged(attacked, attacked)).toBe(false)
   })

@@ -223,9 +223,8 @@ the registered AI tools are mapped in
   failure to logging only. Interactive recommendation/fix success must pass the atomic
   ownership-and-stop completion fence before its result is delivered; best-effort cleanup is
   not a successful settlement.
-- **NuSMV debug files use bounded retention**: `cleanupTempFile()` leaves a completed
-  `nusmv_*` directory available for diagnosis, while the scheduled artifact cleaner caps
-  both its age and the total retained directory count. Executors must hold the shared
+- The **NuSMV debug artifact cleaner** caps the age and total count of completed
+  `nusmv_*` directories retained for diagnosis. Executors must hold the shared
   artifact-registry lock before the model existence check and from capacity wait through
   output completion. Process output must be drained in bounded byte chunks rather than
   `readLine()`, because NuSMV can emit an unterminated line. Cleanup must hold the same exclusion from inactivity check through

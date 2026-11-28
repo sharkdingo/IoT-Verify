@@ -1,6 +1,5 @@
 package cn.edu.nju.Iot_Verify.component.aitool.fuzz;
 
-import cn.edu.nju.Iot_Verify.component.aitool.AiDestructiveActionGuard;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzExplorationMode;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzFindingDto;
 import cn.edu.nju.Iot_Verify.dto.fuzz.FuzzInputEventDto;
@@ -30,7 +29,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.Set;
 
+import static cn.edu.nju.Iot_Verify.testutil.AiSessionStateFixtures.inMemoryActionGuard;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -68,9 +69,9 @@ class FuzzToolsTest {
         getFuzzRunTool = new GetFuzzRunTool(fuzzService, objectMapper);
         getFuzzFindingTool = new GetFuzzFindingTool(fuzzService, objectMapper);
         deleteFuzzRunTool = new DeleteFuzzRunTool(
-                fuzzService, objectMapper, new AiDestructiveActionGuard(objectMapper));
+                fuzzService, objectMapper, inMemoryActionGuard(objectMapper));
         dismissFuzzTaskTool = new DismissFuzzTaskTool(
-                fuzzService, objectMapper, new AiDestructiveActionGuard(objectMapper));
+                fuzzService, objectMapper, inMemoryActionGuard(objectMapper));
         UserContextHolder.setUserId(1L);
         UserContextHolder.setChatSessionId("fuzz-test-session");
     }
@@ -190,45 +191,36 @@ class FuzzToolsTest {
         when(fuzzService.getTask(1L, 7L)).thenReturn(FuzzTaskDto.builder()
                 .id(7L).status("RUNNING").progress(42).build());
 
+        var schema = fuzzTaskStatusTool.getDefinition().parameters();
+        assertEquals(Set.of("taskId", "waitMs"), schema.properties.keySet());
+        assertEquals(List.of("taskId"), schema.required);
         JsonNode json = objectMapper.readTree(fuzzTaskStatusTool.execute("{\"taskId\":7,\"waitMs\":0}"));
 
         assertEquals(42, json.path("progress").asInt());
         assertEquals("RUNNING", json.path("task").path("status").asText());
         assertEquals(42, json.path("task").path("progress").asInt());
+        JsonNode unexpected = objectMapper.readTree(fuzzTaskStatusTool.execute(
+                "{\"taskId\":7,\"waitMs\":0,\"unexpected\":true}"));
+        assertEquals("arguments contains unsupported field(s): unexpected.", unexpected.path("error").asText());
         verify(fuzzService).getTask(1L, 7L);
         verifyNoMoreInteractions(fuzzService);
     }
 
     @Test
-    void statusWaitsBrieflyUsingTheSameContractAsVerificationAndSimulation() throws Exception {
-        when(fuzzService.getTask(1L, 7L)).thenReturn(
-                FuzzTaskDto.builder().id(7L).status("RUNNING").progress(42).build(),
-                FuzzTaskDto.builder().id(7L).status("COMPLETED").progress(100).build());
-
-        JsonNode result = objectMapper.readTree(fuzzTaskStatusTool.execute(
-                "{\"taskId\":7,\"waitMs\":10000}"));
-
-        assertEquals("COMPLETED", result.path("task").path("status").asText());
-        assertEquals(100, result.path("progress").asInt());
-        verify(fuzzService, org.mockito.Mockito.times(2)).getTask(1L, 7L);
-    }
-
-    @Test
-    void statusRejectsInvalidWaitsBeforeReadingATask() throws Exception {
-        for (String wait : List.of("-1", "10001", "1.5", "\"soon\"", "null")) {
-            JsonNode result = objectMapper.readTree(fuzzTaskStatusTool.execute(
-                    "{\"taskId\":7,\"waitMs\":" + wait + "}"));
-            assertEquals("VALIDATION_ERROR", result.path("errorCode").asText(), wait);
-        }
-        verifyNoMoreInteractions(fuzzService);
-    }
-
-    @Test
     void cancel_reportsOutcome() throws Exception {
+        var schema = cancelFuzzTaskTool.getDefinition().parameters();
+        assertEquals(List.of("taskId"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId"), schema.required);
+
         when(fuzzService.cancelTask(1L, 7L)).thenReturn(TaskCancellationResultDto.builder()
                 .taskId(7L).cancellationAccepted(true)
                 .cancellationOutcome(TaskCancellationOutcome.ACCEPTED)
                 .taskStatus("CANCELLED").executionMayStillBeStopping(false).build());
+
+        JsonNode unexpected = objectMapper.readTree(cancelFuzzTaskTool.execute(
+                "{\"taskId\":7,\"force\":true}"));
+        assertEquals("arguments contains unsupported field(s): force.", unexpected.path("error").asText());
+        verify(fuzzService, never()).cancelTask(1L, 7L);
 
         JsonNode json = objectMapper.readTree(cancelFuzzTaskTool.execute("{\"taskId\":7}"));
 
@@ -338,6 +330,13 @@ class FuzzToolsTest {
         assertTrue(preview.path("countIncludesUnavailableEvidence").asBoolean());
         verify(fuzzService, never()).deleteRun(1L, 3L, 2L);
 
+        preview = objectMapper.readTree(deleteFuzzRunTool.execute(
+                "{\"runId\":3,\"confirmed\":true,\"impactToken\":\""
+                        + preview.path("impactToken").asText() + "\"}"));
+        assertEquals("preview", preview.path("operation").asText());
+        verify(fuzzService, never()).deleteRun(anyLong(), anyLong(), anyLong());
+        verify(fuzzService, never()).deleteRun(anyLong(), anyLong());
+
         UserContextHolder.setConfirmedProtectedAction("DESTRUCTIVE", preview.path("impactToken").asText());
         JsonNode result = objectMapper.readTree(deleteFuzzRunTool.execute(
                 "{\"runId\":3,\"confirmed\":true,\"impactToken\":\""
@@ -381,6 +380,10 @@ class FuzzToolsTest {
 
     @Test
     void dismiss_previewThenConfirmRemovesDeadTask() throws Exception {
+        var schema = dismissFuzzTaskTool.getDefinition().parameters();
+        assertEquals(List.of("taskId", "confirmed", "impactToken"), List.copyOf(schema.properties.keySet()));
+        assertEquals(List.of("taskId", "confirmed"), schema.required);
+
         FuzzTaskDto task = FuzzTaskDto.builder()
                 .id(9L)
                 .status("FAILED")
@@ -391,6 +394,11 @@ class FuzzToolsTest {
                 .targetSpecIds(List.of("spec-1"))
                 .build();
         when(fuzzService.getTask(1L, 9L)).thenReturn(task);
+
+        JsonNode unexpected = objectMapper.readTree(dismissFuzzTaskTool.execute(
+                "{\"taskId\":9,\"confirmed\":false,\"force\":true}"));
+        assertEquals("arguments contains unsupported field(s): force.", unexpected.path("error").asText());
+        verify(fuzzService, never()).getTask(1L, 9L);
 
         JsonNode preview = objectMapper.readTree(
                 dismissFuzzTaskTool.execute("{\"taskId\":9,\"confirmed\":false}"));

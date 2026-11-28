@@ -6,8 +6,6 @@ import cn.edu.nju.Iot_Verify.po.ChatSessionPo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
-import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -16,9 +14,11 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,12 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@DataJpaTest(properties = {
-        "spring.jpa.database-platform=org.hibernate.dialect.H2Dialect",
-        "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
-        "spring.jpa.hibernate.ddl-auto=create-drop"
-})
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)
+@H2RepositoryTest
 class ChatMessageRepositoryTest {
 
     @Autowired
@@ -186,6 +181,21 @@ class ChatMessageRepositoryTest {
         assertEquals(request.getId(), messageRepository
                 .findFirstBySessionIdAndIdLessThanAndRoleOrderByIdDesc("activity-owner", newer.getId(), "assistant")
                 .orElseThrow().getId());
+    }
+
+    @Test
+    void recentContextFetchesOnlyNewest80IdsInTheRequestedSession() {
+        List<ChatMessagePo> messages = IntStream.rangeClosed(1, 81).mapToObj(index -> {
+            ChatMessagePo row = message("recent-context", "turn-" + index, "user", "execution");
+            row.setCreatedAt(LocalDateTime.of(2026, 7, 24, 12, 0).minusSeconds(index));
+            return row;
+        }).toList();
+        List<ChatMessagePo> saved = messageRepository.saveAllAndFlush(messages);
+        messageRepository.saveAndFlush(message("other-context", "later", "assistant", "execution"));
+
+        assertEquals(saved.stream().skip(1).map(ChatMessagePo::getId).sorted(Comparator.reverseOrder()).toList(),
+                messageRepository.findTop80BySessionIdOrderByIdDesc("recent-context")
+                        .stream().map(ChatMessagePo::getId).toList());
     }
 
     private ChatMessagePo message(

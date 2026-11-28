@@ -23,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 
+import static cn.edu.nju.Iot_Verify.testutil.RecommendationToolFixtures.homeModeDevice;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -448,6 +449,8 @@ class RecommendRulesToolTest {
                 .thenReturn("""
                         {
                           "recommendations": [
+                            "not a rule object",
+                            {"name": ""},
                             {
                               "name": "Valid motion rule",
                               "conditions": [
@@ -472,8 +475,14 @@ class RecommendRulesToolTest {
         JsonNode json = objectMapper.readTree(result);
 
         assertEquals(1, json.path("count").asInt());
-        assertEquals(2, json.path("rawCandidateCount").asInt());
-        assertEquals(1, json.path("inspectedCount").asInt());
+        assertEquals("Valid motion rule", json.at("/recommendations/0/name").asText());
+        assertEquals(2, json.path("filteredCount").asInt());
+        assertEquals("parseFailed", json.at("/filteredItems/0/reasonCode").asText());
+        assertEquals(1, json.at("/filteredItems/0/index").asInt());
+        assertEquals("missingRuleName", json.at("/filteredItems/1/reasonCode").asText());
+        assertEquals(2, json.at("/filteredItems/1/index").asInt());
+        assertEquals(4, json.path("rawCandidateCount").asInt());
+        assertEquals(3, json.path("inspectedCount").asInt());
         assertEquals(1, json.path("truncatedCount").asInt());
     }
 
@@ -715,27 +724,6 @@ class RecommendRulesToolTest {
                 List.of(),
                 List.of(),
                 List.of("off", "on"),
-                List.of()
-        );
-    }
-
-    private DeviceInfoHelper.DeviceInfo homeModeDevice() {
-        return new DeviceInfoHelper.DeviceInfo(
-                "node-home-mode",
-                "Home Mode",
-                "Home Mode",
-                "sleep;idle",
-                "trusted",
-                null,
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(),
-                List.of(
-                        new DeviceInfoHelper.ModeInfo("Mode", List.of("home", "away", "sleep")),
-                        new DeviceInfoHelper.ModeInfo("State", List.of("idle", "sendingAlertMessage", "sendingPhoto"))),
-                List.of("home;idle", "away;idle", "sleep;idle"),
                 List.of()
         );
     }

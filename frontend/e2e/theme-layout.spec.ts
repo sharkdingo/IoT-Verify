@@ -1,6 +1,7 @@
 import { type Page } from '@playwright/test'
 import {
   createAuthenticatedUser,
+  seedBrowserSession,
   createTestAccountCredentials,
   expect,
   test,
@@ -24,19 +25,7 @@ const openPublicRoute = async (page: Page, route: string, theme: ThemeMode = 'li
 }
 
 const openWorkspace = async (page: Page, auth: AuthUser) => {
-  await page.addInitScript(({ token, user }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', 'dark')
-    window.localStorage.setItem('locale', 'en')
-  }, {
-    token: auth.token,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
+  await seedBrowserSession(page, auth, { locale: 'en', theme: 'dark' })
 
   await page.goto('/#/board')
   await expect(page.locator('.iot-board')).toBeVisible({ timeout: 60_000 })
@@ -57,10 +46,27 @@ test.describe('public theme and layout', () => {
       expect(box!.width).toBeGreaterThanOrEqual(44)
       expect(box!.height).toBeGreaterThanOrEqual(44)
       if (width < 640) {
-        await opener.click()
+        await opener.press('Enter')
         await expect(menu.getByRole('group', { name: 'Appearance and account' })).toBeVisible()
-        await expect(page.getByTestId('nav-overflow-account')).toBeInViewport()
-        await page.getByTestId('nav-overflow-account').click()
+        const account = page.getByTestId('nav-overflow-account')
+        await expect(account).toBeInViewport()
+        const menuButtons = await menu.getByRole('button').count()
+        for (let index = 0; index < menuButtons; index++) {
+          await page.keyboard.press('Tab')
+          if (await account.evaluate(button => document.activeElement === button)) break
+        }
+        await expect(account).toBeFocused()
+        const focusReturn = await opener.evaluateHandle(summary => {
+          const details = summary.closest('details')!
+          const state = { closedOnFocus: false }
+          // Navigation can unmount the Board before the activation click bubbles to the menu.
+          summary.addEventListener('focus', () => { state.closedOnFocus = !details.open }, { once: true })
+          return state
+        })
+        await page.keyboard.press('Enter')
+        const { closedOnFocus } = await focusReturn.jsonValue()
+        await focusReturn.dispose()
+        expect.soft(closedOnFocus, `Menu closed and returned focus at ${width}px`).toBe(true)
       } else {
         await opener.click()
       }
@@ -77,7 +83,7 @@ test.describe('public theme and layout', () => {
       await cancel.press('Escape')
       await expect(dialog).toBeHidden()
       await expect(logout).toBeFocused()
-      await page.getByTestId('account-back').click()
+      await page.getByTestId('account-back').press('Enter')
       await expect(page.getByTestId('board-root')).toBeVisible()
     }
   })

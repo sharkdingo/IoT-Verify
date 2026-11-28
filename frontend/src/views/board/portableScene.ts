@@ -9,7 +9,7 @@ import { NODE_HEIGHT_RANGE, NODE_POSITION_ABS_MAX, NODE_WIDTH_RANGE } from '@/ut
 import { defaultSpecTemplates, specTemplateDetails } from '@/assets/config/specTemplates'
 import type { DeviceNode } from '@/types/node'
 import type { DeviceTemplate } from '@/types/device'
-import type { RuleForm, RuleSourceItemType } from '@/types/rule'
+import type { RuleForm, RuleSourceItemType, SourceEntry } from '@/types/rule'
 import type { Specification, SpecCondition } from '@/types/spec'
 import type { ModelEnvironmentVariable } from '@/types/model'
 import type {
@@ -141,66 +141,61 @@ export const createSceneCodec = (t: Translate) => {
     throw new Error(t('app.sceneImportInvalidEnum', { field, value: normalized }))
   }
 
-  const normalizeSceneVariables = (value: unknown, field: string) => {
+  const normalizeSceneRuntimeRows = <T,>(
+    value: unknown,
+    field: string,
+    maximum: number,
+    allowedFields: readonly string[],
+    normalize: (row: Record<string, unknown>, name: string, path: string) => T
+  ) => {
     if (value === undefined || value === null) return undefined
     if (!Array.isArray(value)) throw new Error(t('app.sceneImportArrayRequired', { field }))
-    assertSceneCollectionLimit(value, field, REQUEST_LIMITS.deviceVariables)
+    assertSceneCollectionLimit(value, field, maximum)
+    if (value.length === 0) return undefined
     const seenNames = new Set<string>()
-    const variables = value
-      .map((item, index) => {
-        const row = item as any
-        if (!row || typeof row !== 'object' || Array.isArray(row)) {
-          throw new Error(t('app.sceneImportObjectRequired', { field: `${field}[${index}]` }))
-        }
-        assertSceneAllowedFields(row, ['name', 'value', 'trust'], `${field}[${index}]`)
-        const name = normalizeSceneString(row?.name, `${field}[${index}].name`)
-        if (!name) throw new Error(t('app.sceneImportMissingField', { field: `${field}[${index}].name` }))
-        if (seenNames.has(name)) {
-          throw new Error(t('app.sceneImportDuplicateRuntimeEntry', { field, name }))
-        }
-        seenNames.add(name)
+    return value.map((item, index) => {
+      const path = `${field}[${index}]`
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error(t('app.sceneImportObjectRequired', { field: path }))
+      }
+      const row = item as Record<string, unknown>
+      assertSceneAllowedFields(row, allowedFields, path)
+      const name = normalizeSceneString(row.name, `${path}.name`)
+      if (!name) throw new Error(t('app.sceneImportMissingField', { field: `${path}.name` }))
+      if (seenNames.has(name)) {
+        throw new Error(t('app.sceneImportDuplicateRuntimeEntry', { field, name }))
+      }
+      seenNames.add(name)
+      return normalize(row, name, path)
+    })
+  }
+
+  const normalizeSceneVariables = (value: unknown, field: string) =>
+    normalizeSceneRuntimeRows(value, field, REQUEST_LIMITS.deviceVariables, ['name', 'value', 'trust'],
+      (row, name, path) => {
         if (!Object.prototype.hasOwnProperty.call(row, 'value')) {
-          throw new Error(t('app.sceneImportMissingField', { field: `${field}[${index}].value` }))
+          throw new Error(t('app.sceneImportMissingField', { field: `${path}.value` }))
         }
-        const normalizedValue = normalizeSceneString(row?.value, `${field}[${index}].value`)
+        const normalizedValue = normalizeSceneString(row.value, `${path}.value`)
         if (!normalizedValue) {
-          throw new Error(t('app.sceneImportMissingField', { field: `${field}[${index}].value` }))
+          throw new Error(t('app.sceneImportMissingField', { field: `${path}.value` }))
         }
         return {
           name,
           value: normalizedValue,
-          ...(row?.trust !== undefined && row?.trust !== null
-            ? { trust: normalizeSceneTrust(row.trust, `${field}[${index}].trust`) || undefined }
+          ...(row.trust !== undefined && row.trust !== null
+            ? { trust: normalizeSceneTrust(row.trust, `${path}.trust`) || undefined }
             : {})
         }
       })
-    return variables.length > 0 ? variables : undefined
-  }
 
-  const normalizeScenePrivacies = (value: unknown, field: string) => {
-    if (value === undefined || value === null) return undefined
-    if (!Array.isArray(value)) throw new Error(t('app.sceneImportArrayRequired', { field }))
-    assertSceneCollectionLimit(value, field, REQUEST_LIMITS.devicePrivacies)
-    const seenNames = new Set<string>()
-    const privacies = value
-      .map((item, index) => {
-        const row = item as any
-        if (!row || typeof row !== 'object' || Array.isArray(row)) {
-          throw new Error(t('app.sceneImportObjectRequired', { field: `${field}[${index}]` }))
-        }
-        assertSceneAllowedFields(row, ['name', 'privacy'], `${field}[${index}]`)
-        const name = normalizeSceneString(row?.name, `${field}[${index}].name`)
-        if (!name) throw new Error(t('app.sceneImportMissingField', { field: `${field}[${index}].name` }))
-        if (seenNames.has(name)) {
-          throw new Error(t('app.sceneImportDuplicateRuntimeEntry', { field, name }))
-        }
-        seenNames.add(name)
-        const privacy = normalizeScenePrivacy(row?.privacy, `${field}[${index}].privacy`)
-        if (!privacy) throw new Error(t('app.sceneImportMissingField', { field: `${field}[${index}].privacy` }))
+  const normalizeScenePrivacies = (value: unknown, field: string) =>
+    normalizeSceneRuntimeRows(value, field, REQUEST_LIMITS.devicePrivacies, ['name', 'privacy'],
+      (row, name, path) => {
+        const privacy = normalizeScenePrivacy(row.privacy, `${path}.privacy`)
+        if (!privacy) throw new Error(t('app.sceneImportMissingField', { field: `${path}.privacy` }))
         return { name, privacy }
       })
-    return privacies.length > 0 ? privacies : undefined
-  }
 
   const normalizeSceneDevice = (value: unknown, index: number, templates: DeviceTemplate[]): NormalizedSceneDevice => {
     const row = value as any
@@ -361,6 +356,34 @@ export const createSceneCodec = (t: Translate) => {
     throw new Error(t('app.sceneImportInvalidEnum', { field: 'rules.sources.itemType', value: normalized || t('app.empty') }))
   }
 
+  const normalizeSceneRuleSource = (
+    source: Partial<Record<keyof SourceEntry, unknown>>,
+    field: string,
+    origin: 'import' | 'export'
+  ): SourceEntry => {
+    const itemType = normalizeSceneRuleSourceType(source.itemType, `${field}.itemType`)
+    const fromId = normalizeSceneString(source.fromId, `${field}.fromId`)
+    const fromApi = normalizeSceneString(source.fromApi, `${field}.fromApi`)
+    if (!fromId) throw new Error(t('app.sceneImportMissingField', { field: `${field}.fromId` }))
+    if (!fromApi) throw new Error(t('app.sceneImportMissingField', { field: `${field}.fromApi` }))
+    const relation = normalizeSceneString(source.relation, `${field}.relation`)
+    // An authored signal relation takes precedence over a malformed value during import.
+    const value = origin === 'import' && itemType === 'api' && relation
+      ? ''
+      : normalizeSceneString(source.value, `${field}.value`)
+    if (itemType === 'api') {
+      if (relation || value) throw new Error(t('app.sceneImportUnexpectedRuleSignalValue', { field }))
+      return { fromId, fromApi, itemType }
+    }
+    if (!relation) throw new Error(t('app.sceneImportMissingField', { field: `${field}.relation` }))
+    if (!value) throw new Error(t('app.sceneImportMissingField', { field: `${field}.value` }))
+    const normalizedRelation = normalizeModelRelation(relation)
+    if (!normalizedRelation) {
+      throw new Error(t('app.sceneImportInvalidEnum', { field: `${field}.relation`, value: relation }))
+    }
+    return { fromId, fromApi, itemType, relation: normalizedRelation, value }
+  }
+
   const normalizeSceneRules = (value: unknown): RuleForm[] => {
     if (value === undefined || value === null) return []
     if (!Array.isArray(value)) throw new Error(t('app.sceneImportArrayRequired', { field: 'rules' }))
@@ -385,52 +408,12 @@ export const createSceneCodec = (t: Translate) => {
       return {
         ...(name ? { name } : {}),
         sources: sources.map((source: any, sourceIndex: number) => {
-          if (!source || typeof source !== 'object' || Array.isArray(source)) {
-            throw new Error(t('app.sceneImportObjectRequired', { field: `rules[${index}].sources[${sourceIndex}]` }))
-          }
-          assertSceneAllowedFields(
-            source,
-            ['fromId', 'fromApi', 'itemType', 'relation', 'value'],
-            `rules[${index}].sources[${sourceIndex}]`
-          )
           const sourceField = `rules[${index}].sources[${sourceIndex}]`
-          const itemType = normalizeSceneRuleSourceType(source?.itemType, `${sourceField}.itemType`)
-          const fromId = normalizeSceneString(source?.fromId, `${sourceField}.fromId`)
-          const fromApi = normalizeSceneString(source?.fromApi, `${sourceField}.fromApi`)
-          if (!fromId) throw new Error(t('app.sceneImportMissingField', { field: `rules[${index}].sources[${sourceIndex}].fromId` }))
-          if (!fromApi) throw new Error(t('app.sceneImportMissingField', { field: `rules[${index}].sources[${sourceIndex}].fromApi` }))
-          if (itemType === 'api' && (
-            normalizeSceneString(source?.relation, `${sourceField}.relation`)
-            || normalizeSceneString(source?.value, `${sourceField}.value`)
-          )) {
-            throw new Error(t('app.sceneImportUnexpectedRuleSignalValue', {
-              field: `rules[${index}].sources[${sourceIndex}]`
-            }))
+          if (!source || typeof source !== 'object' || Array.isArray(source)) {
+            throw new Error(t('app.sceneImportObjectRequired', { field: sourceField }))
           }
-          const relation = normalizeSceneString(source?.relation, `${sourceField}.relation`)
-          const conditionValue = normalizeSceneString(source?.value, `${sourceField}.value`)
-          if (itemType !== 'api' && !relation) {
-            throw new Error(t('app.sceneImportMissingField', { field: `rules[${index}].sources[${sourceIndex}].relation` }))
-          }
-          if (itemType !== 'api' && !conditionValue) {
-            throw new Error(t('app.sceneImportMissingField', { field: `rules[${index}].sources[${sourceIndex}].value` }))
-          }
-          const normalizedRelation = itemType === 'api' ? '' : normalizeModelRelation(relation)
-          if (itemType !== 'api' && !normalizedRelation) {
-            throw new Error(t('app.sceneImportInvalidEnum', {
-              field: `rules[${index}].sources[${sourceIndex}].relation`,
-              value: relation
-            }))
-          }
-          return {
-            fromId,
-            fromApi,
-            itemType,
-            ...(itemType === 'api' ? {} : {
-              relation: normalizedRelation,
-              value: conditionValue
-            })
-          }
+          assertSceneAllowedFields(source, ['fromId', 'fromApi', 'itemType', 'relation', 'value'], sourceField)
+          return normalizeSceneRuleSource(source, sourceField, 'import')
         }),
         toId,
         toApi,
@@ -853,38 +836,8 @@ export const createSceneCodec = (t: Translate) => {
     if (!Array.isArray(rule.sources) || rule.sources.length === 0) {
       throw new Error(t('app.sceneImportMissingField', { field: `${ruleField}.sources` }))
     }
-    const sources = rule.sources.map((source, sourceIndex) => {
-      const sourceField = `${ruleField}.sources[${sourceIndex}]`
-      const itemType = normalizeSceneRuleSourceType(source.itemType, `${sourceField}.itemType`)
-      const fromId = normalizeSceneString(source.fromId, `${sourceField}.fromId`)
-      const fromApi = normalizeSceneString(source.fromApi, `${sourceField}.fromApi`)
-      if (!fromId) throw new Error(t('app.sceneImportMissingField', { field: `${sourceField}.fromId` }))
-      if (!fromApi) throw new Error(t('app.sceneImportMissingField', { field: `${sourceField}.fromApi` }))
-      const relation = normalizeSceneString(source.relation, `${sourceField}.relation`)
-      const value = normalizeSceneString(source.value, `${sourceField}.value`)
-      if (itemType === 'api' && (relation || value)) {
-        throw new Error(t('app.sceneImportUnexpectedRuleSignalValue', { field: sourceField }))
-      }
-      if (itemType !== 'api' && !relation) {
-        throw new Error(t('app.sceneImportMissingField', { field: `${sourceField}.relation` }))
-      }
-      if (itemType !== 'api' && !value) {
-        throw new Error(t('app.sceneImportMissingField', { field: `${sourceField}.value` }))
-      }
-      const normalizedRelation = itemType === 'api' ? '' : normalizeModelRelation(relation)
-      if (itemType !== 'api' && !normalizedRelation) {
-        throw new Error(t('app.sceneImportInvalidEnum', { field: `${sourceField}.relation`, value: relation }))
-      }
-      return {
-        fromId,
-        fromApi,
-        itemType,
-        ...(itemType === 'api' ? {} : {
-          relation: normalizedRelation,
-          value
-        })
-      }
-    })
+    const sources = rule.sources.map((source, sourceIndex) =>
+      normalizeSceneRuleSource(source, `${ruleField}.sources[${sourceIndex}]`, 'export'))
 
     const name = normalizeSceneString(rule.name, `${ruleField}.name`)
     const toId = normalizeSceneString(rule.toId, `${ruleField}.toId`)

@@ -96,13 +96,7 @@ const bundledEnvironmentNameSet = computed(() => new Set(props.bundledEnvironmen
 const isBundledDevice = (targetId: string) => bundledDeviceIdSet.value.has(
   normalizeNuSmvDeviceName(targetId)
 )
-const formatDeviceStateProperty = (targetId: string, property: unknown) =>
-  isBundledDevice(targetId)
-    ? formatBundledModelToken(property)
-    : String(property ?? '')
-const formatDeviceVariableProperty = (targetId: string, property: unknown) =>
-  isBundledDevice(targetId) ? formatBundledModelToken(property) : String(property ?? '')
-const formatDeviceValue = (targetId: string, value: unknown) =>
+const formatDeviceToken = (targetId: string, value: unknown) =>
   isBundledDevice(targetId) ? formatBundledModelToken(value) : String(value ?? '')
 const formatEnvironmentToken = (name: string, value: unknown) =>
   bundledEnvironmentNameSet.value.has(name)
@@ -612,33 +606,23 @@ const frozenTargetScope = computed(() => {
               }) }}
             </p>
             <div class="mt-2 space-y-2 text-xs leading-4 board-text-muted">
-              <div v-if="paperDomainPreview.deviceDomains.length">
-                <p class="font-semibold">{{ t('app.fuzzPaperDeviceStateDomains') }}</p>
-                <ul class="mt-1 space-y-1">
-                  <li v-for="domain in paperDomainPreview.deviceDomains" :key="`${domain.targetId}-${domain.property}`" class="break-words">
-                    <span class="font-semibold">{{ domain.label }}.{{ formatDeviceStateProperty(domain.targetId, domain.property) }}</span>:
-                    <span class="font-mono">{{ formatDomain(
-                      domain.legalValues, domain.lowerBound, domain.upperBound, false,
-                      value => formatDeviceValue(domain.targetId, value)
-                    ) }}</span>
-                  </li>
-                </ul>
-              </div>
-              <div
-                v-if="paperDomainPreview.localVariableDomains.length"
-                data-testid="paper-local-variable-domains"
-              >
-                <p class="font-semibold">{{ t('app.fuzzPaperLocalVariableDomains') }}</p>
-                <ul class="mt-1 space-y-1">
-                  <li v-for="domain in paperDomainPreview.localVariableDomains" :key="`${domain.targetId}-${domain.property}`" class="break-words">
-                    <span class="font-semibold">{{ domain.label }}.{{ formatDeviceVariableProperty(domain.targetId, domain.property) }}</span>:
-                    <span class="font-mono">{{ formatDomain(
-                      domain.legalValues, domain.lowerBound, domain.upperBound, false,
-                      value => formatDeviceValue(domain.targetId, value)
-                    ) }}</span>
-                  </li>
-                </ul>
-              </div>
+              <template v-for="group in [
+                { title: 'app.fuzzPaperDeviceStateDomains', domains: paperDomainPreview.deviceDomains },
+                { title: 'app.fuzzPaperLocalVariableDomains', domains: paperDomainPreview.localVariableDomains, testId: 'paper-local-variable-domains' }
+              ]" :key="group.title">
+                <div v-if="group.domains.length" :data-testid="group.testId">
+                  <p class="font-semibold">{{ t(group.title) }}</p>
+                  <ul class="mt-1 space-y-1">
+                    <li v-for="domain in group.domains" :key="`${domain.targetId}-${domain.property}`" class="break-words">
+                      <span class="font-semibold">{{ domain.label }}.{{ formatDeviceToken(domain.targetId, domain.property) }}</span>:
+                      <span class="font-mono">{{ formatDomain(
+                        domain.legalValues, domain.lowerBound, domain.upperBound, false,
+                        value => formatDeviceToken(domain.targetId, value)
+                      ) }}</span>
+                    </li>
+                  </ul>
+                </div>
+              </template>
               <div v-if="paperDomainPreview.environmentDomains.length">
                 <p class="font-semibold">{{ t('app.fuzzPaperEnvironmentDomains') }}</p>
                 <ul class="mt-1 space-y-1.5">

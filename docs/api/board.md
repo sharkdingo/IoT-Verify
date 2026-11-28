@@ -23,7 +23,7 @@ All endpoints are authenticated and scoped to the current user (`@CurrentUser`).
 Each account has one development board and one reusable template library: multiple
 tabs of that account view the same board. Moving a portable scene between accounts
 resolves dependencies in the target account without modifying the source account.
-Verified against code on 2026-11-26. Source:
+Verified against code on 2026-11-27. Source:
 `service/impl/BoardStorageServiceImpl.java`, `service/recommendation/`,
 `controller/BoardStorageController.java`, `dto/device/`, `dto/board/`, `dto/rule/`,
 `dto/spec/`, `dto/recommendation/`, `component/board/PortableSceneDiagnostics.java`,
@@ -514,9 +514,8 @@ including a valid no-change selection. `environmentVariables` is the authoritati
 pool, `environmentChanges` also reports any self-heal side effects, and `currentCount`
 must match that pool. The frontend rejects an HTTP 200 response if an omitted field
 changed despite being reported as preserved.
-If the environment update response is lost or incomplete, the frontend reloads the
-authoritative Environment Pool and tells the user to review those current values; it
-does not claim that the requested patch was applied.
+See [frontend undo and receipt handling](../guides/frontend-ui-conventions.md#3-undo-and-what-it-is-not)
+for an unconfirmed environment update.
 Ordinary device create/update/delete responses report every resulting pool addition,
 update, or removal in `environmentChanges`; device deletion previews expose removals
 before confirmation. These pool effects commit in the same transaction as the device
@@ -1029,9 +1028,8 @@ and planned `currentValue` as strings or explicit nulls for unset values. `field
 privacy label changes also provide the `itemName` when the projected item has a name.
 The confirmation token binds these values, and the reset receipt repeats them.
 On a committed reset, `currentTemplates`, `currentNodes`, and
-`environmentVariables` are authoritative post-transaction snapshots. On a lost or
-incomplete response, the frontend reconciles those collections from a single Board
-snapshot. The original write remains unconfirmed.
+`environmentVariables` are authoritative post-transaction snapshots. See the
+[frontend conventions](../guides/frontend-ui-conventions.md) for receipt recovery.
 
 Blocker `reasonCode` is one of `DEVICE_INSTANCE_INCOMPATIBLE`,
 `AUTOMATION_RULE_INCOMPATIBLE`, `SPECIFICATION_INCOMPATIBLE`,
@@ -1262,18 +1260,29 @@ completed lease must not be interpreted as lease loss or turn the result into a 
 | DELETE | `/api/board/recommendations/{requestId}` | Cancels the authenticated user's matching in-flight request | Returns `boolean`; `true` means the durable stop signal was accepted for the matching local or remote execution. The callable may still be unwinding, so status remains authoritative until `FINISHED` |
 | POST | `/api/board/rules/check-duplicate` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Deterministic duplicate-rule check used by `RuleBuilder` before saving. It does not call the external LLM and returns a typed `DuplicateRuleCheckResultDto`: required `isDuplicate`, `requiresReview`, `similarity` (`0..1`), `matchType`, stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Clients localize the ordinary explanation from `reasonCode`. |
 | POST | `/api/board/rules/check-similarity` | body: typed `RuleDto`; every condition includes `targetType`; rule API-signal conditions omit `relation`/`value` | Explicit AI semantic similarity check available from `RuleBuilder` and the Board rule-recommendation apply flow. It may call the configured LLM and returns a typed `RuleSimilarityResultDto`: required `isSimilar`, `isDuplicate`, authoritative `requiresReview`, `similarity` (`0..1`), stable `reasonCode`, technical `reason`/`message`, plus nullable readable `matchedRule`. Internal candidate references and LLM prose are not ordinary UI concepts. |
+| POST | `/api/board/rules/check-similarity/batch` | `{ "rules": RuleDto[] }` with 1–10 new rules. Each rule uses the same nested validation as the single-rule check and must omit `id` or set it to `null`. | `Result.data` is a list of `RuleSimilarityResultDto` in request order. |
 
 Duplicate-check `reasonCode` is one of `NO_EXISTING_RULES`, `EXACT_MATCH`,
 `TRIGGER_SET_CONTAINS_OTHER`, `SAME_TRIGGER_SHAPE_DIFFERENT_VALUES`,
-`PARTIAL_TRIGGER_OVERLAP`, or `NO_MATCHING_SIGNATURE`. AI similarity uses
-`NO_EXISTING_RULES`, `AI_DUPLICATE`, `AI_SIMILAR`, `AI_HIGH_SCORE_REVIEW`, or
+`PARTIAL_TRIGGER_OVERLAP`, or `NO_MATCHING_SIGNATURE`. Similarity preflight uses
+`NO_EXISTING_RULES`, `EXACT_MATCH`, `AI_DUPLICATE`, `AI_SIMILAR`, `AI_HIGH_SCORE_REVIEW`, or
 `AI_NO_SIGNIFICANT_SIMILARITY`. `requiresReview` is the server decision; clients do not
-recompute it from the score. The score and AI reason are evidence, not proof of safety or
-conflict freedom.
+recompute it from the score. `EXACT_MATCH` is a blocking decision from the same rule
+semantics used by the save transaction, including unordered membership values. It skips
+the provider. `AI_DUPLICATE` remains an advisory review result. Scores and AI reasons are
+evidence, not proof of safety or conflict freedom.
 
-Both checks exclude the saved rule whose id equals the candidate's optional `id`,
+The single-rule checks exclude the saved rule whose id equals the candidate's optional `id`,
 so editing a rule never compares it with itself. With no other saved rules, AI
 similarity returns `NO_EXISTING_RULES` without calling the provider.
+
+The batch check reads one semantic snapshot. Exact matches against stored or earlier
+draft rules are left out of the provider request, which compares the remaining candidates
+in order in at most one call. Results retain the original request order. With an empty
+saved rule set, the first candidate receives `NO_EXISTING_RULES` and remains available
+as a reference for later distinct candidates.
+The entire batch fails with HTTP 502 if a provider decision is missing, repeated,
+out of range, malformed, or references a rule outside its allowed comparison set.
 
 > Standalone device/rule/spec recommendation responses include backend-generated `message`,
 > `count`, `requestedCount`, `validatedCount`, `filteredCount`, `filteredItems`,
@@ -1470,6 +1479,6 @@ recommendation/scene arrays, recommendation endpoints return HTTP `502` through
 from a valid response whose individual candidates were rejected through
 `filteredItems`, and from a valid empty recommendation set.
 The same HTTP-502 behavior applies to an unusable AI similarity response; the endpoint
-does not degrade it to `isSimilar=false`. A duplicate must also be marked similar. Both
-rule-check endpoints and the frontend reject missing required fields, non-numeric or
+does not degrade it to `isSimilar=false`. A duplicate must also be marked similar. The
+rule-check endpoints reject missing required fields, non-numeric or
 out-of-range scores, and wrong field types instead of interpreting them as a clear check.

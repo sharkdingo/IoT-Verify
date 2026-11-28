@@ -1,12 +1,12 @@
 package cn.edu.nju.Iot_Verify.component.ai;
 
 import cn.edu.nju.Iot_Verify.component.ai.state.InMemoryAiSessionStateStore;
+import cn.edu.nju.Iot_Verify.testutil.MutableUtcClock;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -16,33 +16,33 @@ class AiTaskContinuationStoreTest {
 
     @Test
     void keepsOriginalObjectiveWithinTheSameUserAndSession() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-07-17T00:00:00Z"));
-        AiTaskContinuationStore store = new AiTaskContinuationStore(clock);
+        MutableUtcClock clock = new MutableUtcClock(Instant.parse("2026-07-17T00:00:00Z"));
+        AiTaskContinuationStore store = new AiTaskContinuationStore(new InMemoryAiSessionStateStore(), clock);
 
         store.save(1L, "s1", "  delete the old sensor, create a replacement, then verify  ");
 
         assertEquals(
                 "delete the old sensor, create a replacement, then verify",
-                store.pendingObjective(1L, "s1").orElseThrow());
-        assertTrue(store.pendingObjective(1L, "s2").isEmpty());
-        assertTrue(store.pendingObjective(2L, "s1").isEmpty());
+                store.pendingContext(1L, "s1").orElseThrow().originalObjective());
+        assertTrue(store.pendingContext(1L, "s2").isEmpty());
+        assertTrue(store.pendingContext(2L, "s1").isEmpty());
     }
 
     @Test
     void expiresContinuationAtTheConfirmationBoundaryTtl() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-07-17T00:00:00Z"));
-        AiTaskContinuationStore store = new AiTaskContinuationStore(clock);
+        MutableUtcClock clock = new MutableUtcClock(Instant.parse("2026-07-17T00:00:00Z"));
+        AiTaskContinuationStore store = new AiTaskContinuationStore(new InMemoryAiSessionStateStore(), clock);
         store.save(1L, "s1", "replace and verify");
 
         clock.advance(AiTaskContinuationStore.CONTINUATION_TTL.plus(Duration.ofSeconds(1)));
 
-        assertTrue(store.pendingObjective(1L, "s1").isEmpty());
+        assertTrue(store.pendingContext(1L, "s1").isEmpty());
     }
 
     @Test
     void preservesPendingChoiceAndRecentUserUpdatesWithoutReplacingTheOriginalGoal() {
-        MutableClock clock = new MutableClock(Instant.parse("2026-07-17T00:00:00Z"));
-        AiTaskContinuationStore store = new AiTaskContinuationStore(clock);
+        MutableUtcClock clock = new MutableUtcClock(Instant.parse("2026-07-17T00:00:00Z"));
+        AiTaskContinuationStore store = new AiTaskContinuationStore(new InMemoryAiSessionStateStore(), clock);
         store.savePendingStep(
                 1L,
                 "s1",
@@ -73,33 +73,6 @@ class AiTaskContinuationStoreTest {
         writer.save(1L, "s1", "replace the sensor and verify");
 
         assertEquals("replace the sensor and verify",
-                reader.pendingObjective(1L, "s1").orElseThrow());
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant instant;
-
-        private MutableClock(Instant instant) {
-            this.instant = instant;
-        }
-
-        private void advance(Duration duration) {
-            instant = instant.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return instant;
-        }
+                reader.pendingContext(1L, "s1").orElseThrow().originalObjective());
     }
 }

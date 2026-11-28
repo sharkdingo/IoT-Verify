@@ -67,11 +67,6 @@ public final class NaturalChangeRateParser {
      */
     public record RateRange(int lower, int upper) {
 
-        /** True when the declaration permits no independent change at all. */
-        public boolean isStatic() {
-            return lower == 0 && upper == 0;
-        }
-
         /**
          * Widest single-step magnitude the interval permits, as a long so {@code Integer.MIN_VALUE}
          * cannot overflow the comparison.

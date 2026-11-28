@@ -55,9 +55,7 @@ public class ReadUserMessagesTool extends AbstractAiTool {
             result.put("hasMore", page.hasMore());
             result.put("nextBeforeMessageId", page.nextBeforeMessageId());
             result.put("historicalEvidenceOnly", true);
-            return readOnlySuccessJson(result, "Original user messages loaded.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return readOnlySuccessJson(result);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (BaseException e) {

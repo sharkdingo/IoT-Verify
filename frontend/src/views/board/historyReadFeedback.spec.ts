@@ -1,15 +1,17 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
-import { computed, defineComponent, effectScope, nextTick, reactive, ref, watch } from 'vue'
-import { flushPromises, mount } from '@vue/test-utils'
+import { computed, effectScope, nextTick, reactive, ref, watch } from 'vue'
+import { flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { shouldReportUnusableHistoryDeepLink } from '@/views/Board.vue'
 import { i18n } from '@/assets/i18n'
 import { createPagedRequestCoordinator } from '@/utils/pagedRequestCoordinator'
+import { isDefinitiveMutationRejection } from '@/utils/boardWriteReceipt'
 import { errorDetails, localizedErrorMessage } from '@/utils/userMessage'
-import FailureDetails from '@/components/FailureDetails.vue'
 import type { BoardLayoutDto } from '@/types/canvas'
-import { applyBoardRunTarget, isSameBoardRunTarget, parseBoardRunTarget } from './runDeepLink'
+import { applyBoardRunTarget, isSameBoardRunTarget } from './runDeepLink'
+import { useBoardModelComparison } from './useBoardModelComparison'
 
 const board = readFileSync(join(process.cwd(), 'src/views/Board.vue'), 'utf8')
 const start = board.indexOf('<script setup')
@@ -39,6 +41,12 @@ const savedLayout: BoardLayoutDto = {
     inspector: { collapsed: true, width: 280, activeSection: 'devices' }
   }
 }
+
+const bindLayoutWrites = (ports: Record<string, any>) => {
+  for (const name of ['persistBoardLayout', 'drainBoardLayoutSaveQueue', 'waitForBoardLayoutSaveIdle',
+    'saveBoardLayout', 'flushPendingBoardLayout']) ports[name] = bind(name, ports)
+}
+
 const layoutState = () => {
   const ports: Record<string, any> = {
     watch, canvasPan: ref({ x: 0, y: 0 }), canvasZoom: ref(1),
@@ -48,7 +56,8 @@ const layoutState = () => {
     }),
     layoutHydrated: ref(false), boardLifecycleDisposed: false, getToken: () => 'session-A',
     isNarrowViewport: () => false, layoutSaveTimer: null, LAYOUT_SAVE_DEBOUNCE_MS: 500,
-    persistedWideLayout: null, panelStateTouchedBeforeLayout: false, canvasStateTouchedBeforeLayout: false,
+    wideLayoutToRestore: null, wasNarrowViewport: false,
+    panelStateTouchedBeforeLayout: false, canvasStateTouchedBeforeLayout: false,
     MAX_ZOOM: 2, DEFAULT_CONTROL_PANEL_WIDTH: 320, DEFAULT_INSPECTOR_PANEL_WIDTH: 320,
     clampPanelWidth: (width: number) => width, isControlCenterSection: () => true,
     isInspectorSection: () => true, getVisibleDeviceNodes: () => [],
@@ -77,14 +86,36 @@ const layoutSaveState = () => {
     currentAuthUserId: ref(1), boardOwnerUserId: 1,
     boardApi: { saveLayout: vi.fn().mockResolvedValue(savedLayout) },
     buildBoardLayoutPayload: () => savedLayout,
+    isDefinitiveMutationRejection,
     pendingBoardLayoutSave: null, boardLayoutSaveDrainRunning: false, boardLayoutSaveIdleResolvers: [],
-    persistedWideLayout: null, layoutSaveErrorShown: false, layoutSaveFeedbackSuppressed: true,
+    layoutSaveErrorShown: false, layoutSaveFeedbackSuppressed: true,
     boardLifecycleDisposed: true, layoutSaveTimer: null, layoutHydrated: ref(true),
     isNarrowViewport: () => false, notifyError: vi.fn(), t: (key: string) => key
   }
-  for (const name of ['persistBoardLayout', 'drainBoardLayoutSaveQueue', 'waitForBoardLayoutSaveIdle',
-    'saveBoardLayout', 'flushPendingBoardLayout']) ports[name] = bind(name, ports)
+  bindLayoutWrites(ports)
   return { ports, session }
+}
+
+const responsiveLayoutState = () => {
+  const { ports, stop } = layoutState()
+  const viewport = { innerWidth: 1440, innerHeight: 900 }
+  Object.assign(ports, {
+    window: viewport, wasNarrowViewport: false, actionDockViewportWidth: ref(1440), boardViewportHeight: ref(900),
+    isNarrowViewport: () => viewport.innerWidth < 1024,
+    currentAuthUserId: ref(1), boardOwnerUserId: 1, isCurrentSessionToken: (token: string) => token === 'session-A',
+    pendingBoardLayoutSave: null, boardLayoutSaveDrainRunning: false, boardLayoutSaveIdleResolvers: [],
+    boardApi: { saveLayout: vi.fn().mockResolvedValue(savedLayout) },
+    isDefinitiveMutationRejection, layoutSaveErrorShown: false, layoutSaveFeedbackSuppressed: false,
+    notifyError: vi.fn(), t: (key: string) => key
+  })
+  bindLayoutWrites(ports)
+  const updateViewport = bind('updateActionDockViewport', ports)
+  const resize = (width: number) => {
+    viewport.innerWidth = width
+    updateViewport()
+  }
+  ports.applyLoadedBoardLayout(savedLayout, true)
+  return { ports, resize, stop }
 }
 const state = () => {
   const ports: Record<string, any> = {
@@ -115,7 +146,7 @@ const state = () => {
     notifyError: vi.fn(), loadTaskInbox: vi.fn().mockResolvedValue(true),
     recheckAddressedHistory: vi.fn().mockResolvedValue(true),
     historyPanelIntentEpoch: 0, pendingHistoryRunTarget: null,
-    historyDetailRequests: { invalidate: vi.fn() }, isModelPlaybackActive: ref(false),
+    historyDetailRequests: createPagedRequestCoordinator(), isModelPlaybackActive: ref(false),
     isAnyRecommendationRunning: () => false, isSceneReplacementInProgress: ref(false),
     closeResultSurfaces: vi.fn(), notifyBlocked: vi.fn(),
     unreadFuzzNotifications: ref([{ kind: 'COMPLETED', runId: 7, taskId: 7 }]), persistFuzzNotificationState: vi.fn(),
@@ -126,13 +157,12 @@ const state = () => {
     boardForegroundRefreshPromise: null,
     boardLayoutLoadError: ref(null), loadingBoardLayout: ref(false)
   }
-  for (const name of ['isHistoryResultErrorVisible', 'loadVerificationRuns', 'loadSimulationRuns',
-    'executeFuzzingRunsRequest', 'loadFuzzingRuns', 'loadMoreFuzzingRuns', 'loadHistoryResults', 'refreshRunHistory',
+  for (const name of ['isHistoryResultErrorVisible', 'loadUnpagedRuns', 'loadVerificationRuns', 'loadSimulationRuns',
+    'executeFuzzingRunsRequest', 'loadFuzzingRuns', 'loadHistoryResults', 'refreshRunHistory',
     'refreshHistoryLayer', 'isCurrentHistoryPanelIntent', 'clearVisibleFuzzResultNotifications',
     'showHistoryPanel', 'clearFuzzNotifications', 'setHistoryLayer', 'retireHistoryPanelIntent',
     'closeWorkflowPanel', 'closeHistoryPanel', 'canOpenWorkflowPanel',
     'closeOtherWorkflowSurfaces', 'openHistoryPanel', 'loadBoardLayout', 'loadBoardAuthScope']) {
-    if (name === 'isHistoryResultErrorVisible' && !setup.includes(`const ${name} =`)) continue
     ports[name] = bind(name, ports)
   }
   return ports
@@ -160,31 +190,6 @@ describe('Board authoritative read feedback', () => {
     expect(ports.isVerifying.value).toBe(true)
   })
 
-  it('clears a History selection dismissed before its route commits', async () => {
-    const ports = state()
-    const navigation = deferred()
-    const route = reactive({ query: { review: 'retained' } })
-    Object.assign(ports, {
-      route, deepLinkTarget: computed(() => parseBoardRunTarget(route.query)),
-      appliedDeepLinkTarget: null, staleDeepLink: ref(false), boardLifecycleDisposed: false,
-      applyBoardRunTarget, isSameBoardRunTarget, applyDeepLinkTarget: vi.fn(),
-      router: {
-        push: async ({ query }: { query: typeof route.query }) => { await navigation.promise; route.query = query },
-        replace: ({ query }: { query: typeof route.query }) => { route.query = query }
-      }
-    })
-    ports.navigateToRunTarget = bind('navigateToRunTarget', ports)
-    ports.clearRunDeepLink = () => ports.navigateToRunTarget(null, 'replace')
-    const opening = bind('openRunTarget', ports)({ kind: 'verification', runId: 7 }, true)
-    ports.closeHistoryPanel()
-    navigation.resolve(undefined)
-    await opening
-
-    expect(ports.showHistoryPanel.value).toBe(false)
-    expect(route.query).toEqual({ review: 'retained' })
-    expect(ports.applyDeepLinkTarget).not.toHaveBeenCalled()
-  })
-
   it('keeps a newer URL load when closing the History list', () => {
     const ports = state()
     const newer = { kind: 'verification', runId: 8 }
@@ -206,13 +211,12 @@ describe('Board authoritative read feedback', () => {
   it.each(['history', 'fuzzing'] as const)('closes the %s panel on logo reset while task tracking continues', panel => {
     const ports = state()
     Object.assign(ports, {
-      traceAnimationState: ref({ visible: false }), simulationAnimationState: ref({ visible: false }),
+      closePlayback: vi.fn(),
       route: { query: { run: 'verification:7', trace: '8', device: 'kitchen' } },
       router: { replace: vi.fn() }, applyBoardRunTarget,
       isSimulating: ref(true), asyncSimulationActive: ref(true), asyncSimulationTask: ref({ taskId: 12 }),
       trackedFuzzTaskIds: ref([7])
     })
-    ports.closePlaybackForNavigation = bind('closePlaybackForNavigation', ports)
     ports.activeWorkflowPanel.value = panel === 'history' ? { kind: 'history' } : { kind: 'fuzzing', view: 'run' }
 
     bind('resetWorkspace', ports)()
@@ -253,6 +257,36 @@ describe('Board authoritative read feedback', () => {
     expect(ports.fuzzingApi.getRuns).toHaveBeenCalledTimes(2)
   })
 
+  it('uses the adopted snapshot for a combined board and history refresh', async () => {
+    const ports = state()
+    const scene = { nodes: [], environmentVariables: [], rules: [], specifications: [], deviceTemplates: [] }
+    const response = { scene, fingerprints: { verification: 'v', simulation: 's', modelSemanticsVersion: 1 } }
+    const readComparison = vi.fn().mockResolvedValue(response)
+    const scope = effectScope()
+    const comparison = scope.run(() => useBoardModelComparison(() => scene, readComparison, () => true))!
+    try {
+      await comparison.refresh()
+      readComparison.mockClear()
+      const snapshot = deferred()
+      const delayedComparison = deferred()
+      readComparison.mockReturnValueOnce(delayedComparison.promise)
+      ports.refreshCurrentBoardModelFingerprints = comparison.refresh
+      ports.refreshBoardSnapshot = async () => {
+        await snapshot.promise
+        comparison.adoptSnapshot(() => {})
+        return true
+      }
+      const pending = bind('refreshAllBoardState', ports)()
+      snapshot.resolve(undefined)
+      await flushPromises()
+      delayedComparison.resolve(response)
+      expect(await pending).toBe(true)
+      expect(readComparison).not.toHaveBeenCalled()
+      expect(comparison.fingerprints.value).toEqual(response.fingerprints)
+      expect(ports.fuzzingApi.getRuns).toHaveBeenCalledOnce()
+    } finally { scope.stop() }
+  })
+
   it.each([
     ['openVerificationRun', 'failedToLoadVerificationRun'],
     ['selectAndPlayVerificationTrace', 'failedToLoadTrace'],
@@ -263,9 +297,8 @@ describe('Board authoritative read feedback', () => {
     const ports = state()
     const reject = () => vi.fn().mockRejectedValue(failure('Historical storage query failed'))
     Object.assign(ports, {
-      historyDetailRequests: createPagedRequestCoordinator(), boardMutationAdmissionEpoch: 0,
-      ensureHistoricalPlaybackUiAdmission: () => true, isCurrentDeepLinkLoad: () => false,
-      isPersistedHistoryDataInvalid: () => false, shouldReportUnusableHistoryDeepLink: () => false,
+      boardMutationAdmissionEpoch: 0, ensureHistoricalPlaybackUiAdmission: () => true,
+      isPersistedHistoryDataInvalid: () => false, shouldReportUnusableHistoryDeepLink,
       closeHistoryPanel: vi.fn(), fuzzingResultRequestEpoch: 0, fuzzingError: ref(null),
       fuzzingResult: ref(null), fuzzingResultLoading: ref(false), showFuzzingResultDialog: ref(false), nextTick
     })
@@ -274,12 +307,15 @@ describe('Board authoritative read feedback', () => {
     ports.simulationApi.getSimulation = reject()
     ports.fuzzingApi.getRun = reject()
     ports.fuzzingApi.getFinding = reject()
-    ports.extractApiErrorMessage = (error: unknown, fallback: string) =>
-      localizedErrorMessage(error, fallback, i18n.global.locale.value)
+    ports.reportHistoryDetailFailure = bind('reportHistoryDetailFailure', ports)
+    ports.playHistoricalResult = bind('playHistoricalResult', ports)
     const open = bind(opener, ports)
+    const isCurrent = () => true
+    const child = opener === 'selectAndPlayVerificationTrace' || opener === 'selectAndPlayFuzzingFinding'
     for (const language of ['zh-CN', 'en'] as const) {
       i18n.global.locale.value = language
-      await open(7)
+      if (child) await open(7, 10, isCurrent)
+      else await open(7, isCurrent)
       expect(ports.notifyError).toHaveBeenLastCalledWith(i18n.global.t(`app.${key}`))
     }
   })
@@ -288,15 +324,15 @@ describe('Board authoritative read feedback', () => {
     const ports = state()
     const frame: Array<{ resultVisible: boolean; historyClosed: boolean }> = []
     Object.assign(ports, {
-      historyDetailRequests: createPagedRequestCoordinator(), isCurrentDeepLinkLoad: () => false,
-      isPersistedHistoryDataInvalid: () => false, shouldReportUnusableHistoryDeepLink: () => false,
+      isPersistedHistoryDataInvalid: () => false, shouldReportUnusableHistoryDeepLink,
       closeHistoryPanel: vi.fn(), fuzzingResultRequestEpoch: 0, fuzzingError: ref(null),
       fuzzingResult: ref(null), fuzzingResultLoading: ref(false), showFuzzingResultDialog: ref(false),
       nextTick: async () => { frame.push({ resultVisible: ports.showFuzzingResultDialog.value,
         historyClosed: ports.closeHistoryPanel.mock.calls.length > 0 }) }
     })
     ports.fuzzingApi.getRun = vi.fn().mockRejectedValue(failure('Read failed'))
-    await bind('openFuzzingRun', ports)(7)
+    ports.reportHistoryDetailFailure = bind('reportHistoryDetailFailure', ports)
+    await bind('openFuzzingRun', ports)(7, () => true)
     expect(frame[0]).toEqual({ resultVisible: true, historyClosed: false })
     expect(ports.closeHistoryPanel).not.toHaveBeenCalled()
   })
@@ -305,7 +341,7 @@ describe('Board authoritative read feedback', () => {
     const ports = state()
     const run = { id: 7 }
     Object.assign(ports, {
-      historyDetailRequests: createPagedRequestCoordinator(), fuzzingResultRequestEpoch: 0,
+      fuzzingResultRequestEpoch: 0,
       fuzzingError: ref(null), fuzzingResult: ref(null), fuzzingResultLoading: ref(false),
       showFuzzingResultDialog: ref(false), nextTick,
       dismissAllNotifications: vi.fn(), summarizeFuzzingRun: () => ({ id: 7 }),
@@ -314,20 +350,12 @@ describe('Board authoritative read feedback', () => {
     ports.fuzzingApi.getRun = vi.fn().mockResolvedValue(run)
     ports.presentFuzzingRun = bind('presentFuzzingRun', ports)
 
-    expect(await bind('openFuzzingRun', ports)(7)).toBe(true)
+    await bind('openFuzzingRun', ports)(7, () => true)
 
     expect(ports.refreshCurrentBoardModelFingerprints).toHaveBeenCalledOnce()
     expect(ports.fuzzingResult.value).toEqual(run)
     expect(ports.showFuzzingResultDialog.value).toBe(true)
     expect(ports.fuzzingResultLoading.value).toBe(false)
-  })
-
-  it('does not repeat the initial persisted board failure in a toast', async () => {
-    const ports = state()
-    await ports.loadBoardAuthScope(0, { hydrateNotifications: true, initialLayout: true })
-    expect(ports.requestBoardSnapshotRefresh).toHaveBeenCalledWith({ force: true })
-    expect(ports.applyLoadedBoardLayout).toHaveBeenCalled()
-    expect(ports.notifyError).not.toHaveBeenCalled()
   })
 
   it('does not flush an old board layout into the next account during teardown', async () => {
@@ -348,10 +376,9 @@ describe('Board authoritative read feedback', () => {
     session.token = 'session-B'
     ports.currentAuthUserId.value = 2
     response.resolve(savedLayout)
-    await first
+    expect(await first).toBe(false)
     expect(await queued).toBe(false)
     expect(ports.boardApi.saveLayout).toHaveBeenCalledOnce()
-    expect(ports.persistedWideLayout).toBeNull()
     expect(ports.notifyError).not.toHaveBeenCalled()
   })
 
@@ -385,38 +412,20 @@ describe('Board authoritative read feedback', () => {
     expect(ports.boardApi.saveLayout).toHaveBeenCalledOnce()
   })
 
-  it('restores a saved layout without writing it back, then persists an actual user change', async () => {
+  it('reports an unconfirmed layout save expedited by a resize into a narrow window', async () => {
     vi.useFakeTimers()
-    const { ports, stop } = layoutState()
+    const { ports, resize, stop } = responsiveLayoutState()
+    ports.notifyBlocked = vi.fn()
+    ports.boardApi.saveLayout.mockRejectedValueOnce(new Error('Response lost'))
     try {
-      ports.applyLoadedBoardLayout(savedLayout, true)
-      await nextTick()
-      await vi.runAllTimersAsync()
-      expect(ports.canvasZoom.value).toBe(0.75)
-      expect(ports.saveBoardLayout).not.toHaveBeenCalled()
-
-      ports.canvasZoom.value = 0.9
-      await nextTick()
-      await vi.runAllTimersAsync()
-      expect(ports.saveBoardLayout).toHaveBeenCalledOnce()
-    } finally {
-      stop()
-      vi.useRealTimers()
-    }
-  })
-
-  it('persists an early viewport edit once after restoring the other saved layout fields', async () => {
-    vi.useFakeTimers()
-    const { ports, stop } = layoutState()
-    try {
-      ports.canvasZoom.value = 0.9
-      ports.canvasStateTouchedBeforeLayout = true
-      ports.applyLoadedBoardLayout(savedLayout, true)
-      await nextTick()
-      await vi.runAllTimersAsync()
-      expect(ports.canvasZoom.value).toBe(0.9)
-      expect(ports.boardPanels.control.width).toBe(300)
-      expect(ports.saveBoardLayout).toHaveBeenCalledExactlyOnceWith({ silent: true })
+      ports.canvasZoom.value = 0.95
+      resize(600)
+      await ports.waitForBoardLayoutSaveIdle()
+      expect(ports.notifyBlocked).toHaveBeenCalledExactlyOnceWith('app.boardLayoutSaveUnconfirmed')
+      resize(1440)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(ports.canvasZoom.value).toBe(0.95)
+      expect(ports.boardApi.saveLayout).toHaveBeenCalledOnce()
     } finally {
       stop()
       vi.useRealTimers()
@@ -438,13 +447,13 @@ describe('Board authoritative read feedback', () => {
         expect(ports.boardPanels.control.collapsed).toBe(panel !== 'control')
         expect(ports.boardPanels.inspector.collapsed).toBe(panel !== 'inspector')
         expect(ports.layoutHydrated.value).toBe(true)
-        expect(ports.persistedWideLayout).toEqual(savedLayout)
+        expect(ports.wideLayoutToRestore).toEqual(savedLayout)
         expect(ports.saveBoardLayout).not.toHaveBeenCalled()
       } finally { stop() }
     }
   )
 
-  it.each([false, true])('preserves early narrow canvas navigation when touched=%s', async touched => {
+  it('fits the narrow canvas when the saved layout arrives before navigation', async () => {
     const { ports, stop } = layoutState()
     ports.isNarrowViewport = () => true
     ports.nextTick = nextTick
@@ -453,47 +462,29 @@ describe('Board authoritative read feedback', () => {
     ports.fitNodesToCanvas = bind('fitNodesToCanvas', ports)
     ports.canvasPan.value = { x: 180, y: -90 }
     ports.canvasZoom.value = 0.9
-    ports.canvasStateTouchedBeforeLayout = touched
     try {
       ports.applyLoadedBoardLayout(savedLayout, true)
       await nextTick()
-      expect(ports.canvasPan.value).toEqual(touched ? { x: 180, y: -90 } : { x: 30, y: 40 })
-      expect(ports.canvasZoom.value).toBe(touched ? 0.9 : 0.4)
-      expect(ports.persistedWideLayout).toEqual(savedLayout)
+      expect(ports.canvasPan.value).toEqual({ x: 30, y: 40 })
+      expect(ports.canvasZoom.value).toBe(0.4)
+      expect(ports.wideLayoutToRestore).toEqual(savedLayout)
       expect(ports.saveBoardLayout).not.toHaveBeenCalled()
     } finally { stop() }
   })
 
-  it('restores layout after the snapshot is ready without waiting for the task inbox', async () => {
+  it('starts the initial snapshot in a hidden tab and hydrates the saved layout after a failed snapshot', async () => {
     const ports = state()
-    const snapshot = deferred()
-    const tasks = deferred()
-    ports.requestBoardSnapshotRefresh.mockReturnValueOnce(snapshot.promise)
-    ports.loadTaskInbox.mockReturnValueOnce(tasks.promise)
-    const pending = ports.loadBoardAuthScope(0, { initialLayout: true })
-    await flushPromises()
-    expect(ports.applyLoadedBoardLayout).not.toHaveBeenCalled()
+    Object.assign(ports, {
+      document: { visibilityState: 'hidden' }, boardRefreshRequestedWhileBusy: false,
+      enqueueBoardMutation: (work: () => Promise<boolean>) => work(),
+      refreshBoardSnapshot: vi.fn().mockResolvedValue(false)
+    })
+    ports.requestBoardSnapshotRefresh = bind('requestBoardSnapshotRefresh', ports)
 
-    snapshot.resolve(true)
-    await flushPromises()
-    expect(ports.applyLoadedBoardLayout).toHaveBeenCalledExactlyOnceWith(savedLayout, true)
-    expect(ports.loadingBoardLayout.value).toBe(false)
-    tasks.resolve(true)
-    await pending
-  })
-
-  it('keeps a rejected layout read unknown until a successful retry instead of hydrating defaults', async () => {
-    const ports = state()
-    ports.boardApi.getLayout.mockRejectedValueOnce(failure('Layout storage unavailable'))
     await ports.loadBoardAuthScope(0, { initialLayout: true })
-    expect(ports.applyLoadedBoardLayout).not.toHaveBeenCalled()
-    expect(ports.boardLayoutLoadError.value).toMatchObject({ cause: 'Layout storage unavailable' })
-    expect(ports.loadingBoardLayout.value).toBe(false)
 
-    expect(await ports.loadBoardLayout(true)).toBe(true)
+    expect(ports.refreshBoardSnapshot).toHaveBeenCalledOnce()
     expect(ports.applyLoadedBoardLayout).toHaveBeenCalledExactlyOnceWith(savedLayout, true)
-    expect(ports.boardLayoutLoadError.value).toBeNull()
-    expect(ports.notifyError).not.toHaveBeenCalled()
   })
 
   it.each(['resolve', 'reject'] as const)('does not apply a late layout %s across the auth boundary', async outcome => {
@@ -529,45 +520,6 @@ describe('Board authoritative read feedback', () => {
       expect(ports.historyResultErrors[kind]).toBeNull()
     })
 
-  it.each(['hidden', 'tasks', 'other-filter'] as const)(
-    'retains a needed notification outside a visible source owner: %s', async mode => {
-      const ports = state()
-      if (mode === 'hidden') ports.closeHistoryPanel()
-      if (mode === 'tasks') ports.activeHistoryLayer.value = 'tasks'
-      if (mode === 'other-filter') ports.activeHistoryResultFilter.value = 'verification'
-      ports.fuzzingApi.getRuns.mockRejectedValue(failure())
-      expect(await ports.loadFuzzingRuns()).toBe(false)
-      expect(ports.notifyError).toHaveBeenCalledOnce()
-    })
-
-  it.each([false, true])('keeps an append failure with its visible owner unless that panel was closed: %s', async closed => {
-    const ports = state()
-    ports.activeHistoryResultFilter.value = 'fuzzing'
-    ports.fuzzingRunsHasMore.value = true
-    const page = deferred()
-    ports.fuzzingApi.getRuns.mockReturnValueOnce(page.promise)
-    const loading = ports.loadMoreFuzzingRuns()
-    expect(ports.fuzzingApi.getRuns).toHaveBeenCalledWith(1, ports.FUZZ_RUN_HISTORY_PAGE_SIZE)
-    if (closed) ports.closeHistoryPanel()
-    page.reject(failure())
-    await loading
-    expect(ports.fuzzingRuns.value).toEqual([{ id: 7 }])
-    expect(ports.fuzzingRunsPage.value).toBe(0)
-    expect(ports.historyResultErrors.fuzzing).toMatchObject({ cause: 'History storage unavailable' })
-    expect(ports.loadingMoreFuzzingRuns.value).toBe(false)
-    expect(ports.notifyError).toHaveBeenCalledTimes(closed ? 1 : 0)
-  })
-
-  it('leaves aggregate source failures with their existing owner after the panel is closed', async () => {
-    const ports = state()
-    ports.boardApi.getVerificationRuns.mockRejectedValue(failure())
-    expect(await ports.loadHistoryResults()).toBe(false)
-    expect(ports.notifyError).not.toHaveBeenCalled()
-    ports.closeHistoryPanel()
-    expect(await ports.loadHistoryResults()).toBe(false)
-    expect(ports.notifyError).not.toHaveBeenCalled()
-  })
-
   it('a single-source refresh cannot turn a superseded aggregate into a hidden failure notice', async () => {
     const ports = state()
     const older = deferred()
@@ -581,13 +533,11 @@ describe('Board authoritative read feedback', () => {
     expect(ports.notifyError).not.toHaveBeenCalled()
   })
 
-  it.each(['verification', 'simulation', 'fuzzing'] as const)(
+  it.each(['verification', 'simulation'] as const)(
     'a superseded %s success returns false and preserves the newest collection', async kind => {
       const ports = state()
-      const get = kind === 'verification' ? ports.boardApi.getVerificationRuns
-        : kind === 'simulation' ? ports.simulationApi.getUserSimulations : ports.fuzzingApi.getRuns
-      const load = kind === 'verification' ? ports.loadVerificationRuns
-        : kind === 'simulation' ? ports.loadSimulationRuns : ports.loadFuzzingRuns
+      const get = kind === 'verification' ? ports.boardApi.getVerificationRuns : ports.simulationApi.getUserSimulations
+      const load = kind === 'verification' ? ports.loadVerificationRuns : ports.loadSimulationRuns
       const older = deferred()
       get.mockReturnValueOnce(older.promise).mockResolvedValueOnce([{ id: 42 }])
       const pending = load()
@@ -598,11 +548,10 @@ describe('Board authoritative read feedback', () => {
       expect(ports.notifyError).not.toHaveBeenCalled()
     })
 
-  it.each(['verification', 'simulation', 'fuzzing'] as const)(
+  it.each(['verification', 'simulation'] as const)(
     'a superseded %s success cannot clear unread completion or replace the latest failure', async kind => {
       const ports = state()
-      const get = kind === 'verification' ? ports.boardApi.getVerificationRuns
-        : kind === 'simulation' ? ports.simulationApi.getUserSimulations : ports.fuzzingApi.getRuns
+      const get = kind === 'verification' ? ports.boardApi.getVerificationRuns : ports.simulationApi.getUserSimulations
       const older = deferred()
       get.mockReturnValueOnce(older.promise).mockRejectedValueOnce(failure('Latest history read failed'))
       ports.closeHistoryPanel()
@@ -634,14 +583,14 @@ describe('Board authoritative read feedback', () => {
       expect(ports.notifyError).not.toHaveBeenCalled()
     })
 
-  it('rechecks the addressed result even if an unrelated history list fails', async () => {
+  it.each(['successful', 'partial'] as const)('rechecks the addressed result after a %s history refresh', async status => {
     const ports = state()
-    ports.fuzzingApi.getRuns.mockRejectedValueOnce(failure())
-    expect(await ports.refreshRunHistory()).toBe(false)
+    if (status === 'partial') ports.fuzzingApi.getRuns.mockRejectedValueOnce(failure())
+    expect(await ports.refreshRunHistory()).toBe(status === 'successful')
     expect(ports.recheckAddressedHistory).toHaveBeenCalledOnce()
   })
 
-  it('does not acknowledge a finished source batch once a newer aggregate owns the history read', async () => {
+  it('rejects a finished source batch superseded before aggregation', async () => {
     const ports = state()
     const finished = new Set<string>()
     let latest: Promise<boolean> | undefined
@@ -672,100 +621,20 @@ describe('Board authoritative read feedback', () => {
   it('does not claim a blocked append applied an authoritative page', async () => {
     const ports = state()
     const token = ports.fuzzingHistoryRequests.beginReplace()
-    expect(await ports.loadFuzzingRuns(true, { append: true })).toBe(false)
+    expect(await ports.loadFuzzingRuns({ append: true })).toBe(false)
     expect(ports.fuzzingApi.getRuns).not.toHaveBeenCalled()
     ports.fuzzingHistoryRequests.finish(token)
-    expect(await ports.loadFuzzingRuns(true, { append: true })).toBe(true)
+    expect(await ports.loadFuzzingRuns({ append: true })).toBe(true)
     expect(ports.fuzzingApi.getRuns).toHaveBeenCalledOnce()
-  })
-
-  it('acknowledges the current successful visible lists and reconciles current history', async () => {
-    const ports = state()
-    ports.closeHistoryPanel()
-    await ports.openHistoryPanel('results')
-    expect(ports.unreadFuzzNotifications.value).toEqual([])
-    expect(ports.persistFuzzNotificationState).toHaveBeenCalledOnce()
-    expect(await ports.refreshRunHistory()).toBe(true)
-    expect(ports.recheckAddressedHistory).toHaveBeenCalledOnce()
-  })
-
-  it.each([
-    { layer: 'results', filter: 'fuzzing', retry: 'refreshHistoryResults', retained: 'FAILED' },
-    { layer: 'results', filter: 'simulation', retry: 'refreshHistoryResults', retained: 'ALL' },
-    { layer: 'tasks', filter: 'fuzzing', retry: 'refreshHistoryTasks', retained: 'COMPLETED' }
-  ] as const)('acknowledges only visible unread items after retrying $layer with $filter filter', async ({ layer, filter, retry, retained }) => {
-    const ports = state()
-    const unread = [{ kind: 'COMPLETED', runId: 7, taskId: 7 }, { kind: 'FAILED', taskId: 8 }]
-    ports.unreadFuzzNotifications.value = unread
-    ports.activeHistoryResultFilter.value = filter
-    if (layer === 'results') ports.fuzzingApi.getRuns.mockRejectedValueOnce(failure())
-    else ports.loadTaskInbox.mockResolvedValueOnce(false)
-
-    await ports.setHistoryLayer(layer)
-    expect(ports.unreadFuzzNotifications.value).toEqual(unread)
-    await bind(retry, ports)()
-
-    expect(ports.unreadFuzzNotifications.value).toEqual(unread.filter(item => retained === 'ALL' || item.kind === retained))
-    expect(ports.persistFuzzNotificationState).toHaveBeenCalledTimes(retained === 'ALL' ? 0 : 1)
-  })
-
-  it('retains one snapshot read cause beside Retry until a successful retry replaces the snapshot', async () => {
-    const ports = state()
-    const keys = ['templates', 'nodes', 'environment', 'rules', 'specs']
-    Object.assign(ports, {
-      allBoardDataKeys: keys, boardDataLoadState: reactive(Object.fromEntries(keys.map(key => [key, 'ready']))),
-      boardSnapshotError: ref(null), templatesLoading: ref(false), hydratedBoardAuthScopeEpoch: 0,
-      deviceTemplates: ref([{ id: 1 }]), nodes: ref([{ id: 'known-device' }]),
-      environmentVariables: ref([]), rules: ref([{ id: 5 }]), specifications: ref([{ id: 6 }]),
-      replaceNodesFromServer: (nodes: unknown) => { ports.nodes.value = nodes },
-      reconcileDanglingBoardFocus: vi.fn(), syncRuleDerivedEdges: vi.fn(), syncBoardUndoAvailability: vi.fn()
-    })
-    ports.adoptBoardSnapshot = bind('adoptBoardSnapshot', ports)
-    ports.boardApi.getSnapshot = vi.fn().mockRejectedValue(failure('Snapshot service unavailable'))
-    const load = bind('refreshBoardSnapshot', ports)
-    const bannerIndex = board.indexOf('data-testid="board-data-load-error"')
-    const template = board.slice(board.lastIndexOf('<div', bannerIndex),
-      board.indexOf('<!-- A shared link naming a run', bannerIndex))
-    const wrapper = mount(defineComponent({
-      components: { FailureDetails }, template,
-      setup: () => ({ ...ports,
-        failedBoardDataKeys: computed(() => keys.filter(key => ports.boardDataLoadState[key] === 'error')),
-        boardDataKeyLabel: (key: string) => key, retryBoardDataLoad: load })
-    }))
-    try {
-      expect(await load()).toBe(false)
-      await wrapper.vm.$nextTick()
-      const alert = wrapper.get('[data-testid="board-data-load-error"]')
-      expect(alert.get('[data-testid="failure-cause"]').text()).toBe('Snapshot service unavailable')
-      expect(alert.get('[data-testid="failure-fields"]').text()).toContain('Reconnect the history store')
-      expect(alert.get('[data-testid="failure-technical-details"]').attributes('open')).toBeUndefined()
-      expect(ports.nodes.value).toEqual([{ id: 'known-device' }])
-      expect(ports.rules.value).toEqual([{ id: 5 }])
-      expect(ports.specifications.value).toEqual([{ id: 6 }])
-      ports.boardDataLoadState.nodes = 'loading'
-      await wrapper.vm.$nextTick()
-      // A partial reload does not replace the failed full snapshot read for the other collections.
-      expect(ports.boardSnapshotError.value).toMatchObject({ cause: 'Snapshot service unavailable' })
-      expect(wrapper.get('[data-testid="failure-cause"]').text()).toBe('Snapshot service unavailable')
-      expect(await load()).toBe(false)
-      await wrapper.vm.$nextTick()
-      ports.boardApi.getSnapshot.mockResolvedValue({ deviceTemplates: [], nodes: [{ id: 'new-device' }],
-        environmentVariables: [], rules: [], specifications: [],
-        editHistory: { canUndo: false, canRedo: false, editHistoryRevision: '0:0:0' } })
-      await alert.get('button').trigger('click')
-      await vi.waitFor(() => expect(ports.boardSnapshotError.value).toBeNull())
-      await wrapper.vm.$nextTick()
-      expect(wrapper.find('[data-testid="board-data-load-error"]').exists()).toBe(false)
-      expect(ports.nodes.value).toEqual([{ id: 'new-device' }])
-      expect(ports.notifyError).not.toHaveBeenCalled()
-    } finally { wrapper.unmount() }
   })
 
   it('does not replace a new account snapshot failure with a late old read', async () => {
     const ports = state()
     const older = deferred()
+    const adoptBoardSnapshot = vi.fn()
     Object.assign(ports, { allBoardDataKeys: ['nodes'], boardDataLoadState: { nodes: 'ready' },
-      boardSnapshotError: ref(null), templatesLoading: ref(false) })
+      boardOwnerUserId: 1, currentAuthUserId: ref(1),
+      boardSnapshotError: ref(null), templatesLoading: ref(false), hasHydratedBoardSnapshot: ref(false), adoptBoardSnapshot })
     ports.boardApi.getSnapshot = vi.fn().mockReturnValue(older.promise)
     const pending = bind('refreshBoardSnapshot', ports)()
     ports.boardAuthScopeEpoch++
@@ -775,6 +644,7 @@ describe('Board authoritative read feedback', () => {
     expect(await pending).toBe(false)
     expect(ports.boardSnapshotError.value).toEqual(latest)
     expect(ports.templatesLoading.value).toBe(true)
+    expect(adoptBoardSnapshot).not.toHaveBeenCalled()
     expect(ports.notifyError).not.toHaveBeenCalled()
   })
 })

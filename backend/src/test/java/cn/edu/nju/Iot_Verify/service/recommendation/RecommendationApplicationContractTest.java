@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -147,8 +148,45 @@ class RecommendationApplicationContractTest {
         verifyNoMoreInteractions(board);
     }
 
-    @Test
-    void malformedProviderResponseIsATypedFailureAndTheSameToolError() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {" ```json\r\n%s\r\n``` ", "%s\nProvider note"})
+    void specificationProviderArrayPreservesFilteringAndTruncation(String providerFormat) throws Exception {
+        alarmBoard();
+        // Preserve the provider reader's existing acceptance of a repeated field.
+        String accepted = "{\"rationale\":false," + specificationCandidate("3").toString().substring(1);
+        String array = "[{},42," + accepted + "," + accepted + "]";
+        when(provider.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
+                .thenReturn(providerFormat.formatted(array));
+        var service = new SpecificationRecommendationService(devices, board, provider, mapper, parser);
+
+        var result = service.recommend(37L, 1, "en", "");
+        UserContextHolder.setUserId(37L);
+        JsonNode toolResult = mapper.readTree(new RecommendSpecificationsTool(service, mapper)
+                .execute("{\"maxRecommendations\":1}"));
+        assertEquals(1, toolResult.path("validatedCount").asInt(), toolResult.toString());
+
+        assertEquals(1, result.getCount());
+        assertEquals(1, result.getRequestedCount());
+        assertEquals(1, result.getValidatedCount());
+        assertEquals(2, result.getFilteredCount());
+        assertEquals(1, result.getFilteredItems().get(0).getIndex());
+        var malformed = result.getFilteredItems().get(1);
+        assertEquals(2, malformed.getIndex());
+        assertEquals("parseFailed", malformed.getReasonCode());
+        assertNull(malformed.getLabel());
+        assertEquals(4, result.getRawCandidateCount());
+        assertEquals(3, result.getInspectedCount());
+        assertEquals(1, result.getTruncatedCount());
+        assertNull(result.getAdjustedItems());
+        assertEquals(mapper.valueToTree(result), toolResult);
+        verify(board, times(2)).getSemanticSnapshot(37L);
+        verifyNoMoreInteractions(board);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"not-json", "{}", "{\"recommendations\":null}", "{\"recommendations\":{}}"})
+    void malformedProviderResponseIsATypedFailureAndTheSameToolError(String response) throws Exception {
         DeviceNodeDto node = new DeviceNodeDto();
         node.setId("sensor");
         node.setTemplateName("Sensor");
@@ -156,7 +194,7 @@ class RecommendationApplicationContractTest {
         when(board.getSemanticSnapshot(37L)).thenReturn(
                 new BoardSemanticSnapshotDto(List.of(node), List.of(), List.of(), List.of(), List.of()));
         when(provider.completeRecommendation(anyString(), anyString(), anyDouble(), anyInt()))
-                .thenReturn("not-json");
+                .thenReturn(response);
         var service = new RuleRecommendationService(devices, board, provider, mapper, parser);
 
         RecommendationFailure failure = assertThrows(RecommendationFailure.class,

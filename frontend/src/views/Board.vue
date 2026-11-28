@@ -25,15 +25,6 @@ export const loadBoardResultWithRetry = async <T,>({
   throw new Error('Completed result recovery exhausted')
 }
 
-export const createLatestBoardRequestGuard = () => {
-  let epoch = 0
-  return {
-    begin: () => ++epoch,
-    invalidate: () => { epoch += 1 },
-    isCurrent: (requestEpoch: number) => requestEpoch === epoch
-  }
-}
-
 /**
  * Historical playback is evidence from a completed run. Its node presentation must never read
  * the live template catalog, because a later template edit can otherwise change old evidence.
@@ -61,28 +52,12 @@ export const persistedHistoryInvalidRecordId = (
   return Number.isSafeInteger(recordId) && recordId > 0 ? recordId : null
 }
 
-export const shouldClearUnusableHistoryDeepLink = (
-  loadingFromDeepLink: boolean,
-  error: unknown
-): boolean => loadingFromDeepLink && isPersistedHistoryDataInvalid(error)
-
 /** Only confirmed absent/forbidden targets, not transient reads, make a shared history link dead. */
-export const shouldReportUnusableHistoryDeepLink = (
-  loadingFromDeepLink: boolean,
-  error: unknown
-): boolean => {
-  if (!loadingFromDeepLink) return false
+export const shouldReportUnusableHistoryDeepLink = (error: unknown): boolean => {
   if (isPersistedHistoryDataInvalid(error)) return true
   const status = Number((error as { response?: { status?: unknown } } | null)?.response?.status)
   return status === 403 || status === 404 || status === 410
 }
-
-/** A trace address is meaningful only under the verification run named by its URL. */
-export const verificationRunContainsTrace = (
-  run: { traces?: Array<{ id?: number }> } | null | undefined,
-  traceId: number
-): boolean => Number.isSafeInteger(traceId) && traceId > 0
-  && (run?.traces || []).some(trace => trace.id === traceId)
 
 /** A leaf replay response must belong to the run encoded in a shared history URL. */
 export const verificationTraceBelongsToRun = (
@@ -156,20 +131,13 @@ export const revalidateHistoricalPlaybackAdmission = async ({
 
 export const prepareBoardChatInteraction = ({
   sceneReplacementInProgress,
-  tracePlaybackVisible,
-  simulationPlaybackVisible,
-  closeTracePlayback,
-  closeSimulationPlayback
+  dismissPlayback
 }: {
   sceneReplacementInProgress: boolean
-  tracePlaybackVisible: boolean
-  simulationPlaybackVisible: boolean
-  closeTracePlayback: () => void
-  closeSimulationPlayback: () => void
+  dismissPlayback: () => void
 }): boolean => {
   if (sceneReplacementInProgress) return false
-  if (tracePlaybackVisible) closeTracePlayback()
-  if (simulationPlaybackVisible) closeSimulationPlayback()
+  dismissPlayback()
   return true
 }
 
@@ -192,11 +160,11 @@ export const runTrackedBoardMutation = async <T,>(
 }
 
 export const handleRecommendationApplySceneChange = (
-  confirmedApplied: boolean,
+  presentOnBoard: boolean,
   preserveApplied: () => void,
   invalidateRecommendations: () => void
 ) => {
-  if (confirmedApplied) preserveApplied()
+  if (presentOnBoard) preserveApplied()
   else invalidateRecommendations()
 }
 
@@ -206,20 +174,6 @@ export const invalidateFuzzingResultRequests = (
 ): number => {
   invalidateHistoryDetailRequests()
   return currentRequestEpoch + 1
-}
-
-/**
- * Confirms a history deletion, invalidating in-flight detail requests only once the user has
- * agreed. Returns whether to proceed: cancelling is an ordinary outcome, not an exception, so
- * callers branch on the result instead of catching.
- */
-export const confirmHistoryDeletion = async (
-  requestConfirmation: () => Promise<boolean>,
-  invalidateDetailRequests: () => void
-): Promise<boolean> => {
-  if (!await requestConfirmation()) return false
-  invalidateDetailRequests()
-  return true
 }
 
 export const createScopedBoardInvalidationBinding = <Message,>(
@@ -304,7 +258,7 @@ export const reconcileBoardNodeSnapshot = <T extends ReconciledBoardNode>(
   currentNodes: T[],
   incomingNodes: readonly T[],
   pendingLayouts: ReadonlyMap<string, { layout: ReconciledBoardNodeLayout }>,
-  activeNodeIds: ReadonlySet<string>
+  activeNodeIds: Pick<ReadonlySet<string>, 'has'>
 ): T[] => {
   const currentById = new Map(currentNodes.map(node => [node.id, node]))
   let changed = currentNodes.length !== incomingNodes.length
@@ -472,12 +426,6 @@ export const recommendationSceneFingerprint = (
   deviceTemplates: canonicalUnorderedCollection(snapshot.deviceTemplates)
 }))
 
-export const hasRecommendationSceneChanged = (
-  current: RecommendationSceneSnapshotLike | null,
-  incoming: RecommendationSceneSnapshotLike
-): boolean => current !== null
-  && recommendationSceneFingerprint(current) !== recommendationSceneFingerprint(incoming)
-
 export type ConfirmedBoardItemStatus = 'current' | 'scene-changed' | 'item-changed'
 
 export const getConfirmedBoardItemStatus = <T extends { id?: string }>(
@@ -531,19 +479,20 @@ export const formalRunReadinessIssue = (
 /* =================================================================================
  * 1. Imports & Setup
  * ================================================================================= */
-import FieldSelect from '@/components/common/FieldSelect.vue'
-import {ref, shallowRef, reactive, computed, defineAsyncComponent, nextTick, onMounted, onBeforeUnmount, watch, watchPostEffect, h, type Ref} from 'vue'
+import TemplateRuntimeFields from '@/components/TemplateRuntimeFields.vue'
+import {ref, shallowRef, reactive, computed, defineAsyncComponent, nextTick, onMounted, onBeforeUnmount, watch, watchPostEffect, h, type Ref, type VNode} from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import { isAxiosError } from 'axios'
 import { useChatStore } from '@/stores/chat'
 import { useAuth } from '@/stores/auth'
-import { subscribeBoardInvalidation } from '@/utils/boardInvalidation'
+import { publishBoardInvalidation, subscribeBoardInvalidation } from '@/utils/boardInvalidation'
 import { ACTION_DOCK_RAIL_PX, BOARD_FLOATING_GAP_CSS, COLLAPSED_PANEL_RAIL_PX } from '@/constants/boardLayout'
 import ProductMark from '@/components/common/ProductMark.vue'
 // Icons
 
 // Types
-import type {DeviceDialogMeta, DeviceTemplate, InternalVariable} from '../types/device'
+import type {DeviceDialogMeta, DeviceTemplate} from '../types/device'
 import type { BoardLayoutDto, CanvasPan } from '../types/canvas'
 import type { BoardUndoResult } from '@/types/boardEdit'
 import type { DeviceNode } from '../types/node'
@@ -554,11 +503,9 @@ import type {
   ModelGenerationIssue,
   PersistedTrace,
   Trace,
-  TraceDevice,
   TraceSummary,
   TraceState,
   TraceTriggeredRule,
-  TraceVariable,
   VerificationResult,
   VerificationRun,
   VerificationRunSummary,
@@ -584,7 +531,8 @@ import type {
 } from '@/types/fuzzing'
 import { isValidFuzzPaperDomainFingerprint } from '@/types/fuzzing'
 import { compareModelSnapshot, hasRunBoardDifference } from '@/utils/modelComparison'
-import type { BoardModelFingerprints, ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
+import { getVerificationRepairRunBlock, getVerificationRepairTraceBlock } from '@/utils/verificationRepair'
+import type { ModelRunSnapshot, ModelSemantics, RunBoardComparison } from '@/types/modelSemantics'
 import type {
   EnvironmentVariableUpdateRequest,
   ModelEnvironmentVariable,
@@ -593,7 +541,7 @@ import type {
 } from '@/types/model'
 import { isRunInitiator } from '@/types/model'
 import type { InteractiveOperationStage, TaskCancellationResult, TaskProgressStage } from '@/types/task'
-import type { FixApplyResult } from '@/types/fix'
+import type { FixApplyResult, FixBoardApplyOutcome, VerificationRepairBlock } from '@/types/fix'
 import type { PortableSceneFile } from '@/types/scene'
 // Panel types removed
 
@@ -625,6 +573,7 @@ import {
 import {
   createBoardSemanticCommit,
   reconcileBoardFocus,
+  type BoardNodeSnapshotOptions,
   type BoardSemanticScene
 } from './board/semanticCommit'
 import { createFocusHighlight } from './board/focusHighlight'
@@ -651,6 +600,7 @@ import {
 import { assertRuleHasTrigger, getLinkPoints, ruleSimilarityReasonKey } from '../utils/rule'
 import {
   deriveTraceContext,
+  findPlaybackLoopRange,
   formatTraceSpec,
   normalizePlaybackDeviceId,
   playbackDeviceChangeDetails,
@@ -662,10 +612,8 @@ import { buildTraceEdgePlaybackStates } from '@/utils/traceEdgePlayback'
 import {
   buildSimulationRequestPayload,
   buildVerificationRequestPayload,
-  normalizeModelRelation,
   specificationsRequirePrivacy
 } from '@/utils/modelRequest'
-import { canonicalStateModeMembership } from '@/utils/stateConditionDomain'
 import { isModelSemanticsConsistent } from '@/utils/modelSemantics'
 import {
   ATTACK_POINT_HARD_MAX,
@@ -676,6 +624,7 @@ import {
 } from './board/attackSurface'
 import { recommendedReadingKey } from './board/recommendedReadingSuffix'
 import { errorDetails, technicalErrorLines, localizedErrorMessage, localizedTextOrFallback, type ApiErrorDetails } from '@/utils/userMessage'
+import { isDefinitiveMutationRejection, isRecordMissing, readBoardWriteReceipt as readWriteReceipt, readDeletionReceipt, type BoardWriteReceipt } from '@/utils/boardWriteReceipt'
 import { resolveImpactEnvironmentDefinition } from '@/utils/device'
 import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
 import FailureDetails from '@/components/FailureDetails.vue'
@@ -687,6 +636,7 @@ import {
   prepareOwnedRecommendationForLogout,
   refreshRecommendationOwnerCredential,
   requestIdAfterTerminalSettlement,
+  type OwnedRecommendationPostOptions,
   type RecommendationRequestOwner
 } from '@/utils/recommendationRequestRecovery'
 import { REQUEST_LIMITS } from '@/constants/requestLimits'
@@ -745,17 +695,11 @@ import {
   buildDeviceRuntimeConfig,
   createDeviceRuntimeDraft,
   deviceRuntimeConfigsEqual,
-  findTemplateStatePrivacy,
-  findTemplateStateTrust,
   getTemplateLocalVariables,
   getTemplateEnvironmentVariables,
-  getTemplateVariableDefaultValue,
-  templateVariableIsStateDerived,
   syncStateDerivedVariables,
   getTemplateWorkingStates,
   resetDeviceRuntimeDraft,
-  templateVariableHasEnumValues,
-  templateVariableUsesNumericBounds,
   validateTemplateVariableValue,
   validateDeviceRuntimeConfig,
   type DeviceRuntimeConfig
@@ -777,18 +721,19 @@ import boardApi, {
   BOARD_RESPONSE_INCOMPLETE_CODE,
   type CollectionMutationResult,
   type BoardReplacementPreview,
-  type BoardSemanticSnapshot, type BoardWorkspaceSnapshot,
+  type BoardWorkspaceSnapshot,
   type DeviceLayout,
   type DeviceRecommendation,
   type EnvironmentVariablePatchResult,
   type EnvironmentVariableChange,
   type RecommendationAdjustmentItem,
   type RecommendationFilteredItem,
+  type RuleSimilarityResult,
   type SpecificationRecommendation
 } from '@/api/board'
 import simulationApi from '@/api/simulation'
 import fuzzingApi from '@/api/fuzzing'
-import rulesApi, { type RuleRecommendation } from '@/api/rules'
+import { recommendRules, type RuleRecommendation } from '@/api/rules'
 
 // Components
 import CanvasBoard from '../components/CanvasBoard.vue'
@@ -798,18 +743,20 @@ import LanguageToggle from '@/components/common/LanguageToggle.vue'
 import ThemeToggle from '@/components/common/ThemeToggle.vue'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import BackgroundTaskSummary from '@/components/BackgroundTaskSummary.vue'
+import FormalRunSettings from '@/components/FormalRunSettings.vue'
+import RecommendationRequestControls from '@/components/RecommendationRequestControls.vue'
 import { describeSpecification, presentRule } from '@/utils/modelPresentation'
 import ToggleSwitch from '@/components/common/ToggleSwitch.vue'
 import { useModalAccessibility } from '@/composables/useModalAccessibility'
+import { BOARD_ITEM_EDIT_OUTCOME_UNKNOWN } from '@/composables/useUnconfirmedBoardItemEdit'
 import { openModalDepth } from '@/composables/useBodyScrollLock'
 import { useBoardUndo } from '@/composables/useBoardUndo'
+import { useBoardModelComparison } from './board/useBoardModelComparison'
+import { usePlaybackCursor } from './board/usePlaybackCursor'
 
 const DeviceDialog = defineAsyncComponent(() => import('../components/DeviceDialog.vue'))
 const SimulationTimeline = defineAsyncComponent(() => import('../components/SimulationTimeline.vue'))
 const FixResultDialog = defineAsyncComponent(() => import('../components/FixResultDialog.vue'))
-const RecommendationProgressStatus = defineAsyncComponent(
-  () => import('../components/RecommendationProgressStatus.vue')
-)
 const PlaybackChangesPanel = defineAsyncComponent(() => import('../components/PlaybackChangesPanel.vue'))
 const PlaybackTerminal = defineAsyncComponent(() => import('../components/PlaybackTerminal.vue'))
 const PlaybackStateDetails = defineAsyncComponent(() => import('../components/PlaybackStateDetails.vue'))
@@ -994,7 +941,6 @@ const DEFAULT_INSPECTOR_PANEL_WIDTH = 320
 const ASYNC_TASK_POLL_INTERVAL_MS = 1000
 const ASYNC_TASK_MAX_POLLS = 600
 const TASK_INBOX_REFRESH_INTERVAL_MS = 5000
-const AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH = 2000
 let pollingEpoch = 0
 let boardLifecycleDisposed = false
 
@@ -1167,7 +1113,7 @@ let panStart = { x: 0, y: 0 }
 let panOrigin = { x: 0, y: 0 }
 let layoutSaveTimer: ReturnType<typeof setTimeout> | null = null
 let layoutSaveFeedbackSuppressed = false
-let persistedWideLayout: BoardLayoutDto | null = null
+let wideLayoutToRestore: BoardLayoutDto | null = null
 
 type ControlCenterSection = 'devices' | 'templates' | 'rules' | 'specs'
 type InspectorSection = 'devices' | 'rules' | 'specs' | 'environment'
@@ -1268,15 +1214,14 @@ const hasActionDockActivity = computed(() =>
   isSimulating.value ||
   isFuzzing.value ||
   isVerifying.value ||
-  simulationAnimationState.value.visible ||
-  traceAnimationState.value.visible ||
+  isModelPlaybackActive.value ||
   isAnyRecommendationRunning() ||
   unreadFuzzNotificationCount.value > 0
 )
 
 // Dock button tooltip content - one source of truth for each button's hover hint
 const simulationTooltipContent = computed(() => {
-  const status = isSimulating.value || simulationAnimationState.value.visible
+  const status = isSimulating.value || isSimulationPlaybackActive.value
     ? t('app.simulationRunning')
     : t('app.openSimulationSettings')
   return `${status}\n${t('app.outcomeSimulation')}`
@@ -1338,12 +1283,12 @@ const updateActionDockViewport = () => {
   if (typeof window === 'undefined') return
   const narrow = isNarrowViewport()
   if (!wasNarrowViewport && narrow && layoutHydrated.value) {
+    wideLayoutToRestore = buildBoardLayoutPayload()
     if (layoutSaveTimer) {
       clearTimeout(layoutSaveTimer)
       layoutSaveTimer = null
+      void saveBoardLayout()
     }
-    persistedWideLayout = buildBoardLayoutPayload()
-    void saveBoardLayout({ silent: true })
   }
   actionDockViewportWidth.value = window.innerWidth
   boardViewportHeight.value = window.innerHeight
@@ -1355,8 +1300,8 @@ const updateActionDockViewport = () => {
         void nextTick(() => fitNodesToCanvas(visibleNodes))
       }
     }
-  } else if (wasNarrowViewport && persistedWideLayout) {
-    applyBoardLayout(persistedWideLayout)
+  } else if (wasNarrowViewport && wideLayoutToRestore) {
+    applyBoardLayout(wideLayoutToRestore)
   }
   wasNarrowViewport = narrow
 }
@@ -1400,7 +1345,7 @@ const boardShellStyle = computed(() => ({
   '--board-inspector-width': `${boardPanels.inspector.collapsed ? COLLAPSED_PANEL_RAIL_PX : effectiveInspectorPanelWidth.value}px`,
   '--board-action-rail-width': actionDockRailWidth.value,
   '--board-floating-gap': BOARD_FLOATING_GAP_CSS,
-  '--board-status-height': !isBoardDataReady.value && failedBoardDataKeys.value.length === 0 ? '2.25rem' : '0px',
+  '--board-status-height': isInitialBoardLoading.value ? '2.25rem' : '0px',
   '--board-playback-height': isModelPlaybackActive.value && playbackPanelOpen.value
     ? boardViewportHeight.value < 600 ? 'clamp(7rem, 36dvh, 14rem)'
       : 'clamp(14rem, 32dvh, 20rem)'
@@ -1477,13 +1422,29 @@ watch(actionDockViewportWidth, applyViewportPanelConstraints, { immediate: true 
 const deviceTemplates = ref<DeviceTemplate[]>([])
 const templatesLoading = ref(false)
 const nodes = ref<DeviceNode[]>([])
-const activePlaybackScene = ref<ModelPlaybackScene | null>(null)
+type BoardPlaybackSource =
+  | { kind: 'simulation'; result: SimulationResultView }
+  | { kind: 'counterexample'; trace: Trace }
+  | { kind: 'fuzzing'; trace: Trace; finding: FuzzingFinding }
+const activePlayback = shallowRef<(BoardPlaybackSource & { scene: ModelPlaybackScene }) | null>(null)
+const activePlaybackScene = computed(() => activePlayback.value?.scene ?? null)
+const activePlaybackKind = computed(() => activePlayback.value?.kind ?? null)
+const isModelPlaybackActive = computed(() => activePlayback.value !== null)
+const simulationPlaybackResult = computed(() => activePlayback.value?.kind === 'simulation'
+  ? activePlayback.value.result : null)
+const isSimulationPlaybackActive = computed(() => simulationPlaybackResult.value !== null)
+const currentTrace = computed(() => activePlayback.value && activePlayback.value.kind !== 'simulation'
+  ? activePlayback.value.trace : null)
+const isTracePlaybackActive = computed(() => currentTrace.value !== null)
+const activeFuzzingFinding = computed(() => activePlayback.value?.kind === 'fuzzing'
+  ? activePlayback.value.finding : null)
 const playbackCanvasPan = ref<CanvasPan>({ x: 0, y: 0 })
 const playbackCanvasZoom = ref(1)
 let playbackViewportFollowsFit = true
 let playbackCanvasFrame: ReturnType<typeof getVisibleCanvasFrame> = null
 const environmentVariables = ref<ModelEnvironmentVariable[]>([])
 const environmentMutationPending = ref(false)
+const unconfirmedEnvironmentPatches = new Map<string, { currentValues: string; snapshotRefreshed: boolean }>()
 const edges = ref<DeviceEdge[]>([])
 const rules = ref<RuleForm[]>([])  // 独立存储规则列表
 const rulesReordering = ref(false)
@@ -1540,6 +1501,8 @@ const handleSceneActionsMenuToggle = () => {
 }
 const isImportingScene = ref(false)
 const isClearingScene = ref(false)
+const unconfirmedBoardReplacementTokens = new Set<string>()
+const unconfirmedUndoHistoryClearTokens = new Set<string>()
 const isSceneReplacementInProgress = computed(() => isImportingScene.value || isClearingScene.value)
 // Destructive confirmations are fenced only by explicit full-scene replacement.
 // Recommendations use a separate generation because every semantic mutation
@@ -1562,6 +1525,7 @@ const playbackEdges = computed(() => activePlaybackScene.value
   ? buildPlaybackEdges(activePlaybackScene.value)
   : [])
 const renderedCanvasNodes = computed(() => activePlaybackScene.value?.nodes || nodes.value)
+const renderedNodeBounds = computed(() => getNodeBounds(renderedCanvasNodes.value))
 const allEdges = computed(() => activePlaybackScene.value ? playbackEdges.value : edges.value)
 const renderedCanvasPan = computed(() => activePlaybackScene.value ? playbackCanvasPan.value : canvasPan.value)
 const renderedCanvasZoom = computed(() => activePlaybackScene.value ? playbackCanvasZoom.value : canvasZoom.value)
@@ -1583,12 +1547,16 @@ const allBoardDataKeys: BoardDataKey[] = ['templates', 'nodes', 'environment', '
 const boardSnapshotError = ref<ApiErrorDetails | null>(null)
 // A failed refresh must not erase ownership of the last accepted snapshot;
 // otherwise the next retry could accept a changed scene without fencing stale work.
-let hydratedBoardAuthScopeEpoch: number | null = null
+const hydratedBoardAuthScopeEpoch = ref<number | null>(null)
+const hasHydratedBoardSnapshot = computed(() => hydratedBoardAuthScopeEpoch.value === boardAuthScopeEpoch
+  && currentAuthUserId.value === boardOwnerUserId)
 const failedBoardDataKeys = computed(() =>
   allBoardDataKeys.filter(key => boardDataLoadState[key] === 'error'))
 const isBoardDataReady = computed(() =>
   !isAuthScopeTransitioning.value
   && allBoardDataKeys.every(key => boardDataLoadState[key] === 'ready'))
+const isInitialBoardLoading = computed(() => !hasHydratedBoardSnapshot.value
+  && !isBoardDataReady.value && failedBoardDataKeys.value.length === 0)
 
 // A scene replacement must fence every canvas mutation, including pan/zoom and
 // keyboard movement.  Waiting for the authoritative snapshot also prevents a
@@ -1604,7 +1572,7 @@ const isCanvasInteractionLocked = computed(() =>
 const isCanvasNavigationLocked = computed(() =>
   isSceneReplacementInProgress.value
   || isAuthScopeTransitioning.value
-  || boardDataLoadState.nodes !== 'ready')
+  || !hasHydratedBoardSnapshot.value)
 
 const boardDataKeyLabel = (key: BoardDataKey): string => t(`app.boardDataKey_${key}`)
 
@@ -1655,19 +1623,16 @@ const getGenerationWarningCounts = (
 const getSimulationDisabledRuleCount = (result: SimulationResult | null): number =>
   result?.disabledRuleCount ?? 0
 
-const isSimulationModelComplete = (result: SimulationResult | null): boolean =>
+const isRunModelComplete = (result: Pick<SimulationResult, 'modelComplete'> | null): boolean =>
   result?.modelComplete === true
 
-const getSimulationActualStepCount = (result: SimulationResult | null): number => result?.steps ?? 0
+const isRunModelSemanticsConsistent = (
+  result: Pick<SimulationResult, 'modelSemantics' | 'isAttack' | 'attackBudget' | 'enablePrivacy'> | null
+): boolean => isModelSemanticsConsistent(result?.modelSemantics, result ?? {})
 
-const getSimulationRequestedStepCount = (result: SimulationResult | null): number => result?.requestedSteps ?? 0
-
-const isSimulationModelSemanticsConsistent = (result: any): boolean =>
-  isModelSemanticsConsistent(result?.modelSemantics, {
-    isAttack: result?.isAttack,
-    attackBudget: result?.attackBudget,
-    enablePrivacy: result?.enablePrivacy
-  })
+const simulationPlaybackSemanticsConsistent = computed(() =>
+  isRunModelSemanticsConsistent(simulationPlaybackResult.value)
+)
 
 const notifySimulationOutcome = (result: any, saved: boolean) => {
   if (compareRunToCurrentBoard(result, 'simulation') === 'SEMANTICS_CHANGED') {
@@ -1676,7 +1641,7 @@ const notifySimulationOutcome = (result: any, saved: boolean) => {
   }
   const stateCount = result?.states?.length || 0
   const disabledRuleCount = getSimulationDisabledRuleCount(result)
-  if (!isSimulationModelComplete(result)) {
+  if (!isRunModelComplete(result)) {
     notifyBlocked(t('app.simulationCompletedWithDisabledRules', {
         states: stateCount,
         rules: disabledRuleCount,
@@ -1771,10 +1736,14 @@ const extractRecommendationErrorMessage = (error: any, fallback: string): string
   return localizedErrorMessage(error, fallback, locale.value)
 }
 
-const isDefinitiveMutationRejection = (error: any): boolean => {
-  const status = Number(error?.response?.status || 0)
-  return status >= 400 && status < 500
-}
+const readBoardWriteReceipt = <T,>(
+  write: () => Promise<T>,
+  isCurrent: () => boolean,
+  { refreshOnRejection, reconcile = refreshBoardSnapshot }: {
+    refreshOnRejection?: (error: unknown) => boolean
+    reconcile?: () => Promise<boolean>
+  } = {}
+) => readWriteReceipt(write, isCurrent, { refreshOnRejection, reconcile })
 
 type AsyncTaskStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
@@ -1853,12 +1822,6 @@ const buildVerificationResultFromRun = (run: VerificationRun, traces: Trace[] = 
   hasSmvModel: run.hasSmvModel
 })
 
-const isVerificationModelComplete = (
-  result: any,
-  _outcome = getVerificationOutcome(result)
-): boolean => result?.modelComplete === true
-
-
 const getTraceSpecDisplayTitle = (trace: (Pick<Trace, 'violatedSpecId' | 'violatedSpec'> & Partial<Pick<Trace, 'states'>>) | null | undefined): string => {
   if (!trace) return t('app.unknown')
   if (trace.violatedSpec) {
@@ -1903,7 +1866,7 @@ const notifyVerificationOutcome = (result: VerificationResult | null, options?: 
 
   const counts = getGenerationWarningCounts(result)
   const verificationOutcome = getVerificationOutcome(result)
-  const modelComplete = isVerificationModelComplete(result, verificationOutcome)
+  const modelComplete = isRunModelComplete(result)
   if (!modelComplete) {
     if (counts.total === 0) {
       const message = verificationOutcome === 'SATISFIED'
@@ -1940,6 +1903,7 @@ const notifyVerificationOutcome = (result: VerificationResult | null, options?: 
 const draggingTplName = ref<string | null>(null)
 const templateInstanceDialogVisible = ref(false)
 const templateInstanceSaving = ref(false)
+const templateInstanceUnconfirmed = ref<string | null>(null)
 const templateInstanceDialogData = reactive({
   template: null as DeviceTemplate | null,
   name: '',
@@ -2008,18 +1972,6 @@ watch(() => templateInstanceDialogData.template, template => {
   resetTemplateInstanceRuntime(template)
 })
 
-const templateVariableInputPlaceholder = (variable: InternalVariable) => {
-  if (templateVariableUsesNumericBounds(variable)) {
-    const lower = variable.LowerBound ?? '-∞'
-    const upper = variable.UpperBound ?? '∞'
-    const defaultValue = getTemplateVariableDefaultValue(variable)
-    return defaultValue
-      ? `${t('app.useTemplateDefaultWithValue', { value: defaultValue })} / ${lower} - ${upper}`
-      : `${lower} - ${upper}`
-  }
-  return t('app.enterValuePlaceholder')
-}
-
 const buildTemplateInstanceRuntimeConfig = (template: DeviceTemplate): DeviceRuntimeConfig | undefined => {
   return buildDeviceRuntimeConfig(template, templateInstanceRuntime, { variableScope: 'local' })
 }
@@ -2030,17 +1982,23 @@ const validateTemplateInstanceRuntimeConfig = (template: DeviceTemplate, runtime
 
 let boardMutationQueue: Promise<void> = Promise.resolve()
 let boardMutationAdmissionEpoch = 0
-let nodeLayoutMutationVersion = 0
-const pendingNodeLayouts = new Map<string, { version: number; layout: DeviceLayout }>()
-const activeNodeLayoutInteractions = new Set<string>()
+const pendingNodeLayouts = new Map<string, { layout: DeviceLayout }>()
+const activeNodeLayoutInteractions = new Map<string, DeviceLayout | undefined>()
 let externallyRefreshedRemovedNodeIds: ReadonlySet<string> | null = null
 
 const replaceNodesFromServer = (
   source: DeviceNode[],
-  options: { externalRefresh?: boolean, locallyRemovedNodeId?: string } = {}
+  options: BoardNodeSnapshotOptions = {}
 ) => {
   const incomingNodes = getVisibleDeviceNodes(source)
   const incomingIds = new Set(incomingNodes.map(node => node.id))
+  // A cancelled gesture can reveal a receipt that arrived while its preview owned the node.
+  for (const nodeId of activeNodeLayoutInteractions.keys()) {
+    const incoming = incomingNodes.find(node => node.id === nodeId)
+    activeNodeLayoutInteractions.set(nodeId, incoming && {
+      position: { ...incoming.position }, width: incoming.width, height: incoming.height
+    })
+  }
   externallyRefreshedRemovedNodeIds = options.externalRefresh
     ? new Set(nodes.value.filter(node => node.id !== options.locallyRemovedNodeId && !incomingIds.has(node.id))
       .map(node => node.id))
@@ -2061,11 +2019,15 @@ const replaceNodesFromServer = (
 }
 
 const handleNodeLayoutInteractionStart = (nodeId: string) => {
-  activeNodeLayoutInteractions.add(nodeId)
+  activeNodeLayoutInteractions.set(nodeId, undefined)
 }
 
 const handleNodeLayoutInteractionEnd = (nodeId: string) => {
+  const authoritative = activeNodeLayoutInteractions.get(nodeId)
   activeNodeLayoutInteractions.delete(nodeId)
+  if (authoritative && !pendingNodeLayouts.has(nodeId)) {
+    applyLayoutToNode(resolveNodeRef(nodeId), authoritative)
+  }
 }
 
 interface BoardMutationQueueOptions {
@@ -2074,16 +2036,19 @@ interface BoardMutationQueueOptions {
   onSemanticChange?: () => void
 }
 
-interface CreateDeviceInstanceOptions extends BoardMutationQueueOptions {
-  onConfirmedCreate?: () => void
-  onFailure?: (error: unknown, refreshed: boolean) => void
+type DeviceCreationReceipt =
+  | { status: 'confirmed'; devices: DeviceNode[]; environmentChanges: EnvironmentVariableChange[] }
+  | { status: 'rejected'; error: unknown }
+  | { status: 'unconfirmed'; error: unknown; snapshotRefreshed: boolean; devices: DeviceNode[] }
+
+interface DeviceCreationOptions extends BoardMutationQueueOptions {
+  onReceipt?: (receipt: DeviceCreationReceipt) => void
 }
 
 const getCurrentRecommendationSceneFingerprint = (
   expectedAuthScopeEpoch: number
 ): string | null => {
-  if (!isCurrentBoardAuthScope(expectedAuthScopeEpoch)
-    || hydratedBoardAuthScopeEpoch !== expectedAuthScopeEpoch) return null
+  if (!isCurrentBoardAuthScope(expectedAuthScopeEpoch) || !hasHydratedBoardSnapshot.value) return null
   return recommendationSceneFingerprint({
     deviceTemplates: deviceTemplates.value,
     nodes: nodes.value,
@@ -2144,7 +2109,7 @@ const applyLayoutToNode = (node: DeviceNode | undefined, layout: DeviceLayout) =
   node.height = layout.height
 }
 
-const deviceLayoutMatches = (node: DeviceNode | undefined, layout: DeviceLayout) =>
+const deviceLayoutMatches = (node: DeviceLayout | undefined, layout: DeviceLayout) =>
   !!node
   && node.position.x === layout.position.x
   && node.position.y === layout.position.y
@@ -2189,6 +2154,8 @@ const deviceRuntimeSaving = ref(false)
 // Custom dialog states
 const renameDialogVisible = ref(false)
 const renameDialogSubmitting = ref(false)
+const unconfirmedRenames = reactive(new Map<string, { name: string; message: string }>())
+watch(() => [currentAuthUserId.value, authState.token], () => unconfirmedRenames.clear(), { flush: 'sync' })
 const renameDialogData = reactive({
   node: null as DeviceNode | null,
   newName: '',
@@ -2197,9 +2164,14 @@ const renameDialogData = reactive({
 const renameNameConflict = computed(() => nodes.value.some(node =>
   node.id !== renameDialogData.node?.id
   && deviceLabelKey(node.label) === deviceLabelKey(renameDialogData.newName)))
+const renameUnconfirmedMessage = computed(() => {
+  const write = unconfirmedRenames.get(renameDialogData.node?.id ?? '')
+  return write?.name === renameDialogData.newName.trim() ? write.message : ''
+})
 const renameNameBlockedReason = computed(() => {
   const name = renameDialogData.newName.trim()
   if (!name) return t('app.enterDeviceName')
+  if (renameUnconfirmedMessage.value) return renameUnconfirmedMessage.value
   if (name === renameDialogData.originalLabel) return t('app.enterDifferentDeviceName')
   return renameNameConflict.value ? t('app.deviceNameAlreadyExists') : ''
 })
@@ -2208,21 +2180,25 @@ const deleteConfirmDialogVisible = ref(false)
 const deleteConfirmSubmitting = ref(false)
 const deletePreviewLoading = ref(false)
 const deleteConfirmReviewSnapshotKey = ref<string | null>(null)
+const unconfirmedDeviceDeletions = reactive(new Map<string, string>())
+watch(() => [currentAuthUserId.value, authState.token], () => unconfirmedDeviceDeletions.clear(), { flush: 'sync' })
 let deletePreviewRequestEpoch = 0
 let deletePreviewNodeId: string | null = null
 let deleteConfirmSourceDeviceDialogNodeId: string | null = null
-const deleteConfirmDialogData = reactive({
-  node: null as DeviceNode | null,
-  hasRelations: false,
-  relationCount: {
-    rules: 0,
-    specs: 0
-  },
+const emptyDeleteConfirmDialogData = (node: DeviceNode | null = null) => ({
+  node,
   relatedRules: [] as string[],
   relatedSpecs: [] as string[],
   environmentChanges: [] as EnvironmentVariableChange[],
   impactToken: ''
 })
+const deleteConfirmDialogData = reactive(emptyDeleteConfirmDialogData())
+const hasDeletionConsequences = computed(() => Boolean(
+  deleteConfirmDialogData.relatedRules.length
+  || deleteConfirmDialogData.relatedSpecs.length
+  || deleteConfirmDialogData.environmentChanges.length
+))
+const deleteUnconfirmedMessage = computed(() => unconfirmedDeviceDeletions.get(deleteConfirmDialogData.impactToken))
 
 const currentDeletionReviewSnapshotKey = () => {
   const targetId = deleteConfirmDialogData.node?.id
@@ -2276,13 +2252,7 @@ const clearDeleteConfirmDialog = () => {
   deleteConfirmSourceDeviceDialogNodeId = null
   deleteConfirmReviewSnapshotKey.value = null
   deleteConfirmDialogVisible.value = false
-  deleteConfirmDialogData.node = null
-  deleteConfirmDialogData.hasRelations = false
-  deleteConfirmDialogData.relationCount = { rules: 0, specs: 0 }
-  deleteConfirmDialogData.relatedRules = []
-  deleteConfirmDialogData.relatedSpecs = []
-  deleteConfirmDialogData.environmentChanges = []
-  deleteConfirmDialogData.impactToken = ''
+  Object.assign(deleteConfirmDialogData, emptyDeleteConfirmDialogData())
 }
 
 /* =================================================================================
@@ -2407,7 +2377,7 @@ const getBoardNodeIcon = (node: DeviceNode, stateOverride?: string): string => {
  * ================================================================================= */
 
 const getMinimumCanvasZoom = (frame = getVisibleCanvasFrame()) =>
-  Math.min(MIN_ZOOM, fittedViewportForNodes(renderedCanvasNodes.value, frame)?.zoom ?? MIN_ZOOM)
+  Math.min(MIN_ZOOM, fittedViewportForBounds(renderedNodeBounds.value, frame)?.zoom ?? MIN_ZOOM)
 
 const clampZoom = (value: number, frame = getVisibleCanvasFrame()) =>
   Math.min(MAX_ZOOM, Math.max(getMinimumCanvasZoom(frame), value))
@@ -2595,98 +2565,97 @@ const onCanvasPointerLost = (e: PointerEvent) => {
 
 const createDeviceInstanceAt = async (
   tpl: DeviceTemplate,
-  pos: { x: number; y: number },
-  customName?: string,
-  runtime?: DeviceRuntimeConfig,
-  options: CreateDeviceInstanceOptions = {}
-) => {
-  const { onConfirmedCreate, onFailure, ...mutationOptions } = options
-  const requestToken = getToken()
-  const requestAuthScopeEpoch = boardAuthScopeEpoch
-  const isCreateOwnerCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
-  let createConfirmed = false
-  const notifyConfirmedCreate = () => {
-    if (createConfirmed) return
-    createConfirmed = true
-    onConfirmedCreate?.()
-  }
-  if (!ensureBoardDataReady(['nodes', 'templates'])) {
-    throw new Error(t('app.boardDataLoadFailed'))
-  }
-  if (!ensureDeviceRuntimeCapacity(runtime)) {
-    throw new Error('Device runtime capacity reached')
-  }
-  return enqueueBoardMutation(async () => {
-    if (!ensureBoardDataReady(['nodes', 'templates'])) {
-      throw new Error(t('app.boardDataLoadFailed'))
+  position: () => { x: number; y: number },
+  requestedLabel: string,
+  runtime: DeviceRuntimeConfig | undefined,
+  options: DeviceCreationOptions & { nameConflictMessage?: () => string } = {}
+): Promise<DeviceCreationReceipt | null> => {
+  const { nameConflictMessage, ...mutationOptions } = options
+  return enqueueDeviceCreation(() => {
+    const visibleDevices = getVisibleDeviceNodes()
+    if (!ensureBoardDataReady(['nodes', 'templates'])
+      || !ensureBoardItemCapacity('devices', visibleDevices.length, 1, REQUEST_LIMITS.devices)
+      || !ensureDeviceRuntimeCapacity(runtime)) return null
+    const availableName = getUniqueLabel(requestedLabel, visibleDevices)
+    if (availableName !== requestedLabel) {
+      notifyBlocked(nameConflictMessage?.() ?? t('app.deviceNameChangedBeforeCreate', { name: availableName }))
+      return null
     }
-    if (!ensureBoardItemCapacity(
-      'devices', getVisibleDeviceNodes().length, 1, REQUEST_LIMITS.devices
-    )) {
-      throw new Error('Board device capacity reached')
-    }
-    const baseName = customName?.trim() || tpl.manifest.Name
-    const uniqueLabel = getUniqueLabel(baseName, getVisibleDeviceNodes())
-    if (uniqueLabel !== baseName) {
-      notifyBlocked(t('app.deviceNameChangedBeforeCreate', { name: uniqueLabel }))
-      throw new Error('Device name changed before queued creation')
-    }
-    const node: DeviceNode = {
-      id: createDeviceInstanceId(getVisibleDeviceNodes()),
+    return [{
+      id: createDeviceInstanceId(visibleDevices),
       templateName: tpl.manifest.Name,
-      label: uniqueLabel,
-      position: pos,
+      label: requestedLabel,
+      position: position(),
       state: tpl.manifest.InitState || 'Working',
       width: DEFAULT_NODE_WIDTH,
       height: DEFAULT_NODE_HEIGHT,
       ...(runtime || {})
-    }
-    try {
-      const mutation = await boardApi.addNodes([node])
-      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
+    }]
+  }, [], mutationOptions)
+}
+
+const enqueueDeviceCreation = (
+  prepare: () => DeviceNode[] | null,
+  environmentVariables: ModelEnvironmentVariable[] = [],
+  { onReceipt, ...mutationOptions }: DeviceCreationOptions = {}
+): Promise<DeviceCreationReceipt | null> => {
+  const requestToken = getToken()
+  const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isCreateOwnerCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
+  return enqueueBoardMutation<DeviceCreationReceipt | null>(async () => {
+    if (!isCreateOwnerCurrent()) return null
+    const devices = prepare()
+    if (!devices?.length) return null
+    const write = await readBoardWriteReceipt(() => boardApi.addNodes(devices, environmentVariables), isCreateOwnerCurrent)
+    if (!write) return null
+    let receipt: DeviceCreationReceipt
+    if (write.status === 'confirmed') {
+      const { mutation } = write
       commitSemanticScene({
         nodes: mutation.currentNodes,
         environmentVariables: mutation.environmentVariables,
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      const created = mutation.affectedDevices[0]
-      notifyConfirmedCreate()
-      await focusCreatedDeviceNode(created)
-      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
-      return { device: created, responseConfirmed: true, environmentChanges: mutation.environmentChanges }
-    } catch (error: any) {
-      if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
-      let refreshed = false
-      if (!isDefinitiveMutationRejection(error)) {
-        const [nodesRefreshed, environmentRefreshed] = await Promise.all([
-          refreshDevices(),
-          refreshEnvironmentVariables()
-        ])
-        if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
-        await reloadUndoAvailability()
-        if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
-        refreshed = nodesRefreshed && environmentRefreshed
-        const created = nodes.value.find(candidate => candidate.id === node.id)
-        if (nodesRefreshed && environmentRefreshed && created) {
-          notifyConfirmedCreate()
-          await focusCreatedDeviceNode(created)
-          if (!isCreateOwnerCurrent()) throw new PollingAbortedError()
-          return { device: created, responseConfirmed: false, environmentChanges: [] }
-        }
-      }
-      if (onFailure) onFailure(error, refreshed)
-      else notifyError(localizedErrorMessage(error, t('app.saveNodesFailed'), locale.value))
-      throw error
+      receipt = { status: 'confirmed', devices: mutation.affectedDevices, environmentChanges: mutation.environmentChanges }
+    } else if (write.status === 'rejected') {
+      receipt = { status: 'rejected', error: write.error }
+    } else {
+      const requestedIds = new Set(devices.map(device => device.id))
+      const observedDevices = write.snapshotRefreshed ? nodes.value.filter(node => requestedIds.has(node.id)) : []
+      receipt = { status: 'unconfirmed', snapshotRefreshed: write.snapshotRefreshed, devices: observedDevices, error: write.error }
     }
-  }, mutationOptions)
+    if (receipt.status !== 'rejected') {
+      const lastRequestedId = devices[devices.length - 1].id
+      const lastCreated = receipt.devices.find(device => device.id === lastRequestedId)
+      if (lastCreated) await focusCreatedDeviceNode(lastCreated)
+    }
+    if (!isCreateOwnerCurrent()) return null
+    // Recommendation feedback must be available when the queue reconciles scene changes.
+    onReceipt?.(receipt)
+    return receipt
+  }, mutationOptions).catch(error => {
+    if (isPollingAbortedError(error) || error instanceof BoardMutationAdmissionCancelledError) return null
+    throw error
+  })
 }
+
+const unconfirmedDeviceCreationMessage = (receipt: Extract<DeviceCreationReceipt, { status: 'unconfirmed' }>) => {
+  const device = receipt.devices[0]
+  if (device) return t('app.deviceCreateOutcomeRefreshed', { name: device.label })
+  return t(receipt.snapshotRefreshed ? 'app.deviceCreateOutcomeNotMatched' : 'app.deviceCreateOutcomeUnknownRefreshFailed')
+}
+
+const unconfirmedDeviceCreationFailure = (cause: string): ApiErrorDetails => ({
+  reasonCode: 'DEVICE_CREATE_OUTCOME_UNKNOWN', cause, details: [], fields: {}
+})
 
 const openTemplateInstanceDialog = (tpl: DeviceTemplate, pos: { x: number; y: number }) => {
   if (!ensurePlaybackClosedForMutation()) return
   templateInstanceDialogData.template = tpl
   templateInstanceDialogData.position = pos
   templateInstanceDialogData.name = getUniqueLabel(tpl.manifest.Name, getVisibleDeviceNodes())
+  templateInstanceUnconfirmed.value = null
   resetTemplateInstanceRuntime(tpl)
   templateInstanceDialogVisible.value = true
 }
@@ -2709,6 +2678,7 @@ const {
 )
 
 const confirmTemplateInstanceCreate = async () => {
+  if (templateInstanceSaving.value || templateInstanceUnconfirmed.value) return
   if (!ensurePlaybackClosedForMutation()) return
   const tpl = templateInstanceDialogData.template
   const name = templateInstanceDialogData.name.trim()
@@ -2732,22 +2702,31 @@ const confirmTemplateInstanceCreate = async () => {
   }
 
   templateInstanceSaving.value = true
+  const position = templateInstanceDialogData.position
   try {
-    const outcome = await createDeviceInstanceAt(tpl, templateInstanceDialogData.position, availableName, runtime)
-    const created = outcome.device
+    const receipt = await createDeviceInstanceAt(tpl, () => position, availableName, runtime)
+    if (!receipt) return
+    if (receipt.status === 'rejected') {
+      notifyError(localizedErrorMessage(receipt.error, t('app.saveNodesFailed'), locale.value))
+      return
+    }
+    if (receipt.status === 'unconfirmed' && receipt.devices.length === 0) {
+      templateInstanceUnconfirmed.value = unconfirmedDeviceCreationMessage(receipt)
+      return
+    }
     templateInstanceDialogVisible.value = false
     templateInstanceDialogData.template = null
     templateInstanceDialogData.name = ''
     resetTemplateInstanceRuntime(null)
-    reportEnvironmentChanges(outcome.environmentChanges)
-    if (!outcome.responseConfirmed) {
-      notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: created.label }))
+    if (receipt.status === 'unconfirmed') {
+      notifyBlocked(unconfirmedDeviceCreationMessage(receipt))
+      return
     }
-    if (created.label !== availableName) {
-      notifyBlocked(t('app.deviceNameAdjustedToAvoidConflict', { name: created.label }))
+    reportEnvironmentChanges(receipt.environmentChanges)
+    if (receipt.devices[0].label !== availableName) {
+      notifyBlocked(t('app.deviceNameAdjustedToAvoidConflict', { name: receipt.devices[0].label }))
     }
-  } catch { /* 已回滚并提示 */ }
-  finally {
+  } finally {
     templateInstanceSaving.value = false
   }
 }
@@ -2802,122 +2781,164 @@ const handleNodeMovedOrResized = async (nodeId: string) => {
     height: Math.round(node.height)
   }
   applyLayoutToNode(node, layout)
-  const version = ++nodeLayoutMutationVersion
-  pendingNodeLayouts.set(nodeId, { version, layout })
-  await enqueueBoardMutation(async () => {
-    try {
-      const mutation = await boardApi.updateNodeLayout(nodeId, layout)
-      commitSemanticScene({
-        nodes: mutation.currentNodes,
-        availability: mutation,
-        // Canvas coordinates never reach the SMV model (`buildDevices` omits them), so moving or
-        // resizing a node must not invalidate a verification verdict. The backend still reports
-        // `operation: "updated"` because a layout row did change, which is why this cannot be
-        // derived from the mutation's operation field.
-        semanticChanged: false
+  if (deviceLayoutMatches(pendingNodeLayouts.get(nodeId)?.layout, layout)) return
+  const pending = { layout }
+  pendingNodeLayouts.set(nodeId, pending)
+  const retireLayout = () => {
+    if (pendingNodeLayouts.get(nodeId) === pending) pendingNodeLayouts.delete(nodeId)
+  }
+  const token = getToken()
+  const scope = boardAuthScopeEpoch
+  const isCurrent = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(scope)
+  try {
+    await enqueueBoardMutation(async () => {
+      if (!isCurrent() || !nodes.value.some(candidate => candidate.id === nodeId)) return
+      let persistedLayoutMatches = false
+      const receipt = await readBoardWriteReceipt(() => boardApi.updateNodeLayout(nodeId, layout), isCurrent, {
+        // Even a rejection must replace the optimistic layout with the current server board.
+        refreshOnRejection: () => true,
+        reconcile: () => refreshBoardSnapshot({
+          keepBoardReady: true,
+          adopt: snapshot => {
+            retireLayout()
+            persistedLayoutMatches = deviceLayoutMatches(snapshot.nodes.find(candidate => candidate.id === nodeId), layout)
+            adoptBoardSnapshot(snapshot)
+          }
+        })
       })
-      const pending = pendingNodeLayouts.get(nodeId)
-      if (pending?.version === version) {
-        pendingNodeLayouts.delete(nodeId)
+      if (!receipt) return
+      const latest = pendingNodeLayouts.get(nodeId)
+      retireLayout()
+      if (receipt.status === 'confirmed') {
+        const { mutation } = receipt
+        commitSemanticScene({
+          nodes: mutation.currentNodes,
+          availability: mutation,
+          // The queue still detects semantic changes from other writers in the snapshot.
+          semanticChanged: false
+        })
+      } else if (!latest || latest === pending) {
+        if (receipt.status === 'unconfirmed') {
+          notifyBlocked(t(!receipt.snapshotRefreshed ? 'app.deviceLayoutOutcomeUnknownRefreshFailed'
+            : persistedLayoutMatches ? 'app.deviceLayoutOutcomeRefreshed' : 'app.deviceLayoutOutcomeNotMatched'))
+        } else {
+          notifyError(extractApiErrorMessage(receipt.error, t('app.saveNodesFailed')))
+        }
       }
-    } catch (error: any) {
-      const pending = pendingNodeLayouts.get(nodeId)
-      if (pending?.version !== version) return
-      pendingNodeLayouts.delete(nodeId)
-      const refreshed = await refreshDevices()
-      await reloadUndoAvailability()
-      if (!isDefinitiveMutationRejection(error)
-        && refreshed
-        && deviceLayoutMatches(nodes.value.find(candidate => candidate.id === nodeId), layout)) {
-        notifyBlocked(t('app.deviceLayoutOutcomeRefreshed'))
-      } else {
-        notifyError(extractApiErrorMessage(error, t('app.saveNodesFailed')))
-      }
-    }
-  })
-  // edges 由 rules 动态生成，不需要单独保存
+    })
+  } catch (error) {
+    if (!isPollingAbortedError(error)) throw error
+  } finally {
+    retireLayout()
+  }
 }
 
-const handleAddRule = async (request: {
-  rule: RuleForm
+const isRuleDuplicateRejection = (error: unknown) =>
+  (error as { response?: { status?: number } })?.response?.status === 409
+  && errorDetails(error).reasonCode === 'DUPLICATE_RULE'
+
+const readRuleCreationReceipt = (rule: RuleForm, isCurrent: () => boolean) =>
+  readBoardWriteReceipt(() => boardApi.addRule(rule), isCurrent, {
+    refreshOnRejection: isRuleDuplicateRejection
+  })
+
+const ruleCreateRecoveryMessage = async (rule: RuleForm, snapshotRefreshed: boolean, isCurrent: () => boolean) => {
+  if (!snapshotRefreshed || !isCurrent()) return t('app.ruleCreateOutcomeUnknown')
+  try {
+    if ((await boardApi.checkDuplicateRule(rule)).isDuplicate) return t('app.ruleCreateOutcomeRefreshed')
+  } catch (error) {
+    console.warn('Rule presence could not be verified after refreshing the Board:', error)
+  }
+  return t('app.ruleCreateOutcomeUnknownAfterRefresh')
+}
+
+const focusCreatedRule = async (id?: string) => {
+  try {
+    await focusRuleOnCanvas(id)
+  } catch (error) {
+    console.warn('Failed to focus the saved rule:', error)
+  }
+}
+
+const saveNewBoardItem = async <T extends { id?: string }>(options: {
+  requiredKey: 'rules' | 'specs'
+  prepare: () => T | null
+  readReceipt: (item: T, isCurrent: () => boolean) => Promise<BoardWriteReceipt<CollectionMutationResult<T>> | null>
+  commit: (mutation: CollectionMutationResult<T>) => void
+  focus: (id?: string) => Promise<void>
+  recoveryMessage: (item: T, refreshed: boolean, isCurrent: () => boolean) => string | Promise<string>
+  isDuplicateRejection: (error: unknown) => boolean
+  failureKey: string
   complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
   if (!ensurePlaybackClosedForMutation()) {
-    request.complete(false)
+    options.complete(false)
     return
   }
   const requestToken = getToken()
   const requestAuthScopeEpoch = boardAuthScopeEpoch
+  const isRequestCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
   let saved = false
-  let outcomeRefreshed = false
-  let attemptedRule: RuleForm | null = null
   let saveFailure: ApiErrorDetails | undefined
   try {
     await enqueueBoardMutation(async () => {
-      try {
-        const payload = request.rule
-        if (!ensureBoardDataReady(['nodes', 'templates', 'rules'])) return
-        if (!ensureBoardItemCapacity('rules', rules.value.length, 1, REQUEST_LIMITS.rules)) return
-        const { sources, toId, toApi } = payload
-        if (!sources || !sources.length || !toId || !toApi) {
-          notifyBlocked(t('app.fillAllRuleFields'))
-          return
-        }
-        if (!ensureNestedItemCapacity(
-          t('app.ruleConditions'), sources.length, REQUEST_LIMITS.ruleConditions
-        )) return
-        if (!assertRulesHaveTriggers([payload])) return
-        if (!resolveNodeRef(toId)) return
-
-        const newRule: RuleForm = {
-          ...payload,
-          id: 'rule_' + Date.now(),
-          name: payload.name || t('app.automationRule')
-        }
-        attemptedRule = newRule
-        const mutation = await boardApi.addRule(JSON.parse(JSON.stringify(newRule)))
-        commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
-        if (mutation.affectedItem?.id) {
-          await focusRuleOnCanvas(mutation.affectedItem.id)
-        }
+      if (!isRequestCurrent() || !ensurePlaybackClosedForMutation()
+        || !ensureBoardDataReady(['nodes', 'templates', options.requiredKey])) return
+      const item = options.prepare()
+      if (!item) return
+      const receipt = await options.readReceipt(item, isRequestCurrent)
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        options.commit(receipt.mutation)
         saved = true
-      } catch (error: any) {
-        console.error('addRule error', error)
-        if (Number(error?.response?.status) === 409
-          && error?.response?.data?.data?.reasonCode === 'DUPLICATE_RULE') {
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          await refreshRules(requestToken)
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          await reloadUndoAvailability()
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          saveFailure = errorDetails(error)
-          return
-        }
-        if (isDefinitiveMutationRejection(error) && [400, 422].includes(Number(error?.response?.status))) {
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          saveFailure = errorDetails(error)
-          return
-        }
-        if (!isDefinitiveMutationRejection(error) && attemptedRule) {
-          const refreshed = await refreshRules()
-          await reloadUndoAvailability()
-          if (refreshed && ruleExists(attemptedRule)) {
-            outcomeRefreshed = true
-            saved = true
-            return
-          }
-        }
-        notifyError(extractApiErrorMessage(error, t('app.saveRulesFailed')))
+        await options.focus(receipt.mutation.affectedItem?.id)
+      } else if (receipt.status === 'unconfirmed') {
+        const message = options.recoveryMessage(item, receipt.snapshotRefreshed, isRequestCurrent)
+        const cause = typeof message === 'string' ? message : await message
+        saveFailure = { reasonCode: BOARD_ITEM_EDIT_OUTCOME_UNKNOWN, cause, details: [], fields: {} }
+      } else if (options.isDuplicateRejection(receipt.error)
+        || [400, 422].includes(Number((receipt.error as { response?: { status?: number } })?.response?.status))) {
+        saveFailure = errorDetails(receipt.error)
+      } else {
+        notifyError(extractApiErrorMessage(receipt.error, t(options.failureKey)))
       }
     })
-  } finally {
-    request.complete(saved, saveFailure)
-    if (outcomeRefreshed) {
-      await nextTick()
-      notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
+  } catch (error) {
+    if (isRequestCurrent() && !isPollingAbortedError(error)) {
+      notifyError(extractApiErrorMessage(error, t(options.failureKey)))
     }
+  } finally {
+    options.complete(saved && isRequestCurrent(), isRequestCurrent() ? saveFailure : undefined)
   }
 }
+
+const handleAddRule = (request: {
+  rule: RuleForm
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
+}) => saveNewBoardItem<RuleForm>({
+  requiredKey: 'rules', complete: request.complete,
+  readReceipt: readRuleCreationReceipt, focus: focusCreatedRule,
+  recoveryMessage: ruleCreateRecoveryMessage, isDuplicateRejection: isRuleDuplicateRejection,
+  failureKey: 'app.saveRulesFailed',
+  commit: mutation => commitSemanticScene({ rules: mutation.currentItems, availability: mutation }),
+  prepare: () => {
+    if (!ensureBoardItemCapacity('rules', rules.value.length, 1, REQUEST_LIMITS.rules)) return null
+    const payload = request.rule
+    const { sources, toId, toApi } = payload
+    if (!sources || !sources.length || !toId || !toApi) {
+      notifyBlocked(t('app.fillAllRuleFields'))
+      return null
+    }
+    if (!ensureNestedItemCapacity(t('app.ruleConditions'), sources.length, REQUEST_LIMITS.ruleConditions)) return null
+    if (!assertRulesHaveTriggers([payload]) || !resolveNodeRef(toId)) return null
+
+    return {
+      ...payload,
+      id: 'rule_' + Date.now(),
+      name: payload.name || t('app.automationRule')
+    }
+  }
+})
 
 const ruleRecommendationTargetTypes = new Set<RuleSourceItemType>(['api', 'variable', 'mode', 'state'])
 const valueBasedRuleRecommendationTargetTypes = new Set<RuleSourceItemType>(['variable', 'mode', 'state'])
@@ -3009,68 +3030,28 @@ const presentedRuleRecommendations = computed(() => ruleRecommendations.value.ma
 const presentedSpecRecommendations = computed(() => specRecommendations.value.map(rec =>
   describeSpecification({ ...rec, templateId: rec.templateId as SpecTemplateId }, recommendationPresentationContext())))
 
-const normalizeRuleDuplicateText = (value: unknown): string => {
-  if (value === null || value === undefined) return ''
-  return String(value).trim()
-}
+const confirmRuleSimilarityReview = (result: RuleSimilarityResult): boolean | Promise<boolean> => {
+  if (result.reasonCode === 'EXACT_MATCH') {
+    notifyBlocked(t('app.duplicateRuleExists'))
+    return false
+  }
+  if (!result.requiresReview) return true
 
-const buildRuleDuplicateKey = (rule: RuleForm): string => {
-  const sources = (rule.sources || [])
-    .map(source => {
-      const itemType = normalizeRuleRecommendationTargetType(source.itemType)
-      const isValueBased = itemType ? valueBasedRuleRecommendationTargetTypes.has(itemType) : false
-      const fromId = normalizeRuleDuplicateText(source.fromId)
-      // A missing relation is invalid input, so it must remain distinct from equality.
-      const relation = isValueBased
-        ? normalizeModelRelation(source.relation) || normalizeRuleDuplicateText(source.relation)
-        : ''
-      const value = (itemType === 'state' || itemType === 'mode') && (relation === 'in' || relation === 'not in')
-        ? canonicalStateModeMembership(source.value, itemType, itemType === 'state' ? deviceModeCount(fromId) : undefined)
-        : isValueBased ? normalizeRuleDuplicateText(source.value) : ''
-      return {
-        fromId,
-        fromApi: itemType === 'state' ? 'state' : normalizeRuleDuplicateText(source.fromApi),
-        itemType: itemType || '',
-        relation,
-        value
-      }
-    })
-    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  const reason = t(ruleSimilarityReasonKey(result.reasonCode))
+  const message = result.matchedRule
+    ? t('app.aiSimilarRuleMayExistWithMatch', { rule: result.matchedRule, reason })
+    : t('app.aiSimilarRuleMayExist', { reason })
 
-  return JSON.stringify({
-    sources,
-    command: {
-      toId: normalizeRuleDuplicateText(rule.toId),
-      toApi: normalizeRuleDuplicateText(rule.toApi),
-      contentDevice: normalizeRuleDuplicateText(rule.contentDevice),
-      content: normalizeRuleDuplicateText(rule.content)
-    }
+  return confirmChoice({
+    title: t('app.aiRuleSimilarityDetected'),
+    message,
+    confirmText: t('app.applyAnyway')
   })
-}
-
-const ruleExists = (candidate: RuleForm): boolean => {
-  const candidateKey = buildRuleDuplicateKey(candidate)
-  return rules.value.some(rule => buildRuleDuplicateKey(rule) === candidateKey)
 }
 
 const confirmRecommendedRuleSimilarity = async (candidate: RuleForm): Promise<boolean> => {
   try {
-    const result = await boardApi.checkRuleSimilarity(candidate)
-    if (!result.requiresReview) return true
-
-    const reason = t(ruleSimilarityReasonKey(result.reasonCode))
-    const message = result.matchedRule
-      ? t('app.aiSimilarRuleMayExistWithMatch', {
-          rule: result.matchedRule,
-          reason
-        })
-      : t('app.aiSimilarRuleMayExist', { reason })
-
-    return await confirmChoice({
-      title: t('app.aiRuleSimilarityDetected'),
-      message,
-      confirmText: t('app.applyAnyway')
-    })
+    return await confirmRuleSimilarityReview(await boardApi.checkRuleSimilarity(candidate))
   } catch (error) {
     console.error('AI similarity check failed before applying recommendation:', error)
     return await confirmChoice({
@@ -3081,8 +3062,14 @@ const confirmRecommendedRuleSimilarity = async (candidate: RuleForm): Promise<bo
   }
 }
 
+type CheckedRuleRecommendation = { rule: RuleForm; similarity: RuleSimilarityResult }
+type RecommendationWriteReceipt = 'confirmed' | undefined
+
 // 应用推荐的规则
-const applyRecommendation = async (rec: RuleRecommendation, index: number, fromBatch = false) => {
+const applyRecommendation = async (
+  rec: RuleRecommendation, index: number, preflight?: CheckedRuleRecommendation
+): Promise<RecommendationWriteReceipt> => {
+  const fromBatch = preflight !== undefined
   if (!fromBatch && isRecommendationBatchLocked('rule')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates', 'rules'])) return
@@ -3092,100 +3079,76 @@ const applyRecommendation = async (rec: RuleRecommendation, index: number, fromB
   }
   if (applyingRuleRecommendations.value.has(index) || recommendationApplyFailures.rule[index]?.outcomeUnknown) return
 
-  const recommendationEpoch = ruleRecommendationRequestEpoch
+  const recommendationEpoch = ruleRecommendationPanel.epoch
   const requestSceneGeneration = recommendationSceneGeneration
   const applyAuthScopeEpoch = boardAuthScopeEpoch
   const requestToken = getToken()
   const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
   const isApplyCandidateCurrent = () => isApplyAccountCurrent()
-    && recommendationEpoch === ruleRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration
+    && recommendationEpoch === ruleRecommendationPanel.epoch && requestSceneGeneration === recommendationSceneGeneration
   delete recommendationApplyFailures.rule[index]
-  let recommendationConfirmedApplied = false
+  let keepRecommendation = false
 
-  let attemptedRule: RuleForm | null = null
-  const reportFailure = async (error: any) => {
-    if (!isApplyAccountCurrent()) return
-    console.error('applyRecommendation error', error)
-    let refreshed = false
-    if (!isDefinitiveMutationRejection(error) && attemptedRule) {
-      refreshed = await refreshRules(requestToken)
-      if (!isApplyAccountCurrent()) return
-      await reloadUndoAvailability()
-      if (!isApplyAccountCurrent()) return
-      if (refreshed && ruleExists(attemptedRule)) {
-        recommendationConfirmedApplied = true
-        if (isApplyCandidateCurrent()) {
-          appliedRuleRecommendations.value.add(index)
-          notifyBlocked(t('app.ruleCreateOutcomeRefreshed'))
-        }
-        return
-      }
-    }
-    if (!isApplyCandidateCurrent()) return
-    if (error?.response?.data?.data?.reasonCode === 'DUPLICATE_RULE') {
-      notifyBlocked(t('app.duplicateRuleExists'))
-      return
-    }
-    const outcomeUnknown = !isDefinitiveMutationRejection(error)
-    reportRecommendationApplyFailure('rule', index, error, t(outcomeUnknown
-      ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
-      : 'app.failedToApplyRule'), outcomeUnknown)
-  }
   try {
     if (!ensureBoardItemCapacity('rules', rules.value.length, 1, REQUEST_LIMITS.rules)) return
-    const newRule = materializeRuleRecommendation(rec, 'rule_' + Date.now())
+    const newRule = preflight?.rule ?? materializeRuleRecommendation(rec, 'rule_' + Date.now())
     if (!ensureNestedItemCapacity(
       t('app.ruleConditions'), newRule.sources.length, REQUEST_LIMITS.ruleConditions
     )) return
-    attemptedRule = newRule
-
     if (!assertRulesHaveTriggers([newRule])) {
       return
     }
-    if (ruleExists(newRule)) {
-      notifyBlocked(t('app.duplicateRuleExists'))
-      return
-    }
     applyingRuleRecommendations.value.add(index)
-    const shouldApply = await confirmRecommendedRuleSimilarity(newRule)
+    const shouldApply = preflight
+      ? await confirmRuleSimilarityReview(preflight.similarity)
+      : await confirmRecommendedRuleSimilarity(newRule)
     if (!shouldApply) return
     if (!isApplyCandidateCurrent() || isSceneReplacementInProgress.value) return
 
-    await enqueueBoardMutation(async () => {
+    return await enqueueBoardMutation<RecommendationWriteReceipt>(async () => {
       if (!isApplyCandidateCurrent()
         || !isBoardDataReady.value
         || isSceneReplacementInProgress.value) return
-      try {
-        const mutation = await boardApi.addRule(JSON.parse(JSON.stringify(newRule)))
-        if (!isApplyAccountCurrent()) return
-        commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
-        recommendationConfirmedApplied = true
-        const createdRule = mutation.affectedItem
-        // A batch must keep its progress visible; focusing the inspector closes the narrow control panel.
-        if (createdRule?.id && !fromBatch) {
-          await focusRuleOnCanvas(createdRule.id)
+      const receipt = await readRuleCreationReceipt(newRule, isApplyAccountCurrent)
+      if (!receipt) return
+      if (receipt.status !== 'confirmed') {
+        if (receipt.status === 'unconfirmed') {
+          const message = await ruleCreateRecoveryMessage(newRule, receipt.snapshotRefreshed, isApplyAccountCurrent)
+          if (!isApplyCandidateCurrent()) return
+          keepRecommendation = true
+          reportRecommendationApplyFailure('rule', index, receipt.error, message, true)
+        } else if (isApplyCandidateCurrent()) {
+          if (isRuleDuplicateRejection(receipt.error)) notifyBlocked(t('app.duplicateRuleExists'))
+          else reportRecommendationApplyFailure('rule', index, receipt.error, t('app.failedToApplyRule'))
         }
-        if (isApplyCandidateCurrent()) {
-          appliedRuleRecommendations.value.add(index)
-        }
-      } catch (error: any) {
-        await reportFailure(error)
+        return
       }
+
+      const { mutation } = receipt
+      commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
+      keepRecommendation = true
+      if (isApplyCandidateCurrent()) {
+        appliedRuleRecommendations.value.add(index)
+        // Focusing the inspector would hide a batch's progress on narrow screens.
+        if (!fromBatch) await focusCreatedRule(mutation.affectedItem?.id)
+      }
+      return 'confirmed'
     }, {
       onSemanticChange: () => handleRecommendationApplySceneChange(
-        recommendationConfirmedApplied,
+        keepRecommendation,
         () => preserveAppliedRecommendationAfterSceneChange('rule', index),
         () => invalidateRecommendationsForSceneChange({ notify: true })
       )
     })
-  } catch (error: any) {
+  } catch (error) {
+    if (!isApplyCandidateCurrent() || isPollingAbortedError(error)) return
     if (error instanceof RecommendationCandidateError) {
       notifyBlocked(t('app.recommendationInvalidFieldNoChange', { field: error.field }))
       return
     }
-    await reportFailure(error)
+    reportRecommendationApplyFailure('rule', index, error, t('app.failedToApplyRule'))
   } finally {
-    if (recommendationEpoch === ruleRecommendationRequestEpoch) {
+    if (recommendationEpoch === ruleRecommendationPanel.epoch) {
       applyingRuleRecommendations.value.delete(index)
     }
   }
@@ -3378,59 +3341,41 @@ const deleteDevice = () => {
   void deleteCurrentNodeWithConfirm(nodeId)
 }
 
+const isDeviceRenameConflict = (error: any) => error?.response?.status === 409
+
 const handleRenameDevice = async (
   nodeId: string,
   newLabel: string,
   expectedLabel: string
-): Promise<false | { responseConfirmed: boolean; environmentChanges: EnvironmentVariableChange[] }> => {
-  if (!ensurePlaybackClosedForMutation()) return false
-  if (!ensureBoardDataReady(['nodes', 'specs'])) return false
-  return enqueueBoardMutation(async () => {
+): Promise<BoardWriteReceipt<Awaited<ReturnType<typeof boardApi.renameNode>>> | null> => {
+  if (!ensurePlaybackClosedForMutation() || !ensureBoardDataReady(['nodes', 'specs'])) return null
+  const token = getToken()
+  const scope = boardAuthScopeEpoch
+  const isCurrent = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(scope)
+  const receipt = await enqueueBoardMutation(async () => {
+    if (!isCurrent() || !ensureBoardDataReady(['nodes', 'specs'])) return null
     const requestedLabelKey = deviceLabelKey(newLabel)
     const exists = nodes.value.some(n => deviceLabelKey(n.label) === requestedLabelKey && n.id !== nodeId)
     if (exists) {
       notifyError(t('app.nameExists'))
-      return false
+      return null
     }
-    if (!nodes.value.some(node => node.id === nodeId)) return false
+    if (!nodes.value.some(node => node.id === nodeId)) return null
 
-    try {
-      const mutation = await boardApi.renameNode(nodeId, newLabel, expectedLabel)
+    const receipt = await readBoardWriteReceipt(
+      () => boardApi.renameNode(nodeId, newLabel, expectedLabel), isCurrent, { refreshOnRejection: isDeviceRenameConflict })
+    if (receipt?.status === 'confirmed') {
+      const { mutation } = receipt
       commitSemanticScene({
         nodes: mutation.currentNodes,
         environmentVariables: mutation.environmentVariables,
         specs: mutation.currentSpecifications,
         availability: mutation
       })
-      return { responseConfirmed: true, environmentChanges: mutation.environmentChanges }
-    } catch (error: any) {
-      if (error?.response?.status === 409) {
-        const refreshed = await refreshSceneForReconciliation()
-        const currentNode = nodes.value.find(candidate => candidate.id === nodeId)
-        if (refreshed && currentNode) {
-          if (currentNode.label === newLabel) {
-            return { responseConfirmed: false, environmentChanges: [] }
-          }
-          if (renameDialogVisible.value && renameDialogData.node?.id === nodeId) {
-            renameDialogData.node = currentNode
-            renameDialogData.originalLabel = currentNode.label
-          }
-          notifyBlocked(t('app.deviceRenameConflictRefreshed', { name: currentNode.label }))
-        } else {
-          notifyBlocked(t('app.deviceRenameConflictRefreshFailed'))
-        }
-        return false
-      }
-      if (!isDefinitiveMutationRejection(error)) {
-        const refreshed = await refreshSceneForReconciliation()
-        if (refreshed && nodes.value.some(candidate => candidate.id === nodeId && candidate.label === newLabel)) {
-          return { responseConfirmed: false, environmentChanges: [] }
-        }
-      }
-      notifyError(extractApiErrorMessage(error, t('app.saveNodesFailed')))
-      return false
     }
+    return receipt
   })
+  return isCurrent() ? receipt : null
 }
 
 const handleDeviceRuntimeSave = async (
@@ -3463,16 +3408,19 @@ const handleDeviceRuntimeSave = async (
 
   const runtimeRequest: DeviceRuntimeConfig = deepClone(runtime)
   const expectedRuntime = deviceRuntimeSnapshot(node)
+  const isRuntimeConflict = (error: unknown) => errorDetails(error).reasonCode === 'DEVICE_RUNTIME_STALE'
 
   deviceRuntimeSaving.value = true
   try {
     await enqueueBoardMutation(async () => {
-      try {
-        const mutation = await boardApi.updateNodeRuntime(nodeId, {
-          expected: expectedRuntime,
-          desired: runtimeRequest
-        })
-        if (!isRequestCurrent()) return
+      if (!isRequestCurrent() || !ensureBoardDataReady(['nodes', 'templates'])) return
+      const receipt = await readBoardWriteReceipt(() => boardApi.updateNodeRuntime(nodeId, {
+        expected: expectedRuntime,
+        desired: runtimeRequest
+      }), isRequestCurrent, { refreshOnRejection: isRuntimeConflict })
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        const { mutation } = receipt
         commitSemanticScene({
           nodes: mutation.currentNodes,
           availability: mutation,
@@ -3482,40 +3430,19 @@ const handleDeviceRuntimeSave = async (
         notifySuccess(mutation.operation === 'updated'
           ? t('app.instanceConfigSaved')
           : t('app.instanceConfigUnchanged'))
-      } catch (error: any) {
-        console.error('Failed to save device instance configuration', error)
-        if (!isRequestCurrent()) return
-        if (error?.response?.data?.data?.reasonCode === 'DEVICE_RUNTIME_STALE') {
-          const refreshed = await refreshDevices()
-          if (!isRequestCurrent()) return
-          await reloadUndoAvailability()
-          if (!isRequestCurrent()) return
-          if (refreshed) {
-            const persisted = nodes.value.find(candidate => candidate.id === nodeId)
-            notifyBlocked(deviceRuntimeMatches(persisted, runtimeRequest, template)
-              ? t('app.deviceRuntimeOutcomeRefreshed')
-              : t('app.deviceRuntimeStaleRefreshed'))
-          } else {
-            notifyBlocked(t('app.deviceRuntimeStaleRefreshFailed'))
-          }
-          return
-        }
-        if (!isDefinitiveMutationRejection(error)) {
-          const nodesRefreshed = await refreshDevices()
-          if (!isRequestCurrent()) return
-          await reloadUndoAvailability()
-          if (!isRequestCurrent()) return
-          const persisted = nodes.value.find(candidate => candidate.id === nodeId)
-          if (nodesRefreshed && deviceRuntimeMatches(persisted, runtimeRequest, template)) {
-            notifyBlocked(t('app.deviceRuntimeOutcomeRefreshed'))
-            return
-          }
-          notifyBlocked(t(nodesRefreshed
-            ? 'app.deviceRuntimeOutcomeNotMatched' : 'app.deviceRuntimeOutcomeUnknownRefreshFailed'))
-          return
-        }
-        if (isDefinitiveMutationRejection(error) && complete) saveFailure = errorDetails(error)
-        else notifyError(extractApiErrorMessage(error, t('app.instanceConfigSaveFailed')))
+      } else if (receipt.status === 'unconfirmed') {
+        const persisted = nodes.value.find(candidate => candidate.id === nodeId)
+        const message = t(!receipt.snapshotRefreshed ? 'app.deviceRuntimeOutcomeUnknownRefreshFailed'
+          : deviceRuntimeMatches(persisted, runtimeRequest, template)
+            ? 'app.deviceRuntimeOutcomeRefreshed' : 'app.deviceRuntimeOutcomeNotMatched')
+        if (complete) saveFailure = { reasonCode: 'DEVICE_WRITE_OUTCOME_UNKNOWN', cause: message, details: [], fields: {} }
+        else notifyBlocked(message)
+      } else if (isRuntimeConflict(receipt.error)) {
+        notifyBlocked(t(receipt.snapshotRefreshed ? 'app.deviceRuntimeStaleRefreshed' : 'app.deviceRuntimeStaleRefreshFailed'))
+      } else if (complete) {
+        saveFailure = errorDetails(receipt.error)
+      } else {
+        notifyError(extractApiErrorMessage(receipt.error, t('app.instanceConfigSaveFailed')))
       }
     })
   } finally {
@@ -3632,6 +3559,7 @@ watch(
   currentSnapshotKey => {
     const reviewedSnapshotKey = deleteConfirmReviewSnapshotKey.value
     if (!currentSnapshotKey || !reviewedSnapshotKey || currentSnapshotKey === reviewedSnapshotKey) return
+    const message = deleteUnconfirmedMessage.value ?? t('app.deviceDeletionPreviewChanged')
     const restoreNode = resolveDeletionReviewDeviceDialogRestore(
       'board-changed',
       nodes.value,
@@ -3644,61 +3572,43 @@ watch(
       deviceDialogReturnFocusNodeId = restoreNode.id
       dialogVisible.value = true
     }
-    notifyBlocked(t('app.deviceDeletionPreviewChanged'))
+    notifyBlocked(message)
   },
   { flush: 'sync' }
 )
 
 
-type DeviceDeletionOutcome = {
-  responseConfirmed: boolean
-  stalePreview?: 'refreshed' | 'refresh-failed'
-}
-
 const forceDeleteNode = async (
   nodeId: string,
-  impactToken: string
-): Promise<DeviceDeletionOutcome | null> => {
+  impactToken: string,
+  reviewedSnapshotKey: string
+) => {
   if (!ensureBoardDataReady(['nodes', 'environment', 'rules', 'specs'])) return null
+  const token = getToken()
+  const scope = boardAuthScopeEpoch
+  const isCurrent = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(scope)
   return enqueueBoardMutation(async () => {
+    if (!isCurrent() || !ensureBoardDataReady(['nodes', 'environment', 'rules', 'specs'])
+      || reviewedSnapshotKey !== deleteConfirmReviewSnapshotKey.value
+      || reviewedSnapshotKey !== currentDeletionReviewSnapshotKey()) return null
+
     const bundledEnvironmentNamesBeforeDelete = [...bundledBoardEnvironmentNames.value]
-    try {
-      const mutation = await boardApi.deleteNode(nodeId, impactToken)
+    const receipt = await readBoardWriteReceipt(() => boardApi.deleteNode(nodeId, impactToken), isCurrent, {
+      refreshOnRejection: (error: any) => [404, 409].includes(error?.response?.status),
+      reconcile: () => refreshBoardSnapshot({ adopt: snapshot => adoptBoardSnapshot(snapshot, nodeId) })
+    })
+    if (!receipt) return null
+    if (receipt.status === 'confirmed') {
+      const { mutation } = receipt
       adoptBoardSnapshot(mutation.snapshot, nodeId)
       // Suppress individual environment change notifications; the summary notification below
       // already includes the environment variable count, so separate toasts would be redundant.
       reportEnvironmentChanges(mutation.environmentChanges, bundledEnvironmentNamesBeforeDelete, true)
-      return { responseConfirmed: true }
-    } catch (error: any) {
-      console.error('Failed to delete device', error)
-      const message = extractApiErrorMessage(error, t('app.deleteDeviceFailedRetry'))
-      if (error?.response?.status === 409) {
-        const refreshed = await refreshSceneForReconciliation()
-        notifyBlocked(refreshed ? message : t('app.deviceDeletionPreviewRefreshFailed'))
-        return { responseConfirmed: false, stalePreview: refreshed ? 'refreshed' : 'refresh-failed' }
-      } else if (error?.response?.status === 404) {
-        const refreshed = await refreshSceneForReconciliation()
-        if (refreshed) markVerificationResultStale()
-        if (refreshed && !nodes.value.some(node => node.id === nodeId)) {
-          notifyBlocked(t('app.deviceDeleteOutcomeRefreshed'))
-          return { responseConfirmed: false }
-        }
-        notifyError(message)
-      } else if (!isDefinitiveMutationRejection(error)) {
-        const refreshed = await refreshSceneForReconciliation()
-        if (refreshed) markVerificationResultStale()
-        if (!refreshed) {
-          notifyBlocked(t('app.deviceDeleteOutcomeUnknownRefreshFailed'))
-        } else if (!nodes.value.some(node => node.id === nodeId)) {
-          notifyBlocked(t('app.deviceDeleteOutcomeRefreshed'))
-          return { responseConfirmed: false }
-        } else {
-          notifyBlocked(t('app.deviceDeleteOutcomeUnconfirmedAfterRefresh'))
-        }
-      } else {
-        notifyError(message)
-      }
-      return null
+    }
+    return {
+      receipt,
+      targetMissing: receipt.status !== 'confirmed' && receipt.snapshotRefreshed
+        && !nodes.value.some(node => node.id === nodeId)
     }
   })
 }
@@ -3719,13 +3629,7 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
   const ownsPreview = () => requestEpoch === deletePreviewRequestEpoch && deletePreviewNodeId === nodeId
   deletePreviewLoading.value = true
   deleteConfirmReviewSnapshotKey.value = null
-  deleteConfirmDialogData.node = currentNode
-  deleteConfirmDialogData.hasRelations = false
-  deleteConfirmDialogData.relationCount = { rules: 0, specs: 0 }
-  deleteConfirmDialogData.relatedRules = []
-  deleteConfirmDialogData.relatedSpecs = []
-  deleteConfirmDialogData.environmentChanges = []
-  deleteConfirmDialogData.impactToken = ''
+  Object.assign(deleteConfirmDialogData, emptyDeleteConfirmDialogData(currentNode))
   deleteConfirmDialogVisible.value = true
   try {
     await enqueueBoardMutation(async () => {
@@ -3735,13 +3639,6 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
       if (!ownsPreview()) return
       const { removedRules, removedSpecifications, environmentChanges } = preview
       deleteConfirmDialogData.node = preview.deletedDevice
-      deleteConfirmDialogData.hasRelations = removedRules.length > 0
-        || removedSpecifications.length > 0
-        || environmentChanges.length > 0
-      deleteConfirmDialogData.relationCount = {
-        rules: removedRules.length,
-        specs: removedSpecifications.length
-      }
       deleteConfirmDialogData.relatedRules = removedRules.map((rule, index) =>
         rule.name || t('app.ruleNumber', { number: index + 1 }))
       deleteConfirmDialogData.relatedSpecs = removedSpecifications.map(spec => spec.name)
@@ -3752,12 +3649,9 @@ const deleteCurrentNodeWithConfirm = async (nodeId: string) => {
   } catch (error: any) {
     if (!ownsPreview()) return
     if (error?.response?.status === 404) {
-      const refreshed = await enqueueBoardMutation(refreshSceneForReconciliation).catch(() => false)
-      if (refreshed && !resolveCurrentBoardNode(nodes.value, nodeId)) {
-        clearDeleteConfirmDialog()
-        notifyBlocked(t('app.deviceDeleteOutcomeRefreshed'))
-        return
-      }
+      await enqueueBoardMutation(async () => {
+        if (ownsPreview()) await refreshBoardSnapshot()
+      }).catch(() => undefined)
       if (!ownsPreview()) return
     }
     clearDeleteConfirmDialog()
@@ -3782,21 +3676,42 @@ const confirmRename = async () => {
     || renameNameBlockedReason.value) return
 
   renameDialogSubmitting.value = true
+  const nodeId = renameDialogData.node.id
+  const newLabel = renameDialogData.newName.trim()
+  const expectedLabel = renameDialogData.originalLabel
   try {
-    const newLabel = renameDialogData.newName.trim()
-    const saved = await handleRenameDevice(
-      renameDialogData.node.id,
-      newLabel,
-      renameDialogData.originalLabel
-    )
-    if (!saved) return
-    renameDialogVisible.value = false
-    renameDialogData.node = null
-    renameDialogData.newName = ''
-    renameDialogData.originalLabel = ''
-    reportEnvironmentChanges(saved.environmentChanges)
-    if (!saved.responseConfirmed) {
-      notifyBlocked(t('app.deviceRenameOutcomeRefreshed', { name: newLabel }))
+    const receipt = await handleRenameDevice(nodeId, newLabel, expectedLabel)
+    if (!receipt || !renameDialogVisible.value || renameDialogData.node?.id !== nodeId) return
+    if (receipt.status === 'confirmed') {
+      unconfirmedRenames.delete(nodeId)
+      renameDialogVisible.value = false
+      renameDialogData.node = null
+      renameDialogData.newName = ''
+      renameDialogData.originalLabel = ''
+      reportEnvironmentChanges(receipt.mutation.environmentChanges)
+      return
+    }
+    const currentNode = receipt.snapshotRefreshed ? nodes.value.find(node => node.id === nodeId) : undefined
+    if (currentNode) {
+      renameDialogData.node = currentNode
+      renameDialogData.originalLabel = currentNode.label
+    }
+    if (receipt.status === 'unconfirmed') {
+      const message = !receipt.snapshotRefreshed ? t('app.deviceRenameOutcomeUnknownRefreshFailed')
+        : !currentNode ? t('app.deviceRenameOutcomeMissing')
+          : t(currentNode.label === newLabel ? 'app.deviceRenameOutcomeRefreshed' : 'app.deviceRenameOutcomeNotMatched', {
+              name: currentNode.label
+            })
+      unconfirmedRenames.set(nodeId, { name: newLabel, message })
+      if (receipt.snapshotRefreshed && !currentNode) notifyBlocked(message)
+    } else if (isDeviceRenameConflict(receipt.error)) {
+      if (currentNode && currentNode.label !== expectedLabel) {
+        notifyBlocked(t('app.deviceRenameConflictRefreshed', { name: currentNode.label }))
+      } else if (!receipt.snapshotRefreshed) {
+        notifyBlocked(t('app.deviceRenameConflictRefreshFailed'))
+      }
+    } else {
+      notifyError(extractApiErrorMessage(receipt.error, t('app.saveNodesFailed')))
     }
   } finally {
     renameDialogSubmitting.value = false
@@ -3815,53 +3730,73 @@ const {
 )
 
 const confirmDelete = async () => {
-  if (deleteConfirmSubmitting.value) return
+  if (deleteConfirmSubmitting.value || deleteUnconfirmedMessage.value) return
   if (!ensurePlaybackClosedForMutation()) return
+  const reviewedSnapshotKey = deleteConfirmReviewSnapshotKey.value
   if (deletePreviewLoading.value
     || !deleteConfirmDialogData.node
+    || !reviewedSnapshotKey
     || !deleteConfirmDialogData.impactToken.trim()) return
 
   const deletion = {
     nodeId: deleteConfirmDialogData.node.id,
     nodeName: deleteConfirmDialogData.node.label,
     impactToken: deleteConfirmDialogData.impactToken,
-    ruleCount: deleteConfirmDialogData.relationCount.rules,
-    specCount: deleteConfirmDialogData.relationCount.specs,
+    ruleCount: deleteConfirmDialogData.relatedRules.length,
+    specCount: deleteConfirmDialogData.relatedSpecs.length,
     environmentChangeCount: deleteConfirmDialogData.environmentChanges.length
   }
+  const token = getToken()
+  const scope = boardAuthScopeEpoch
+  const isCurrent = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(scope)
   invalidateDeletePreview()
   deleteConfirmSubmitting.value = true
   let reopenDeletionPreview = false
   try {
-    const outcome = await forceDeleteNode(
-      deletion.nodeId,
-      deletion.impactToken
-    )
-    if (!outcome) return
-    if (outcome.stalePreview) {
+    const outcome = await forceDeleteNode(deletion.nodeId, deletion.impactToken, reviewedSnapshotKey)
+    if (!outcome || !isCurrent()) return
+    const { receipt, targetMissing } = outcome
+    if (receipt.status === 'confirmed') {
       clearDeleteConfirmDialog()
-      reopenDeletionPreview = outcome.stalePreview === 'refreshed'
-      return
-    }
-    if (outcome.responseConfirmed) {
       notifySuccess(t('app.deviceDeleteSuccessSummary', {
         name: deletion.nodeName,
         rules: deletion.ruleCount,
         specs: deletion.specCount,
         variables: deletion.environmentChangeCount
       }))
+      return
     }
-    // 如果设备详情对话框是打开的，也要关闭它
-    if (dialogVisible.value) {
-      dialogVisible.value = false
+
+    if (receipt.status === 'unconfirmed') {
+      if (targetMissing) {
+        clearDeleteConfirmDialog()
+        notifyBlocked(t('app.deviceDeleteOutcomeRefreshed'))
+      } else {
+        unconfirmedDeviceDeletions.set(deletion.impactToken, t(receipt.snapshotRefreshed
+          ? 'app.deviceDeleteOutcomeUnconfirmedAfterRefresh' : 'app.deviceDeleteOutcomeUnknownRefreshFailed'))
+      }
+      return
     }
-    clearDeleteConfirmDialog()
+
+    const status = (receipt.error as { response?: { status?: number } })?.response?.status
+    const message = extractApiErrorMessage(receipt.error, t('app.deleteDeviceFailedRetry'))
+    if (status === 409) {
+      clearDeleteConfirmDialog()
+      reopenDeletionPreview = receipt.snapshotRefreshed && !targetMissing
+      notifyBlocked(receipt.snapshotRefreshed ? message : t('app.deviceDeletionPreviewRefreshFailed'))
+    } else if (status === 404 && targetMissing) {
+      clearDeleteConfirmDialog()
+      notifyBlocked(t('app.deviceDeletionTargetMissing'))
+    } else {
+      notifyError(message)
+    }
   } catch (error) {
+    if (!isCurrent()) return
     console.error('Failed to delete device:', error)
     notifyError(t('app.deleteDeviceFailedRetry'))
   } finally {
     deleteConfirmSubmitting.value = false
-    if (reopenDeletionPreview) void deleteCurrentNodeWithConfirm(deletion.nodeId)
+    if (reopenDeletionPreview && isCurrent()) void deleteCurrentNodeWithConfirm(deletion.nodeId)
   }
 }
 
@@ -3904,40 +3839,25 @@ const authoredRuleConfirmationSnapshot = (rule: RuleForm) => ({
   content: normalizeConfirmationText(rule.content)
 })
 
-const authoredSpecificationConditionSnapshot = (condition: Specification['aConditions'][number]) => ({
-  deviceId: normalizeConfirmationText(condition.deviceId),
-  targetType: normalizeConfirmationText(condition.targetType).toLowerCase(),
-  key: normalizeConfirmationText(condition.key),
-  propertyScope: normalizeConfirmationText(condition.propertyScope).toLowerCase(),
-  relation: normalizeConfirmationText(condition.relation),
-  value: normalizeConfirmationText(condition.value)
-})
-
-const sortConfirmationConditions = <T,>(conditions: T[]) =>
-  conditions.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
-
 const authoredSpecificationConfirmationSnapshot = (specification: Specification) => ({
   id: normalizeConfirmationText(specification.id),
   name: normalizeConfirmationText(specification.name),
-  templateId: normalizeConfirmationText(specification.templateId),
-  aConditions: sortConfirmationConditions(
-    (specification.aConditions || []).map(authoredSpecificationConditionSnapshot)
-  ),
-  ifConditions: sortConfirmationConditions(
-    (specification.ifConditions || []).map(authoredSpecificationConditionSnapshot)
-  ),
-  thenConditions: sortConfirmationConditions(
-    (specification.thenConditions || []).map(authoredSpecificationConditionSnapshot)
-  )
+  logic: buildSpecificationSemanticKey(specification)
 })
 
+type BoardItemDeleteKind = 'rule' | 'spec'
 const pendingBoardItemDeletes = new Set<string>()
-const beginBoardItemDelete = (key: string) => {
-  if (pendingBoardItemDeletes.has(key)) return false
-  pendingBoardItemDeletes.add(key)
-  return true
+const unconfirmedBoardItemDeletes = reactive(new Map<string, { generation: number; snapshot: string; message: string }>())
+
+const boardItemDeletionWarning = (kind: BoardItemDeleteKind, id: string): string | undefined => {
+  const pending = unconfirmedBoardItemDeletes.get(`${kind}:${id}`)
+  if (!pending || pending.generation !== boardSceneGeneration) return
+  const rule = kind === 'rule' ? rules.value.find(rule => rule.id === id) : undefined
+  const spec = kind === 'spec' ? specifications.value.find(spec => spec.id === id) : undefined
+  const snapshot = rule ? authoredRuleConfirmationSnapshot(rule)
+    : spec ? authoredSpecificationConfirmationSnapshot(spec) : undefined
+  if (snapshot && pending.snapshot === JSON.stringify(snapshot)) return pending.message
 }
-const finishBoardItemDelete = (key: string) => pendingBoardItemDeletes.delete(key)
 
 // A confirmation dialog can stay open while a scene replacement or an external
 // refresh changes the board.  Re-check both the scene generation and the exact
@@ -3971,164 +3891,185 @@ const isConfirmedBoardItemCurrent = <T extends { id?: string }>(
   return true
 }
 
-/**
- * 删除规则（edges 由 rules 动态生成）
- */
-const deleteRule = async (ruleId: string) => {
-  if (!ensurePlaybackClosedForMutation()) return
-  if (!ensureBoardDataReady(['rules'])) return
-  const ruleToDelete = rules.value.find(r => r.id === ruleId)
-  if (!ruleToDelete) return
-  const pendingKey = `rule:${ruleId}`
-  if (!beginBoardItemDelete(pendingKey)) return
-  const confirmationSceneGeneration = boardSceneGeneration
-  const confirmedRuleSnapshot = deepClone(ruleToDelete)
+const deleteBoardItem = async <T extends { id?: string }>(options: {
+  kind: BoardItemDeleteKind
+  id: string
+  items: () => T[]
+  requiredKey: 'rules' | 'specs'
+  snapshotOf: (item: T) => unknown
+  confirmTitle: string
+  confirmMessage: (item: T) => string
+  changedMessage: string
+  successMessage: string
+  missingAfterRecoveryMessage: string
+  failedMessage: string
+  remove: (item: T) => Promise<CollectionMutationResult<T>>
+  commit: (mutation: CollectionMutationResult<T>) => void
+}) => {
+  const { kind, id, items, requiredKey, snapshotOf } = options
+  if (!ensurePlaybackClosedForMutation() || !ensureBoardDataReady([requiredKey])) return
+  const item = items().find(candidate => candidate.id === id)
+  const pendingKey = `${kind}:${id}`
+  if (!item || pendingBoardItemDeletes.has(pendingKey) || boardItemDeletionWarning(kind, id)) return
 
+  const generation = boardSceneGeneration
+  const expected = deepClone(item)
+  const token = getToken()
+  const scope = boardAuthScopeEpoch
+  const ownsRequest = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(scope)
+  const confirmationIsCurrent = () => ownsRequest() && isConfirmedBoardItemCurrent(
+    generation, items(), id, expected, options.changedMessage, snapshotOf
+  )
+
+  pendingBoardItemDeletes.add(pendingKey)
   try {
     if (!await confirmDestructive({
-      title: t('app.deleteRuleConfirmTitle'),
-      message: t('app.deleteRuleConfirmMessage', { name: ruleToDelete.name || t('app.unnamedRule') }),
+      title: options.confirmTitle,
+      message: options.confirmMessage(expected),
       confirmText: t('app.delete')
-    })) return
-
-    const snapshotOf = authoredRuleConfirmationSnapshot
-    if (!isConfirmedBoardItemCurrent(
-      confirmationSceneGeneration,
-      rules.value,
-      ruleId,
-      confirmedRuleSnapshot,
-      t('app.ruleChangedBeforeDelete'),
-      snapshotOf
-    )) return
+    }) || !confirmationIsCurrent()) return
 
     await enqueueBoardMutation(async () => {
-      if (!isConfirmedBoardItemCurrent(
-        confirmationSceneGeneration,
-        rules.value,
-        ruleId,
-        confirmedRuleSnapshot,
-        t('app.ruleChangedBeforeDelete'),
-        snapshotOf
-      )) return
-      try {
-        const mutation = await boardApi.removeRule(confirmedRuleSnapshot)
-        commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
-        notifySuccess(t('app.deleteRuleSuccess'))
-      } catch (error: any) {
-        console.error('Failed to delete rule', error)
-        const refreshed = await refreshRules()
-        await reloadUndoAvailability()
-        if (refreshed && !rules.value.some(rule => rule.id === ruleId)) {
-          notifyBlocked(t('app.ruleDeleteOutcomeRefreshed'))
-          return
+      if (!confirmationIsCurrent() || !ensureBoardDataReady([requiredKey])) return
+      const receipt = await readBoardWriteReceipt(() => options.remove(expected), ownsRequest, {
+        refreshOnRejection: (error: any) => [404, 409].includes(error?.response?.status)
+      })
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        options.commit(receipt.mutation)
+        unconfirmedBoardItemDeletes.delete(pendingKey)
+        notifySuccess(options.successMessage)
+        return
+      }
+
+      const itemMissing = receipt.snapshotRefreshed && !items().some(candidate => candidate.id === id)
+      if (receipt.status === 'unconfirmed') {
+        if (itemMissing) {
+          unconfirmedBoardItemDeletes.delete(pendingKey)
+          notifyBlocked(options.missingAfterRecoveryMessage)
+        } else {
+          const message = t(receipt.snapshotRefreshed ? 'app.boardItemDeleteStillPresent' : 'app.boardItemDeleteOutcomeUnknown')
+          unconfirmedBoardItemDeletes.set(pendingKey, { generation, snapshot: JSON.stringify(snapshotOf(expected)), message })
+          if (!boardItemDeletionWarning(kind, id)) notifyBlocked(message)
         }
-        notifyError(localizedErrorMessage(error, t('app.deleteRuleFailed'), locale.value))
+        return
+      }
+
+      const status = (receipt.error as { response?: { status?: number } })?.response?.status
+      if ((status === 404 || status === 409) && !receipt.snapshotRefreshed) {
+        notifyBlocked(t('app.boardItemDeleteConflictRefreshFailed'))
+      } else if (status === 409) {
+        notifyBlocked(t('app.boardItemDeleteConflictRefreshed'))
+      } else if (status === 404 && itemMissing) {
+        notifyBlocked(t('app.boardItemDeleteTargetMissing'))
+      } else {
+        notifyError(localizedErrorMessage(receipt.error, options.failedMessage, locale.value))
       }
     })
+  } catch (error) {
+    if (!isPollingAbortedError(error)) throw error
   } finally {
-    finishBoardItemDelete(pendingKey)
+    pendingBoardItemDeletes.delete(pendingKey)
   }
 }
 
+const deleteRule = (id: string) => deleteBoardItem({
+  kind: 'rule', id, items: () => rules.value, requiredKey: 'rules', snapshotOf: authoredRuleConfirmationSnapshot,
+  confirmTitle: t('app.deleteRuleConfirmTitle'),
+  confirmMessage: rule => t('app.deleteRuleConfirmMessage', { name: rule.name || t('app.unnamedRule') }),
+  changedMessage: t('app.ruleChangedBeforeDelete'), successMessage: t('app.deleteRuleSuccess'),
+  missingAfterRecoveryMessage: t('app.ruleDeleteOutcomeRefreshed'), failedMessage: t('app.deleteRuleFailed'),
+  remove: boardApi.removeRule,
+  commit: mutation => commitSemanticScene({ rules: mutation.currentItems, availability: mutation })
+})
+
+const deleteSpecification = (id: string) => deleteBoardItem({
+  kind: 'spec', id, items: () => specifications.value, requiredKey: 'specs', snapshotOf: authoredSpecificationConfirmationSnapshot,
+  confirmTitle: t('app.deleteSpecConfirmTitle'),
+  confirmMessage: spec => t('app.deleteSpecConfirmMessage', { name: spec.name }),
+  changedMessage: t('app.specificationChangedBeforeDelete'), successMessage: t('app.deleteSpecSuccess'),
+  missingAfterRecoveryMessage: t('app.specDeleteOutcomeRefreshed'), failedMessage: t('app.deleteSpecFailed'),
+  remove: boardApi.removeSpec,
+  commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
+})
+
+const ruleExecutionOrder = computed(() => rules.value.map(rule => String(rule.id || '')))
+const sameRuleOrder = (left: string[], right: string[]) =>
+  left.length === right.length && left.every((id, index) => id === right[index])
+const unconfirmedRuleOrder = ref<string[] | null>(null)
+const ruleOrderBlockedReason = computed(() => unconfirmedRuleOrder.value ? t('app.ruleOrderUnconfirmed') : '')
+
+watch(ruleExecutionOrder, order => {
+  if (unconfirmedRuleOrder.value && !sameRuleOrder(order, unconfirmedRuleOrder.value)) {
+    unconfirmedRuleOrder.value = null
+  }
+})
+
 const moveRule = async (ruleId: string, direction: 'up' | 'down') => {
-  if (!ensurePlaybackClosedForMutation() || rulesReordering.value) return
+  if (rulesReordering.value || ruleOrderBlockedReason.value || !ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['rules'])) return
+  const expectedOrder = ruleExecutionOrder.value
+  const currentIndex = expectedOrder.indexOf(ruleId)
+  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= expectedOrder.length) return
+
+  // The arrow is relative to the order the user saw when they clicked.
+  const requestedOrder = [...expectedOrder]
+  requestedOrder[currentIndex] = expectedOrder[targetIndex]
+  requestedOrder[targetIndex] = ruleId
+  const generation = boardSceneGeneration
+  const token = getToken()
+  const authScope = boardAuthScopeEpoch
+  const ownsRequest = () => isCurrentSessionToken(token) && isCurrentBoardAuthScope(authScope)
+  const isConflict = (error: unknown) => (error as { response?: { status?: number } })?.response?.status === 409
+
   rulesReordering.value = true
   try {
     await enqueueBoardMutation(async () => {
-      const currentIndex = rules.value.findIndex(rule => rule.id === ruleId)
-      const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
-      if (currentIndex < 0 || targetIndex < 0 || targetIndex >= rules.value.length) return
+      if (!ownsRequest() || !ensurePlaybackClosedForMutation() || !ensureBoardDataReady(['rules'])) return
+      if (generation !== boardSceneGeneration || !sameRuleOrder(ruleExecutionOrder.value, expectedOrder)) {
+        notifyBlocked(t('app.ruleOrderChanged'))
+        return
+      }
 
-      const reordered = [...rules.value]
-      const expectedOrder = rules.value.map(rule => String(rule.id || ''))
-      const movedRule = reordered[currentIndex]
-      reordered[currentIndex] = reordered[targetIndex]
-      reordered[targetIndex] = movedRule
-      const requestedOrder = reordered.map(rule => String(rule.id || ''))
-      try {
-        const mutation = await boardApi.reorderRules(expectedOrder, requestedOrder)
-        commitSemanticScene({ rules: mutation.rules, availability: mutation })
+      const receipt = await readBoardWriteReceipt(() => boardApi.reorderRules(expectedOrder, requestedOrder),
+        ownsRequest, { refreshOnRejection: isConflict })
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        commitSemanticScene({ rules: receipt.mutation.rules, availability: receipt.mutation })
         // Re-cue the moved rule so a repeated press stays oriented; each press restarts its lifetime.
         focusHighlight.show('rule', ruleId)
         notifySuccess(t('app.ruleOrderUpdated'))
-      } catch (error: any) {
-        console.error('Failed to save rule execution order', error)
-        const refreshed = await refreshRules()
-        await reloadUndoAvailability()
-        const currentOrder = rules.value.map(rule => String(rule.id || ''))
-        if (!isDefinitiveMutationRejection(error)
-          && refreshed && currentOrder.length === requestedOrder.length
-          && currentOrder.every((id, index) => id === requestedOrder[index])) {
-          focusHighlight.show('rule', ruleId)
-          notifyBlocked(t('app.ruleOrderOutcomeRefreshed'))
+        return
+      }
+      if (receipt.status === 'unconfirmed') {
+        const currentOrder = ruleExecutionOrder.value
+        if (!receipt.snapshotRefreshed || sameRuleOrder(currentOrder, expectedOrder)) {
+          unconfirmedRuleOrder.value = expectedOrder
         } else {
-          notifyError(extractApiErrorMessage(error, t('app.ruleOrderUpdateFailed')))
+          if (sameRuleOrder(currentOrder, requestedOrder)) focusHighlight.show('rule', ruleId)
+          notifyBlocked(t('app.ruleOrderOutcomeRefreshed'))
         }
+      } else if (isConflict(receipt.error)) {
+        notifyBlocked(t(receipt.snapshotRefreshed ? 'app.ruleOrderChanged' : 'app.ruleOrderConflictRefreshFailed'))
+      } else {
+        notifyError(localizedErrorMessage(receipt.error, t('app.ruleOrderUpdateFailed'), locale.value))
       }
     })
+  } catch (error) {
+    if (!isPollingAbortedError(error)) throw error
   } finally {
     rulesReordering.value = false
   }
 }
 
-const deleteSpecification = async (specId: string) => {
-  if (!ensurePlaybackClosedForMutation()) return
-  if (!ensureBoardDataReady(['specs'])) return
-  const specToDelete = specifications.value.find(s => s.id === specId)
-  if (!specToDelete) return
-  const pendingKey = `spec:${specId}`
-  if (!beginBoardItemDelete(pendingKey)) return
-  const confirmationSceneGeneration = boardSceneGeneration
-  const confirmedSpecificationSnapshot = deepClone(specToDelete)
-
-  try {
-    if (!await confirmDestructive({
-      title: t('app.deleteSpecConfirmTitle'),
-      message: t('app.deleteSpecConfirmMessage', {
-        name: specToDelete.name
-      }),
-      confirmText: t('app.delete')
-    })) return
-
-    const snapshotOf = authoredSpecificationConfirmationSnapshot
-    if (!isConfirmedBoardItemCurrent(
-      confirmationSceneGeneration,
-      specifications.value,
-      specId,
-      confirmedSpecificationSnapshot,
-      t('app.specificationChangedBeforeDelete'),
-      snapshotOf
-    )) return
-
-    await enqueueBoardMutation(async () => {
-      if (!isConfirmedBoardItemCurrent(
-        confirmationSceneGeneration,
-        specifications.value,
-        specId,
-        confirmedSpecificationSnapshot,
-        t('app.specificationChangedBeforeDelete'),
-        snapshotOf
-      )) return
-      try {
-        const mutation = await boardApi.removeSpec(confirmedSpecificationSnapshot)
-        commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
-        notifySuccess(t('app.deleteSpecSuccess'))
-      } catch (error: any) {
-        console.error('Failed to delete specification', error)
-        const refreshed = await refreshSpecifications()
-        await reloadUndoAvailability()
-        if (refreshed && !specifications.value.some(spec => spec.id === specId)) {
-          notifyBlocked(t('app.specDeleteOutcomeRefreshed'))
-          return
-        }
-        notifyError(localizedErrorMessage(error, t('app.deleteSpecFailed'), locale.value))
-      }
-    })
-  } finally {
-    finishBoardItemDelete(pendingKey)
-  }
-}
+watch(() => [authState.token, authState.user?.userId], () => {
+  unconfirmedBoardItemDeletes.clear()
+  unconfirmedRuleOrder.value = null
+  unconfirmedEnvironmentPatches.clear()
+  unconfirmedBoardReplacementTokens.clear()
+  unconfirmedUndoHistoryClearTokens.clear()
+}, { flush: 'sync' })
 
 /* =================================================================================
  * 9. API Interactions (Save)
@@ -4206,20 +4147,20 @@ const persistBoardLayout = async (request: QueuedBoardLayoutSave): Promise<boole
   try {
     await boardApi.saveLayout(request.payload, request.authToken)
     if (currentAuthUserId.value !== boardOwnerUserId || !isCurrentSessionToken(request.authToken)) return false
-    persistedWideLayout = request.payload
     layoutSaveErrorShown = false
     return true
-  } catch (e) {
+  } catch (error) {
     const mayShowFeedback = !request.silent
       && !layoutSaveFeedbackSuppressed
       && !boardLifecycleDisposed
       && currentAuthUserId.value === boardOwnerUserId
       && isCurrentSessionToken(request.authToken)
     if (mayShowFeedback) {
-      console.error('Failed to save canvas layout', e)
+      console.error('Could not confirm canvas layout save', error)
       if (!layoutSaveErrorShown) {
         layoutSaveErrorShown = true
-        notifyError(t('app.saveLayoutFailed'))
+        if (isDefinitiveMutationRejection(error)) notifyError(t('app.saveLayoutFailed'))
+        else notifyBlocked(t('app.boardLayoutSaveUnconfirmed'))
       }
     }
     return false
@@ -4310,7 +4251,8 @@ const flushPendingBoardLayout = async (options: {
 }
 
 const scheduleBoardLayoutSave = () => {
-  if (!layoutHydrated.value || boardLifecycleDisposed || !getToken() || isNarrowViewport()) return
+  // The synchronous watcher also sees the wide layout being restored before the resize finishes.
+  if (!layoutHydrated.value || boardLifecycleDisposed || !getToken() || isNarrowViewport() || wasNarrowViewport) return
   if (layoutSaveTimer) {
     clearTimeout(layoutSaveTimer)
   }
@@ -4411,8 +4353,6 @@ const generateEdgesFromRules = (): DeviceEdge[] => {
         id: `edge_${rule.id}_${sourceIndex}_${fromId}`,
         from: fromNode.id,
         to: toNode.id,
-        fromLabel: fromNode.label,
-        toLabel: toNode.label,
         fromPos: fromPoint,
         toPos: toPoint,
         fromApi: source.fromApi || '',
@@ -4421,8 +4361,7 @@ const generateEdgesFromRules = (): DeviceEdge[] => {
         relation: source.relation || '',
         value: source.value === null || source.value === undefined ? '' : String(source.value),
         ruleId: rule.id,
-        ruleIndex,
-        sourceIndex
+        ruleIndex
       })
     }
   }
@@ -4434,25 +4373,6 @@ const syncRuleDerivedEdges = () => {
   edges.value = generateEdgesFromRules()
 }
 
-
-const refreshDeviceTemplates = async (): Promise<boolean> => {
-  templatesLoading.value = true
-  boardDataLoadState.templates = 'loading'
-  try {
-    // A catalog read is side-effect free. Restoring bundled defaults is an explicit,
-    // previewed mutation in ControlCenter.
-    const res = await boardApi.getDeviceTemplates()
-    deviceTemplates.value = res || []
-    boardDataLoadState.templates = 'ready'
-    return true
-  } catch (e) {
-    console.error('Failed to load device templates:', e)
-    boardDataLoadState.templates = 'error'
-    return false
-  } finally {
-    templatesLoading.value = false
-  }
-}
 
 const replaceTemplateState = (state: {
   templates: DeviceTemplate[]
@@ -4466,13 +4386,13 @@ const replaceTemplateState = (state: {
   boardDataLoadState.nodes = 'ready'
   boardDataLoadState.templates = 'ready'
   boardDataLoadState.environment = 'ready'
-  void reloadUndoAvailability('outside-queue')
+  void refreshBoardIfEditHistoryChanged()
 }
 
 const replaceTemplateCatalog = (templates: DeviceTemplate[]) => {
   deviceTemplates.value = templates
   boardDataLoadState.templates = 'ready'
-  void reloadUndoAvailability('outside-queue')
+  void refreshBoardIfEditHistoryChanged()
 }
 
 const handleAuthoritativeBoardStateUnavailable = (
@@ -4491,70 +4411,57 @@ const handleAuthoritativeBoardStateUnavailable = (
  * 10. Lifecycle & Watchers
  * ================================================================================= */
 
-// 1. 定义刷新设备的函数
-const refreshDevices = async (): Promise<boolean> => {
-  boardDataLoadState.nodes = 'loading'
-  try {
-    const loadedNodes = await boardApi.getNodes()
-    replaceNodesFromServer(loadedNodes)
-    reconcileDanglingBoardFocus({ nodes: nodes.value })
-    syncRuleDerivedEdges()
-    boardDataLoadState.nodes = 'ready'
-    return true
-  } catch(e) {
-    console.error('Failed to load devices', e)
-    boardDataLoadState.nodes = 'error'
-    return false
-  }
-}
-
-const refreshEnvironmentVariables = async (): Promise<boolean> => {
-  boardDataLoadState.environment = 'loading'
-  try {
-    environmentVariables.value = await boardApi.getEnvironment()
-    boardDataLoadState.environment = 'ready'
-    return true
-  } catch (e) {
-    console.error('Failed to load the environment variable pool', e)
-    boardDataLoadState.environment = 'error'
-    return false
-  }
-}
-
 const adoptBoardSnapshot = (snapshot: BoardWorkspaceSnapshot, locallyRemovedNodeId?: string) => {
-  deviceTemplates.value = snapshot.deviceTemplates
-  replaceNodesFromServer(snapshot.nodes, { externalRefresh: true, locallyRemovedNodeId })
-  environmentVariables.value = snapshot.environmentVariables
-  rules.value = snapshot.rules
-  specifications.value = snapshot.specifications
-  reconcileDanglingBoardFocus({ nodes: nodes.value, rules: snapshot.rules, specs: snapshot.specifications })
-  syncRuleDerivedEdges()
-  hydratedBoardAuthScopeEpoch = boardAuthScopeEpoch
-  allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'ready' })
-  boardSnapshotError.value = null
-  syncBoardUndoAvailability(snapshot.editHistory)
-  void refreshCurrentBoardModelFingerprints()
+  adoptBoardComparisonSnapshot(() => {
+    deviceTemplates.value = snapshot.deviceTemplates
+    commitSemanticScene({
+      nodes: snapshot.nodes,
+      nodeSnapshotOptions: { externalRefresh: true, locallyRemovedNodeId },
+      environmentVariables: snapshot.environmentVariables,
+      rules: snapshot.rules,
+      specs: snapshot.specifications,
+      availability: snapshot.editHistory,
+      semanticChanged: false
+    })
+    hydratedBoardAuthScopeEpoch.value = boardAuthScopeEpoch
+    allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'ready' })
+    boardSnapshotError.value = null
+  })
 }
 
-const refreshBoardSnapshot = async (): Promise<boolean> => {
+const refreshBoardSnapshot = async ({
+  adopt = adoptBoardSnapshot,
+  keepBoardReady = false
+}: {
+  adopt?: (snapshot: BoardWorkspaceSnapshot) => void
+  keepBoardReady?: boolean
+} = {}): Promise<boolean> => {
   const authScopeEpoch = boardAuthScopeEpoch
-  invalidateCurrentBoardModelFingerprints()
+  const ownsSnapshot = () => isCurrentBoardAuthScope(authScopeEpoch)
+    && currentAuthUserId.value === boardOwnerUserId
+  if (!ownsSnapshot()) return false
   boardSnapshotError.value = null
-  allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'loading' })
-  templatesLoading.value = true
+  // Layout recovery is serialized with subsequent edits. Keeping the hydrated view ready
+  // lets a drag or resize already in progress reach its release or cancellation.
+  if (!keepBoardReady) {
+    invalidateCurrentBoardModelFingerprints()
+    allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'loading' })
+    templatesLoading.value = !hasHydratedBoardSnapshot.value
+  }
   try {
     const snapshot = await boardApi.getSnapshot()
-    if (!isCurrentBoardAuthScope(authScopeEpoch)) return false
-    adoptBoardSnapshot(snapshot)
+    if (!ownsSnapshot()) return false
+    adopt(snapshot)
     return true
   } catch (error) {
-    if (!isCurrentBoardAuthScope(authScopeEpoch)) return false
+    if (!ownsSnapshot()) return false
     console.error('Failed to load the canvas semantic snapshot:', error)
+    if (keepBoardReady) invalidateCurrentBoardModelFingerprints()
     allBoardDataKeys.forEach(key => { boardDataLoadState[key] = 'error' })
     boardSnapshotError.value = errorDetails(error)
     return false
   } finally {
-    if (isCurrentBoardAuthScope(authScopeEpoch)) templatesLoading.value = false
+    if (ownsSnapshot()) templatesLoading.value = false
   }
 }
 
@@ -4583,17 +4490,18 @@ const requestBoardSnapshotRefresh = ({
   // New invalidations can request one follow-up; duplicate lifecycle events only reuse it.
   boardRefreshRequestedWhileBusy = false
   const refreshPromise = enqueueBoardMutation(refreshBoardSnapshot)
-  boardForegroundRefreshPromise = refreshPromise
-  void refreshPromise.finally(() => {
-    if (boardForegroundRefreshPromise === refreshPromise) {
+    .catch(error => {
+      if (isPollingAbortedError(error)) return false
+      throw error
+    })
+    .finally(() => {
       boardForegroundRefreshPromise = null
-    }
-    if (boardRefreshRequestedWhileBusy && !boardLifecycleDisposed
-      && document.visibilityState !== 'hidden') {
-      boardRefreshRequestedWhileBusy = false
-      requestBoardSnapshotRefresh()
-    }
-  })
+      if (boardRefreshRequestedWhileBusy && !boardLifecycleDisposed
+        && document.visibilityState !== 'hidden') {
+        void requestBoardSnapshotRefresh()
+      }
+    })
+  boardForegroundRefreshPromise = refreshPromise
   return refreshPromise
 }
 
@@ -4658,55 +4566,77 @@ const saveEnvironmentVariables = async (
     notifyInfo(t('app.environmentSaveInProgress'))
     return
   }
+  const valueKey = (variable: Omit<ModelEnvironmentVariable, 'name'>) => [
+    variable.value?.trim(), variable.trust?.trim().toLowerCase(), variable.privacy?.trim().toLowerCase()
+  ]
+  const orderedPatches = [...patches].sort((left, right) => left.name.localeCompare(right.name))
+  const patchKey = JSON.stringify(orderedPatches.map(({ name, expected, desired }) => [
+    name.trim(), valueKey(expected), valueKey(desired)
+  ]))
+  const currentValues = () => {
+    const byName = new Map(environmentVariables.value.map(variable => [variable.name, variable]))
+    return JSON.stringify(orderedPatches.map(({ name }) => valueKey(byName.get(name.trim()) ?? {})))
+  }
+  const unconfirmedFailure = (snapshotRefreshed: boolean): ApiErrorDetails => ({
+    reasonCode: BOARD_ITEM_EDIT_OUTCOME_UNKNOWN,
+    cause: t(snapshotRefreshed ? 'app.environmentSaveOutcomeRefreshed' : 'app.environmentSaveOutcomeUnknownRefreshFailed'),
+    details: [], fields: {}
+  })
+  const isStaleRejection = (error: unknown) => errorDetails(error).reasonCode === 'ENVIRONMENT_VARIABLE_STALE'
   environmentMutationPending.value = true
   let saved = false
   let saveFailure: ApiErrorDetails | undefined
   try {
     await enqueueBoardMutation(async () => {
-      try {
-        const mutation = await boardApi.saveEnvironment(patches)
-        if (!isRequestCurrent()) return
-        commitSemanticScene({
-          environmentVariables: mutation.environmentVariables,
-          availability: mutation,
-          semanticChanged: mutation.operation === 'updated'
-        })
-        saved = true
-        const changedPatches = mutation.patchResults.filter(result => result.changedFields.length > 0)
-        if (changedPatches.length === 0) {
-          notifyInfo(t('app.environmentPatchUnchanged', {
-            items: formatEnvironmentPatchResults(mutation.patchResults)
-          }))
+      if (!isRequestCurrent() || !ensurePlaybackClosedForMutation()
+        || !ensureBoardDataReady(['nodes', 'templates', 'environment'])) return
+      const previousRecovery = unconfirmedEnvironmentPatches.get(patchKey)
+      if (previousRecovery) {
+        // Undo or a later edit to these variables ends the recovery for this submission.
+        if (previousRecovery.currentValues === currentValues()) {
+          saveFailure = unconfirmedFailure(previousRecovery.snapshotRefreshed)
+          return
         }
-        const changedPatchNames = new Set(changedPatches.map(result => result.name))
-        reportEnvironmentChanges(mutation.environmentChanges.filter(
-          change => !changedPatchNames.has(change.name)
-        ))
-      } catch (e: any) {
-        console.error('Failed to save the environment variable pool', e)
-        if (!isRequestCurrent()) return
-        if (e?.response?.data?.data?.reasonCode === 'ENVIRONMENT_VARIABLE_STALE') {
-          // A stale CAS can also mean that another tab removed a device or
-          // template which sourced this variable. Reconcile the full semantic
-          // snapshot so the inspector cannot keep ghost entries.
-          const refreshed = await refreshBoardSnapshot()
-          if (!isRequestCurrent()) return
-          if (refreshed) markVerificationResultStale()
-          notifyBlocked(refreshed
-            ? t('app.environmentVariableStaleRefreshed')
-            : t('app.environmentVariableStaleRefreshFailed'))
-        } else if (!isDefinitiveMutationRejection(e)) {
-          const refreshed = await refreshBoardSnapshot()
-          if (!isRequestCurrent()) return
-          if (refreshed) markVerificationResultStale()
-          notifyBlocked(refreshed
-            ? t('app.environmentSaveOutcomeRefreshed')
-            : t('app.environmentSaveOutcomeUnknownRefreshFailed'))
-        } else {
-          saveFailure = errorDetails(e)
-        }
+        unconfirmedEnvironmentPatches.delete(patchKey)
       }
+      const receipt = await readBoardWriteReceipt(() => boardApi.saveEnvironment(patches), isRequestCurrent, {
+        // A conflict can also mean that the device which supplied the variable was removed.
+        refreshOnRejection: isStaleRejection
+      })
+      if (!receipt) return
+      if (receipt.status !== 'confirmed') {
+        if (receipt.status === 'unconfirmed') {
+          unconfirmedEnvironmentPatches.set(patchKey, {
+            currentValues: currentValues(), snapshotRefreshed: receipt.snapshotRefreshed
+          })
+          saveFailure = unconfirmedFailure(receipt.snapshotRefreshed)
+        } else if (isStaleRejection(receipt.error)) {
+          saveFailure = { ...errorDetails(receipt.error), cause: t(receipt.snapshotRefreshed
+            ? 'app.environmentVariableStaleRefreshed' : 'app.environmentVariableStaleRefreshFailed') }
+        } else {
+          saveFailure = errorDetails(receipt.error)
+        }
+        return
+      }
+
+      const { mutation } = receipt
+      commitSemanticScene({
+        environmentVariables: mutation.environmentVariables,
+        availability: mutation,
+        semanticChanged: mutation.operation === 'updated'
+      })
+      saved = true
+      const changedPatches = mutation.patchResults.filter(result => result.changedFields.length > 0)
+      if (changedPatches.length === 0) {
+        notifyInfo(t('app.environmentPatchUnchanged', {
+          items: formatEnvironmentPatchResults(mutation.patchResults)
+        }))
+      }
+      const changedPatchNames = new Set(changedPatches.map(result => result.name))
+      reportEnvironmentChanges(mutation.environmentChanges.filter(change => !changedPatchNames.has(change.name)))
     })
+  } catch (error) {
+    if (!isPollingAbortedError(error)) throw error
   } finally {
     environmentMutationPending.value = false
     if (isRequestCurrent()) complete(saved, saveFailure)
@@ -4836,6 +4766,19 @@ const showSceneImportError = async (error: any) => {
   const status = error?.response?.status
   const message = error?.response?.data?.message || error?.message || ''
 
+  const acknowledgeImportError = (title: string, content: VNode[], tone: 'error' | 'warning' = 'error') =>
+    acknowledge({
+      title,
+      tone,
+      message: h('div', { class: 'space-y-3 text-left' }, content),
+      confirmText: t('app.confirm')
+    })
+
+  const renderRawDetails = () => h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
+    h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
+    h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
+  ])
+
   // A conflict's reason code owns its meaning; HTTP 409 also covers duplicate rules and specs.
   if (status === 409) {
     const data = error?.response?.data?.data
@@ -4855,26 +4798,18 @@ const showSceneImportError = async (error: any) => {
     }
     const templateName = data.templateName
 
-    await acknowledge({
-      title: t('app.sceneImportConflictTitle'),
-      tone: 'error',
-      message: h('div', { class: 'space-y-3 text-left' }, [
-        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-          t('app.sceneImportTemplateMismatch', { name: templateName })),
-        h('div', { class: 'mt-3 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
-          h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } }, t('app.suggestions')),
-          h('ul', { class: 'text-sm space-y-1 list-disc list-inside', style: { color: 'var(--text-muted)' } }, [
-            h('li', t('app.sceneImportSuggestion1')),
-            h('li', t('app.sceneImportSuggestion2'))
-          ])
-        ]),
-        h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-          h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-          h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
+    await acknowledgeImportError(t('app.sceneImportConflictTitle'), [
+      h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+        t('app.sceneImportTemplateMismatch', { name: templateName })),
+      h('div', { class: 'mt-3 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
+        h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } }, t('app.suggestions')),
+        h('ul', { class: 'text-sm space-y-1 list-disc list-inside', style: { color: 'var(--text-muted)' } }, [
+          h('li', t('app.sceneImportSuggestion1')),
+          h('li', t('app.sceneImportSuggestion2'))
         ])
       ]),
-      confirmText: t('app.confirm')
-    })
+      renderRawDetails()
+    ])
     return
   }
 
@@ -4886,27 +4821,19 @@ const showSceneImportError = async (error: any) => {
       const expectedVersion = versionMatch ? versionMatch[1] : t('app.unknown')
       const receivedVersion = versionMatch ? (versionMatch[2] === 'null' ? t('app.none') : versionMatch[2]) : t('app.unknown')
 
-      await acknowledge({
-        title: t('app.sceneImportVersionMismatch'),
-        tone: 'error',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportVersionMismatchDesc')),
-          h('div', { class: 'mt-2 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
-            h('div', { class: 'text-sm space-y-1', style: { color: 'var(--text-muted)' } }, [
-              h('div', [h('span', { class: 'font-semibold' }, t('app.expectedVersion') + ': '), expectedVersion]),
-              h('div', [h('span', { class: 'font-semibold' }, t('app.receivedVersion') + ': '), receivedVersion])
-            ])
-          ]),
-          h('p', { class: 'mt-3 text-sm', style: { color: 'var(--text-muted)' } },
-            t('app.sceneImportVersionMismatchSolution')),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
+      await acknowledgeImportError(t('app.sceneImportVersionMismatch'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportVersionMismatchDesc')),
+        h('div', { class: 'mt-2 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
+          h('div', { class: 'text-sm space-y-1', style: { color: 'var(--text-muted)' } }, [
+            h('div', [h('span', { class: 'font-semibold' }, t('app.expectedVersion') + ': '), expectedVersion]),
+            h('div', [h('span', { class: 'font-semibold' }, t('app.receivedVersion') + ': '), receivedVersion])
           ])
         ]),
-        confirmText: t('app.confirm')
-      })
+        h('p', { class: 'mt-3 text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportVersionMismatchSolution')),
+        renderRawDetails()
+      ])
       return
     }
 
@@ -4920,21 +4847,13 @@ const showSceneImportError = async (error: any) => {
                         field === 'rules' ? t('app.rules') :
                         field === 'specs' ? t('app.specifications') : field
 
-      await acknowledge({
-        title: t('app.sceneImportIncompleteTitle'),
-        tone: 'error',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportMissingCollection', { collection: fieldName })),
-          h('p', { class: 'mt-2 text-sm', style: { color: 'var(--text-muted)' } },
-            t('app.sceneImportMissingCollectionFix')),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
-          ])
-        ]),
-        confirmText: t('app.confirm')
-      })
+      await acknowledgeImportError(t('app.sceneImportIncompleteTitle'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportMissingCollection', { collection: fieldName })),
+        h('p', { class: 'mt-2 text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportMissingCollectionFix')),
+        renderRawDetails()
+      ])
       return
     }
 
@@ -4943,21 +4862,13 @@ const showSceneImportError = async (error: any) => {
       const templateMatch = message.match(/snapshots for '([^']+)'/)
       const templateName = templateMatch ? templateMatch[1] : t('app.unknown')
 
-      await acknowledge({
-        title: t('app.sceneImportConflictTitle'),
-        tone: 'error',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportDuplicateTemplate', { name: templateName })),
-          h('p', { class: 'mt-2 text-sm', style: { color: 'var(--text-muted)' } },
-            t('app.sceneImportDuplicateTemplateFix')),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
-          ])
-        ]),
-        confirmText: t('app.confirm')
-      })
+      await acknowledgeImportError(t('app.sceneImportConflictTitle'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportDuplicateTemplate', { name: templateName })),
+        h('p', { class: 'mt-2 text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportDuplicateTemplateFix')),
+        renderRawDetails()
+      ])
       return
     }
 
@@ -4966,26 +4877,18 @@ const showSceneImportError = async (error: any) => {
       const templateMatch = message.match(/template\s+'([^']+)'/)
       const templateName = templateMatch ? templateMatch[1] : t('app.unknown')
 
-      await acknowledge({
-        title: t('app.sceneImportIncompleteTitle'),
-        tone: 'error',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportMissingTemplateSnapshot', { name: templateName })),
-          h('div', { class: 'mt-3 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
-            h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } }, t('app.suggestions')),
-            h('ul', { class: 'text-sm space-y-1 list-disc list-inside', style: { color: 'var(--text-muted)' } }, [
-              h('li', t('app.sceneImportSuggestion3')),
-              h('li', t('app.sceneImportSuggestion4'))
-            ])
-          ]),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
+      await acknowledgeImportError(t('app.sceneImportIncompleteTitle'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportMissingTemplateSnapshot', { name: templateName })),
+        h('div', { class: 'mt-3 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
+          h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } }, t('app.suggestions')),
+          h('ul', { class: 'text-sm space-y-1 list-disc list-inside', style: { color: 'var(--text-muted)' } }, [
+            h('li', t('app.sceneImportSuggestion3')),
+            h('li', t('app.sceneImportSuggestion4'))
           ])
         ]),
-        confirmText: t('app.confirm')
-      })
+        renderRawDetails()
+      ])
       return
     }
 
@@ -4994,21 +4897,13 @@ const showSceneImportError = async (error: any) => {
       const templateMatch = message.match(/snapshot:\s*(.+)$/)
       const templateName = templateMatch ? templateMatch[1] : t('app.unknown')
 
-      await acknowledge({
-        title: t('app.sceneImportWarningTitle'),
-        tone: 'warning',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportUnreferencedTemplate', { name: templateName })),
-          h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
-            t('app.sceneImportUnreferencedTemplateExplanation')),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
-          ])
-        ]),
-        confirmText: t('app.confirm')
-      })
+      await acknowledgeImportError(t('app.sceneImportWarningTitle'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportUnreferencedTemplate', { name: templateName })),
+        h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportUnreferencedTemplateExplanation')),
+        renderRawDetails()
+      ], 'warning')
       return
     }
 
@@ -5018,27 +4913,19 @@ const showSceneImportError = async (error: any) => {
       const snapshotName = matches ? matches[1] : ''
       const manifestName = matches ? matches[2] : ''
 
-      await acknowledge({
-        title: t('app.sceneImportInconsistentTitle'),
-        tone: 'error',
-        message: h('div', { class: 'space-y-3 text-left' }, [
-          h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
-            t('app.sceneImportTemplateNameMismatchTitle')),
-          h('div', { class: 'mt-2 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
-            h('div', { class: 'text-xs font-mono space-y-1', style: { color: 'var(--text-muted)' } }, [
-              h('div', [h('span', { class: 'font-semibold' }, 'template.name: '), snapshotName]),
-              h('div', [h('span', { class: 'font-semibold' }, 'manifest.Name: '), manifestName])
-            ])
-          ]),
-          h('p', { class: 'mt-3 text-sm', style: { color: 'var(--text-muted)' } },
-            t('app.sceneImportTemplateNameMismatchFix')),
-          h('details', { class: 'mt-3 text-xs', style: { color: 'var(--text-muted)' } }, [
-            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-            h('div', { class: 'mt-1 whitespace-pre-wrap break-words font-mono' }, message)
+      await acknowledgeImportError(t('app.sceneImportInconsistentTitle'), [
+        h('p', { class: 'text-sm', style: { color: 'var(--text)' } },
+          t('app.sceneImportTemplateNameMismatchTitle')),
+        h('div', { class: 'mt-2 p-3 rounded', style: { backgroundColor: 'var(--surface-elevated)', border: '1px solid var(--border)' } }, [
+          h('div', { class: 'text-xs font-mono space-y-1', style: { color: 'var(--text-muted)' } }, [
+            h('div', [h('span', { class: 'font-semibold' }, 'template.name: '), snapshotName]),
+            h('div', [h('span', { class: 'font-semibold' }, 'manifest.Name: '), manifestName])
           ])
         ]),
-        confirmText: t('app.confirm')
-      })
+        h('p', { class: 'mt-3 text-sm', style: { color: 'var(--text-muted)' } },
+          t('app.sceneImportTemplateNameMismatchFix')),
+        renderRawDetails()
+      ])
       return
     }
   }
@@ -5059,85 +4946,75 @@ const showSceneImportError = async (error: any) => {
   const envVarErrors = entries.filter(([field]) => field.startsWith('environmentVariables'))
   const otherErrors = entries.filter(([field]) => !field.startsWith('environmentVariables'))
 
-  await acknowledge({
-    title: t('app.sceneImportValidationTitle'),
-    tone: 'error',
-    message: h('div', { class: 'space-y-3 text-left' }, [
-        h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
-          t('app.sceneImportValidationSummary', { count: entries.length })),
-        h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
-          t('app.sceneImportValidationNextStep')),
-
-        // Environment variable errors section
-        ...(envVarErrors.length > 0 ? [
-          h('div', { class: 'mt-4' }, [
-            h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } },
-              t('app.environmentVariableErrors', { count: envVarErrors.length })),
-            ...envVarErrors.map(([field, reason]) => h('div', { class: 'border-l-2 border-[color:var(--danger-border)] pl-3 mb-2' }, [
-              h('div', { class: 'text-sm font-semibold', style: { color: 'var(--text)' } },
-                formatSceneValidationCoordinate(field, t)),
-              h('div', { class: 'mt-0.5 text-sm', style: { color: 'var(--text-muted)' } },
-                reason),
-              h('details', { class: 'mt-1 text-xs', style: { color: 'var(--text-muted)' } }, [
-                h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-                h('code', { class: 'mt-1 block break-all text-xs', style: { color: 'var(--text-muted)' } }, field)
-              ])
-            ]))
+  const renderValidationGroup = (errors: Array<[string, string]>, titleKey: string): VNode[] =>
+    errors.length > 0 ? [
+      h('div', { class: 'mt-4' }, [
+        h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } },
+          t(titleKey, { count: errors.length })),
+        ...errors.map(([field, reason]) => h('div', { class: 'border-l-2 border-[color:var(--danger-border)] pl-3 mb-2' }, [
+          h('div', { class: 'text-sm font-semibold', style: { color: 'var(--text)' } },
+            formatSceneValidationCoordinate(field, t)),
+          h('div', { class: 'mt-0.5 text-sm', style: { color: 'var(--text-muted)' } },
+            reason),
+          h('details', { class: 'mt-1 text-xs', style: { color: 'var(--text-muted)' } }, [
+            h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
+            h('code', { class: 'mt-1 block break-all text-xs', style: { color: 'var(--text-muted)' } }, field)
           ])
-        ] : []),
+        ]))
+      ])
+    ] : []
 
-        // Other errors section
-        ...(otherErrors.length > 0 ? [
-          h('div', { class: 'mt-4' }, [
-            h('div', { class: 'text-sm font-semibold mb-2', style: { color: 'var(--text)' } },
-              t('app.otherValidationErrors', { count: otherErrors.length })),
-            ...otherErrors.map(([field, reason]) => h('div', { class: 'border-l-2 border-[color:var(--danger-border)] pl-3 mb-2' }, [
-              h('div', { class: 'text-sm font-semibold', style: { color: 'var(--text)' } },
-                formatSceneValidationCoordinate(field, t)),
-              h('div', { class: 'mt-0.5 text-sm', style: { color: 'var(--text-muted)' } },
-                reason),
-              h('details', { class: 'mt-1 text-xs', style: { color: 'var(--text-muted)' } }, [
-                h('summary', { class: 'cursor-pointer font-semibold' }, t('app.technicalDetails')),
-                h('code', { class: 'mt-1 block break-all text-xs', style: { color: 'var(--text-muted)' } }, field)
-              ])
-            ]))
-          ])
-        ] : [])
-    ]),
-    confirmText: t('app.confirm')
+  await acknowledgeImportError(t('app.sceneImportValidationTitle'), [
+    h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
+      t('app.sceneImportValidationSummary', { count: entries.length })),
+    h('p', { class: 'text-sm', style: { color: 'var(--text-muted)' } },
+      t('app.sceneImportValidationNextStep')),
+    ...renderValidationGroup(envVarErrors, 'app.environmentVariableErrors'),
+    ...renderValidationGroup(otherErrors, 'app.otherValidationErrors')
+  ])
+}
+
+const canReviewBoardReplacement = (impactToken: string): boolean => {
+  if (!unconfirmedBoardReplacementTokens.has(impactToken)) return true
+  notifyBlocked(t('app.sceneReplacementPreviewUnconfirmed'))
+  return false
+}
+
+const readBoardReplacementReceipt = async <T,>(
+  impactToken: string,
+  write: () => Promise<T>,
+  ownsRequest: () => boolean
+): Promise<BoardWriteReceipt<T> | null> => {
+  const scope = boardAuthScopeEpoch
+  const receipt = await readBoardWriteReceipt(write, ownsRequest, {
+    refreshOnRejection: error => readBoardReplacementStalePreview(error) !== null,
+    reconcile: () => runTrackedBoardMutation(
+      refreshBoardSnapshot,
+      getCurrentRecommendationSceneFingerprint(scope),
+      () => ownsRequest() ? getCurrentRecommendationSceneFingerprint(scope) : null,
+      () => {
+        markVerificationResultStale()
+        invalidateRecommendationsForSceneChange({ notify: true })
+      }
+    )
   })
-}
-
-const refreshSceneForReconciliation = async (): Promise<boolean> => {
-  // Adopt templates and their dependent collections from the same server snapshot.
-  return refreshBoardSnapshot()
-}
-
-const reportBoardReplacementDrift = async (error: any): Promise<boolean> => {
-  const preview = readBoardReplacementStalePreview(error)
-  if (!preview) return false
-  const previousSceneFingerprint = getCurrentRecommendationSceneFingerprint(boardAuthScopeEpoch)
-  const refreshed = await refreshSceneForReconciliation()
-  const currentSceneFingerprint = refreshed
-    ? getCurrentRecommendationSceneFingerprint(boardAuthScopeEpoch)
-    : null
-  if (refreshed && (previousSceneFingerprint === null
-    || currentSceneFingerprint === null
-    || previousSceneFingerprint !== currentSceneFingerprint)) {
-    markVerificationResultStale()
-    invalidateRecommendationsForSceneChange({ notify: true })
+  if (!receipt || receipt.status === 'confirmed') return receipt
+  if (receipt.status === 'unconfirmed') {
+    unconfirmedBoardReplacementTokens.add(impactToken)
+    return receipt
   }
-  notifyBlocked(t(
-    refreshed ? 'app.sceneReplacementChangedBeforeApply' : 'app.sceneReplacementChangedRefreshFailed',
-    {
+
+  const preview = readBoardReplacementStalePreview(receipt.error)
+  if (!preview) return receipt
+  notifyBlocked(t(receipt.snapshotRefreshed
+    ? 'app.sceneReplacementChangedBeforeApply' : 'app.sceneReplacementChangedRefreshFailed', {
       devices: preview.deviceCount,
       variables: preview.environmentVariableCount,
       rules: preview.ruleCount,
       specs: preview.specificationCount,
       historyEntries: preview.editHistoryEntryCount
-    }
-  ))
-  return true
+  }))
+  return null
 }
 
 const currentBoardMatchesScene = (scene: BoardSceneModel): boolean => {
@@ -5186,34 +5063,41 @@ const resetSceneSelectionAfterReplacement = async () => {
   }
 }
 
+const commitSceneReplacement = (saved: Awaited<ReturnType<typeof boardApi.importScene>>) => {
+  invalidateForFullSceneReplacement()
+  commitSemanticScene({
+    nodes: saved.nodes, environmentVariables: saved.environmentVariables,
+    rules: saved.rules, specs: saved.specs, semanticChanged: false
+  })
+}
+
 const importScene = async (
   scene: BoardSceneModel,
   admissionGuard?: () => boolean
-): Promise<boolean> => {
-  const isAdmitted = () => !admissionGuard || admissionGuard()
-  if (!isAdmitted()) return false
-  if (!ensurePlaybackClosedForMutation()) return false
-  if (isSceneReplacementInProgress.value) return false
+): Promise<void> => {
+  const ownsRequest = captureBoardRunOwner()
+  const isAdmitted = () => ownsRequest() && (!admissionGuard || admissionGuard())
+  if (!isAdmitted() || !ensurePlaybackClosedForMutation() || isSceneReplacementInProgress.value) return
   if (hasAssistantWork.value) {
     notifyBlocked(t('app.finishAssistantBeforeSceneReplacement'))
-    return false
+    return
   }
   isImportingScene.value = true
   try {
     await waitForPendingBoardMutations()
-    if (!isAdmitted()) return false
-    if (!ensureBoardDataReady()) return false
+    if (!isAdmitted() || !ensureBoardDataReady()) return
     let replacementPreview: BoardReplacementPreview
     let importCatalog: DeviceTemplate[]
     try {
       replacementPreview = await boardApi.previewBoardReplacement()
+      if (!isAdmitted() || !canReviewBoardReplacement(replacementPreview.impactToken)) return
       importCatalog = await boardApi.getDeviceTemplates()
     } catch (error: any) {
-      if (!isAdmitted()) return false
+      if (!isAdmitted()) return
       notifyError(localizedErrorMessage(error, t('app.sceneReplacementPreviewFailed'), locale.value))
-      return false
+      return
     }
-    if (!isAdmitted()) return false
+    if (!isAdmitted()) return
     const importPlan = prepareSceneImport(scene, importCatalog)
     if (importPlan.libraryLimitExceeded) {
       await acknowledgeFailure({
@@ -5222,7 +5106,7 @@ const importScene = async (
           limit: REQUEST_LIMITS.templates }),
         suggestion: t('app.sceneImportLibraryFullHint')
       })
-      return false
+      return
     }
     scene = importPlan.scene
     const hasRepairs = importPlan.templateRenames.length > 0 || importPlan.variableCorrections.length > 0
@@ -5264,49 +5148,30 @@ const importScene = async (
       ]),
       confirmText: t(hasRepairs ? 'app.sceneImportRepairConfirmAction' : 'app.sceneImportConfirmAction'),
       customClass: 'scene-replacement-confirm'
-    })) return false
-    if (!isAdmitted()) return false
+    })) return
+    if (!isAdmitted()) return
 
-    return await enqueueBoardMutation(async () => {
-      let saved: Awaited<ReturnType<typeof boardApi.importScene>>
-      try {
-        saved = await boardApi.importScene({
+    await enqueueBoardMutation(async () => {
+      const receipt = await readBoardReplacementReceipt(replacementPreview.impactToken, async () => {
+        const saved = await boardApi.importScene({
           impactToken: replacementPreview.impactToken,
           scene: serializeSceneFile(scene)
         })
         if (!savedBatchMatchesScene(saved, scene, importCatalog)) {
           throw new Error('Scene replacement response did not match the requested semantic scene')
         }
-      } catch (error: any) {
-        console.error('Failed to import scene', error)
-        if (await reportBoardReplacementDrift(error)) return false
-        const status = Number(error?.response?.status || 0)
-        if (status >= 400 && status < 500) {
-          await showSceneImportError(error)
-          return false
-        }
-
-        const refreshed = await refreshSceneForReconciliation()
-        if (refreshed) markVerificationResultStale()
-        if (!refreshed) {
-          notifyBlocked(t('app.sceneImportOutcomeUnknownRefreshFailed'))
-          return false
-        }
-        if (currentBoardMatchesScene(scene)) {
-          invalidateForFullSceneReplacement()
-          await resetSceneSelectionAfterReplacement()
-          notifyBlocked(t('app.sceneImportCurrentMatchesAfterUnconfirmedResponse'))
-          return true
-        }
-        notifyBlocked(t('app.sceneImportOutcomeUnconfirmedAfterRefresh'))
-        return false
+        return saved
+      }, ownsRequest)
+      if (!receipt) return
+      if (receipt.status !== 'confirmed') {
+        if (receipt.status === 'rejected') await showSceneImportError(receipt.error)
+        else if (!receipt.snapshotRefreshed) notifyBlocked(t('app.sceneImportOutcomeUnknownRefreshFailed'))
+        else notifyBlocked(t(currentBoardMatchesScene(scene)
+          ? 'app.sceneImportCurrentMatchesAfterUnconfirmedResponse' : 'app.sceneImportOutcomeUnconfirmedAfterRefresh'))
+        return
       }
 
-      invalidateForFullSceneReplacement()
-      replaceNodesFromServer(saved.nodes)
-      environmentVariables.value = saved.environmentVariables
-      rules.value = saved.rules
-      specifications.value = saved.specs
+      const { mutation: saved } = receipt
       {
         const existingTemplateNames = new Set(importCatalog.map(template =>
           normalizeTemplateLookupName(template.name || template.manifest?.Name)))
@@ -5320,8 +5185,9 @@ const importScene = async (
           })
         ]
       }
-      syncRuleDerivedEdges()
+      commitSceneReplacement(saved)
       await resetSceneSelectionAfterReplacement()
+      if (!ownsRequest()) return
       const importMessage = t('app.sceneImportSuccess', {
         devices: nodes.value.length,
         variables: environmentVariables.value.length,
@@ -5332,11 +5198,9 @@ const importScene = async (
         added: saved.createdTemplates.length
       })
       notifySuccess(importMessage)
-      return true
-    }, { admissionGuard, trackSemanticChange: false })
+    }, { admissionGuard: isAdmitted, trackSemanticChange: false })
   } catch (error) {
-    if (error instanceof BoardMutationAdmissionCancelledError) return false
-    throw error
+    if (!isPollingAbortedError(error) && !(error instanceof BoardMutationAdmissionCancelledError)) throw error
   } finally {
     isImportingScene.value = false
   }
@@ -5349,17 +5213,20 @@ const clearScene = async () => {
     notifyBlocked(t('app.finishAssistantBeforeSceneReplacement'))
     return
   }
+  const ownsRequest = captureBoardRunOwner()
   isClearingScene.value = true
   try {
     await waitForPendingBoardMutations()
-    if (!ensureBoardDataReady()) return
+    if (!ownsRequest() || !ensureBoardDataReady()) return
     let replacementPreview: BoardReplacementPreview
     try {
       replacementPreview = await boardApi.previewBoardReplacement()
     } catch (error: any) {
+      if (!ownsRequest()) return
       notifyError(localizedErrorMessage(error, t('app.sceneReplacementPreviewFailed'), locale.value))
       return
     }
+    if (!ownsRequest() || !canReviewBoardReplacement(replacementPreview.impactToken)) return
     const templateCounts = summarizeTemplateUsage(replacementPreview.templates)
     if (!await confirmDestructive({
       title: t('app.sceneClearConfirmTitle'),
@@ -5375,52 +5242,38 @@ const clearScene = async () => {
       }),
       confirmText: t('app.sceneClearConfirmAction'),
       customClass: 'scene-replacement-confirm'
-    })) return
+    }) || !ownsRequest()) return
 
     await enqueueBoardMutation(async () => {
-      try {
+      const receipt = await readBoardReplacementReceipt(replacementPreview.impactToken, async () => {
         const saved = await boardApi.clearBoardScene(replacementPreview.impactToken)
         if (saved.nodes.length > 0 || saved.environmentVariables.length > 0
           || saved.rules.length > 0 || saved.specs.length > 0) {
           throw new Error('Scene clear response still contained board items')
         }
-        invalidateForFullSceneReplacement()
-        replaceNodesFromServer(saved.nodes)
-        environmentVariables.value = saved.environmentVariables
-        rules.value = saved.rules
-        specifications.value = saved.specs
-        syncRuleDerivedEdges()
+        return saved
+      }, ownsRequest)
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        commitSceneReplacement(receipt.mutation)
         dialogVisible.value = false
         focusHighlight.clear()
         notifySuccess(t('app.sceneClearSuccess', { retained: templateCounts.custom }))
-      } catch (error: any) {
-        console.error('Failed to clear scene', error)
-        if (await reportBoardReplacementDrift(error)) return
-        const status = Number(error?.response?.status || 0)
-        if (status >= 400 && status < 500) {
-          const message = localizedErrorMessage(error, t('app.sceneClearFailed'), locale.value)
-          notifyError(message)
-          return
-        }
-        const refreshed = await refreshSceneForReconciliation()
-        if (refreshed) markVerificationResultStale()
-        if (!refreshed) {
-          notifyBlocked(t('app.sceneClearOutcomeUnknownRefreshFailed'))
-          return
-        }
+      } else if (receipt.status === 'rejected') {
+        notifyError(localizedErrorMessage(receipt.error, t('app.sceneClearFailed'), locale.value))
+      } else if (!receipt.snapshotRefreshed) {
+        notifyBlocked(t('app.sceneClearOutcomeUnknownRefreshFailed'))
+      } else {
         const isEmpty = getVisibleDeviceNodes().length === 0
           && environmentVariables.value.length === 0
           && rules.value.length === 0
           && specifications.value.length === 0
-        if (isEmpty) {
-          invalidateForFullSceneReplacement()
-          await resetSceneSelectionAfterReplacement()
-          notifyBlocked(t('app.sceneClearCurrentEmptyAfterUnconfirmedResponse'))
-        } else {
-          notifyBlocked(t('app.sceneClearOutcomeUnconfirmedAfterRefresh'))
-        }
+        notifyBlocked(t(isEmpty
+          ? 'app.sceneClearCurrentEmptyAfterUnconfirmedResponse' : 'app.sceneClearOutcomeUnconfirmedAfterRefresh'))
       }
-    }, { trackSemanticChange: false })
+    }, { admissionGuard: ownsRequest, trackSemanticChange: false })
+  } catch (error) {
+    if (!isPollingAbortedError(error) && !(error instanceof BoardMutationAdmissionCancelledError)) throw error
   } finally {
     isClearingScene.value = false
   }
@@ -5496,49 +5349,6 @@ const handleSceneImportFile = async (event: Event) => {
   }
 }
 
-// 2.定义刷新规则的函数（edges 由 rules 动态生成）
-const refreshRules = async (expectedToken: string | null = getToken()): Promise<boolean> => {
-  const authScopeEpoch = boardAuthScopeEpoch
-  if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-  boardDataLoadState.rules = 'loading'
-  try {
-    // 只获取规则列表
-    const rulesData = await boardApi.getRules()
-    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-    rules.value = rulesData
-    reconcileDanglingBoardFocus({ rules: rulesData })
-    // 动态生成 edges
-    syncRuleDerivedEdges()
-    boardDataLoadState.rules = 'ready'
-    return true
-  } catch (e) {
-    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-    console.error('Failed to load rules', e)
-    boardDataLoadState.rules = 'error'
-    return false
-  }
-}
-
-// 3.定义刷新规约的函数
-const refreshSpecifications = async (expectedToken: string | null = getToken()): Promise<boolean> => {
-  const authScopeEpoch = boardAuthScopeEpoch
-  if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-  boardDataLoadState.specs = 'loading'
-  try {
-    const specsData = await boardApi.getSpecs()
-    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-    specifications.value = specsData
-    reconcileDanglingBoardFocus({ specs: specsData })
-    boardDataLoadState.specs = 'ready'
-    return true
-  } catch(e) {
-    if (!isCurrentSessionToken(expectedToken) || !isCurrentBoardAuthScope(authScopeEpoch)) return false
-    console.error('Failed to load specifications', e)
-    boardDataLoadState.specs = 'error'
-    return false
-  }
-}
-
 const retryBoardDataLoad = async () => {
   await requestBoardSnapshotRefresh({ force: true })
 }
@@ -5546,7 +5356,7 @@ const retryBoardDataLoad = async () => {
 watch([nodes, rules], syncRuleDerivedEdges)
 
 const applyLoadedBoardLayout = (layout: BoardLayoutDto | null, initialHydration: boolean) => {
-  persistedWideLayout = layout ?? {
+  wideLayoutToRestore = layout ?? {
     canvasPan: { x: 0, y: 0 },
     canvasZoom: 1,
     panels: {
@@ -5577,7 +5387,6 @@ const applyLoadedBoardLayout = (layout: BoardLayoutDto | null, initialHydration:
   panelStateTouchedBeforeLayout = false
   canvasStateTouchedBeforeLayout = false
   if (layoutChangedBeforeHydration && !isNarrowViewport()) {
-    persistedWideLayout = buildBoardLayoutPayload()
     void saveBoardLayout({ silent: true })
   }
 }
@@ -5645,11 +5454,6 @@ const getCanvasMapColor = (nodeId: string): string => {
   return getNodeAccentColor(nodeId)
 }
 
-const getCanvasMapSize = (): string => {
-  // All nodes use the same size for consistency
-  return 'size-2'
-}
-
 const CANVAS_MAP_WIDTH = 220
 const CANVAS_MAP_HEIGHT = 112
 const CANVAS_MAP_INSET = 8
@@ -5658,47 +5462,28 @@ let canvasMapDragRect: DOMRect | null = null
 let canvasMapDragElement: HTMLElement | null = null
 let canvasMapDragPointerId: number | null = null
 
-// Canvas map calculations
-const canvasMapData = computed(() => {
-  const visibleNodes = renderedCanvasNodes.value
+type CanvasMapBounds = NonNullable<ReturnType<typeof getNodeBounds>> & { width: number; height: number }
 
-  if (visibleNodes.length === 0) {
-    return {
-      dots: [],
-      lines: [],
-      bounds: null as null | { minX: number; minY: number; maxX: number; maxY: number; width: number; height: number }
-    }
-  }
-
-  // Calculate canvas bounds
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-
-  visibleNodes.forEach(node => {
-    const x = node.position.x
-    const y = node.position.y
-    const width = node.width || DEFAULT_NODE_WIDTH
-    const height = node.height || DEFAULT_NODE_HEIGHT
-
-    minX = Math.min(minX, x)
-    minY = Math.min(minY, y)
-    maxX = Math.max(maxX, x + width)
-    maxY = Math.max(maxY, y + height)
-  })
-
+const canvasMapBounds = computed<CanvasMapBounds | null>(previous => {
+  const sceneBounds = renderedNodeBounds.value
+  if (!sceneBounds) return null
+  let { minX, minY, maxX, maxY } = sceneBounds
   const frame = canvasFrameForRendering.value
   let visibleWorldWidth = 900
   let visibleWorldHeight = 600
-  if (frame && renderedCanvasZoom.value > 0) {
-    const visibleMinX = (frame.left - renderedCanvasPan.value.x) / renderedCanvasZoom.value
-    const visibleMinY = (frame.top - renderedCanvasPan.value.y) / renderedCanvasZoom.value
-    const visibleMaxX = (frame.left + frame.width - renderedCanvasPan.value.x) / renderedCanvasZoom.value
-    const visibleMaxY = (frame.top + frame.height - renderedCanvasPan.value.y) / renderedCanvasZoom.value
-    visibleWorldWidth = Math.max(1, visibleMaxX - visibleMinX)
-    visibleWorldHeight = Math.max(1, visibleMaxY - visibleMinY)
+  const zoom = renderedCanvasZoom.value
+  if (frame && zoom > 0) {
+    const { x, y } = renderedCanvasPan.value
+    const visibleMinX = (frame.left - x) / zoom
+    const visibleMinY = (frame.top - y) / zoom
+    const visibleWidth = frame.width / zoom
+    const visibleHeight = frame.height / zoom
+    visibleWorldWidth = Math.max(1, visibleWidth)
+    visibleWorldHeight = Math.max(1, visibleHeight)
     minX = Math.min(minX, visibleMinX)
     minY = Math.min(minY, visibleMinY)
-    maxX = Math.max(maxX, visibleMaxX)
-    maxY = Math.max(maxY, visibleMaxY)
+    maxX = Math.max(maxX, visibleMinX + visibleWidth)
+    maxY = Math.max(maxY, visibleMinY + visibleHeight)
   }
 
   const contentWidth = Math.max(1, maxX - minX)
@@ -5710,79 +5495,38 @@ const canvasMapData = computed(() => {
   maxX += paddingX
   maxY += paddingY
 
-  const canvasWidth = maxX - minX
-  const canvasHeight = maxY - minY
+  // Panning inside a stable projection only moves the viewport rectangle.
+  if (previous?.minX === minX && previous.minY === minY && previous.maxX === maxX && previous.maxY === maxY) {
+    return previous
+  }
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY }
+})
 
-  // Convert node positions to mini map coordinates
-  const dots = visibleNodes.map((node) => {
-    const nodeX = canvasWidth > 0
-      ? CANVAS_MAP_INSET + ((node.position.x - minX) / canvasWidth) * (CANVAS_MAP_WIDTH - CANVAS_MAP_INSET * 2)
-      : CANVAS_MAP_WIDTH / 2
-    const nodeY = canvasHeight > 0
-      ? CANVAS_MAP_INSET + ((node.position.y - minY) / canvasHeight) * (CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET * 2)
-      : CANVAS_MAP_HEIGHT / 2
-
+const canvasMapDots = computed(() => {
+  const bounds = canvasMapBounds.value
+  if (!bounds) return []
+  return renderedCanvasNodes.value.map(node => {
+    const x = CANVAS_MAP_INSET + (node.position.x - bounds.minX) / bounds.width * (CANVAS_MAP_WIDTH - CANVAS_MAP_INSET * 2)
+    const y = CANVAS_MAP_INSET + (node.position.y - bounds.minY) / bounds.height * (CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET * 2)
     return {
       id: node.id,
-      x: Math.max(CANVAS_MAP_INSET / 2, Math.min(CANVAS_MAP_WIDTH - CANVAS_MAP_INSET - 4, nodeX)),
-      y: Math.max(CANVAS_MAP_INSET / 2, Math.min(CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET - 4, nodeY)),
-      size: getCanvasMapSize(),
+      x: Math.max(CANVAS_MAP_INSET / 2, Math.min(CANVAS_MAP_WIDTH - CANVAS_MAP_INSET - 4, x)),
+      y: Math.max(CANVAS_MAP_INSET / 2, Math.min(CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET - 4, y)),
       color: getCanvasMapColor(node.id)
     }
   })
-
-  // Create node lookup map for easy access
-  const nodeMap = new Map(dots.map(dot => [dot.id, dot]))
-
-  // 预计算双向边对，避免 O(edges²) 复杂度
-  const bidirectionalPairs = new Set<string>()
-  for (const edge of allEdges.value) {
-    const key = [edge.from, edge.to].sort().join('→')
-    bidirectionalPairs.add(key)
-  }
-
-  // Generate lines for rule-derived visible edges.
-  const lines = allEdges.value.flatMap((edge) => {
-    const fromDot = nodeMap.get(edge.from)
-    const toDot = nodeMap.get(edge.to)
-
-    if (!fromDot || !toDot) return []
-
-    // Check if bidirectional using pre-computed Set
-    const pairKey = [edge.from, edge.to].sort().join('→')
-    const reversePairKey = [edge.to, edge.from].sort().join('→')
-    const isBidirectional = pairKey === reversePairKey ? false : bidirectionalPairs.has(pairKey)
-
-    let offsetY = 0
-
-    if (isBidirectional) {
-      // For bidirectional edges, offset vertically
-      const [node1, node2] = [edge.from, edge.to].sort()
-      const isFirstDirection = (edge.from === node1 && edge.to === node2)
-      offsetY = isFirstDirection ? -8 : 8 // Offset above/below
-    }
-
-    return [{
-      id: edge.id,
-      fromId: edge.from,
-      x1: fromDot.x + 4, // Center of dot (assuming 8px diameter)
-      y1: fromDot.y + 4 + offsetY,
-      x2: toDot.x + 4,
-      y2: toDot.y + 4 + offsetY,
-      color: getCanvasMapColor(edge.from),
-      isBidirectional
-    }]
-  })
-
-  return {
-    dots,
-    lines,
-    bounds: { minX, minY, maxX, maxY, width: canvasWidth, height: canvasHeight }
-  }
 })
 
-const canvasMapDots = computed(() => canvasMapData.value.dots)
-const canvasMapLines = computed(() => canvasMapData.value.lines)
+const canvasMapLines = computed(() => {
+  const dotsById = new Map(canvasMapDots.value.map(dot => [dot.id, dot]))
+  return allEdges.value.flatMap(edge => {
+    const from = dotsById.get(edge.from)
+    const to = dotsById.get(edge.to)
+    return from && to ? [{
+      id: edge.id, x1: from.x + 4, y1: from.y + 4, x2: to.x + 4, y2: to.y + 4, color: from.color
+    }] : []
+  })
+})
 const canvasMapViewBox = computed(() => `0 0 ${CANVAS_MAP_WIDTH} ${CANVAS_MAP_HEIGHT}`)
 
 const getNodeBounds = (targetNodes: DeviceNode[] = nodes.value) => {
@@ -5850,7 +5594,7 @@ const clampCanvasMapValue = (value: number, min: number, max: number) =>
   Math.min(max, Math.max(min, value))
 
 const worldToCanvasMapPoint = (worldX: number, worldY: number) => {
-  const bounds = canvasMapData.value.bounds
+  const bounds = canvasMapBounds.value
   if (!bounds) return null
   const innerWidth = CANVAS_MAP_WIDTH - CANVAS_MAP_INSET * 2
   const innerHeight = CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET * 2
@@ -5861,7 +5605,7 @@ const worldToCanvasMapPoint = (worldX: number, worldY: number) => {
 }
 
 const canvasMapPointToWorld = (mapX: number, mapY: number) => {
-  const bounds = canvasMapData.value.bounds
+  const bounds = canvasMapBounds.value
   if (!bounds) return null
   const innerWidth = CANVAS_MAP_WIDTH - CANVAS_MAP_INSET * 2
   const innerHeight = CANVAS_MAP_HEIGHT - CANVAS_MAP_INSET * 2
@@ -5981,7 +5725,7 @@ const focusSpecInInspector = async (specId?: string | null) => {
 }
 
 const canvasMapViewportRect = computed(() => {
-  const bounds = canvasMapData.value.bounds
+  const bounds = canvasMapBounds.value
   const frame = canvasFrameForRendering.value
   if (!bounds || !frame || renderedCanvasZoom.value <= 0) return null
 
@@ -6017,7 +5761,7 @@ const navigateCanvasMap = (event: PointerEvent, rect?: DOMRect | null) => {
 
 const onCanvasMapPointerDown = (event: PointerEvent) => {
   if (isCanvasNavigationLocked.value) return
-  if (!canvasMapData.value.bounds
+  if (!canvasMapBounds.value
     || event.button !== 0
     || event.isPrimary === false
     || canvasMapDragPointerId !== null) return
@@ -6074,8 +5818,7 @@ const onCanvasMapPointerLost = (event: PointerEvent) => {
   finishCanvasMapDrag(event.pointerId)
 }
 
-const fittedViewportForNodes = (targetNodes: DeviceNode[], frame = getVisibleCanvasFrame()) => {
-  const bounds = getNodeBounds(targetNodes)
+const fittedViewportForBounds = (bounds: ReturnType<typeof getNodeBounds>, frame: ReturnType<typeof getVisibleCanvasFrame>) => {
   if (!bounds || !frame) return null
 
   const paddingX = Math.min(72, frame.width / 8)
@@ -6099,6 +5842,9 @@ const fittedViewportForNodes = (targetNodes: DeviceNode[], frame = getVisibleCan
   }
 }
 
+const fittedViewportForNodes = (targetNodes: DeviceNode[], frame = getVisibleCanvasFrame()) =>
+  fittedViewportForBounds(getNodeBounds(targetNodes), frame)
+
 const fitNodesToCanvas = (targetNodes: DeviceNode[] = nodes.value) => {
   const viewport = fittedViewportForNodes(targetNodes)
   if (!viewport) {
@@ -6109,10 +5855,11 @@ const fitNodesToCanvas = (targetNodes: DeviceNode[] = nodes.value) => {
   canvasPan.value = viewport.pan
 }
 
-const activatePlaybackScene = (scene: ModelPlaybackScene) => {
+const resetPlaybackViewport = () => {
   playbackViewportFollowsFit = true
   playbackCanvasFrame = null
-  activePlaybackScene.value = deepClone(scene)
+  playbackCanvasZoom.value = 1
+  playbackCanvasPan.value = { x: 0, y: 0 }
 }
 
 // Overview follows the free frame; manual navigation retains its scale and world center.
@@ -6121,36 +5868,25 @@ watch([
   () => boardPanels.control.collapsed, () => boardPanels.inspector.collapsed,
   effectiveControlPanelWidth, effectiveInspectorPanelWidth, actionDockReservedWidth
 ], () => {
-  if (!activePlaybackScene.value) return
-  void nextTick(() => {
-    const scene = activePlaybackScene.value
-    if (!scene) return
-    const frame = getVisibleCanvasFrame()
-    if (!frame) return
-    if (!playbackViewportFollowsFit && playbackCanvasFrame) {
-      playbackCanvasPan.value = {
-        x: playbackCanvasPan.value.x + frame.left + frame.width / 2
-          - playbackCanvasFrame.left - playbackCanvasFrame.width / 2,
-        y: playbackCanvasPan.value.y + frame.top + frame.height / 2
-          - playbackCanvasFrame.top - playbackCanvasFrame.height / 2
-      }
-    } else {
-      const viewport = fittedViewportForNodes(scene.nodes)
-      if (!viewport) return
-      playbackCanvasZoom.value = viewport.zoom
-      playbackCanvasPan.value = viewport.pan
+  const scene = activePlaybackScene.value
+  if (!scene) return
+  const frame = getVisibleCanvasFrame()
+  if (!frame) return
+  if (!playbackViewportFollowsFit && playbackCanvasFrame) {
+    playbackCanvasPan.value = {
+      x: playbackCanvasPan.value.x + frame.left + frame.width / 2
+        - playbackCanvasFrame.left - playbackCanvasFrame.width / 2,
+      y: playbackCanvasPan.value.y + frame.top + frame.height / 2
+        - playbackCanvasFrame.top - playbackCanvasFrame.height / 2
     }
-    playbackCanvasFrame = frame
-  })
-})
-
-const deactivatePlaybackScene = () => {
-  activePlaybackScene.value = null
-  playbackViewportFollowsFit = true
-  playbackCanvasFrame = null
-  playbackCanvasZoom.value = 1
-  playbackCanvasPan.value = { x: 0, y: 0 }
-}
+  } else {
+    const viewport = fittedViewportForNodes(scene.nodes)
+    if (!viewport) return
+    playbackCanvasZoom.value = viewport.zoom
+    playbackCanvasPan.value = viewport.pan
+  }
+  playbackCanvasFrame = frame
+}, { flush: 'post' })
 
 const fitToContent = () => {
   if (isCanvasNavigationLocked.value) return
@@ -6192,204 +5928,98 @@ const handleCreateDevice = async (data: {
   const requestToken = getToken()
   const requestAuthScopeEpoch = boardAuthScopeEpoch
   const isRequestCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(requestAuthScopeEpoch)
-  return enqueueBoardMutation(async () => {
-    let saved = false
-    let saveFailure: ApiErrorDetails | undefined
-    let requestedNode: DeviceNode | null = null
-    let environmentChanges: EnvironmentVariableChange[] = []
-    let refreshedDeviceLabel: string | null = null
-    try {
-      const { template, customName, runtime } = data
-      if (!ensureDeviceRuntimeCapacity(runtime)) return
-      const requestedLabel = customName.trim()
-      const uniqueLabel = getUniqueLabel(requestedLabel, getVisibleDeviceNodes())
-      if (uniqueLabel !== requestedLabel) {
-        notifyBlocked(t('app.deviceNameAlreadyExists'))
-        return
-      }
-      const node: DeviceNode = {
-        id: createDeviceInstanceId(getVisibleDeviceNodes()),
-        templateName: template.manifest.Name,
-        label: uniqueLabel,
-        position: getNextNodePosition(),
-        state: template.manifest.InitState || 'Working',
-        width: DEFAULT_NODE_WIDTH,
-        height: DEFAULT_NODE_HEIGHT,
-        ...(runtime || {})
-      }
-      requestedNode = node
-      const mutation = await boardApi.addNodes([node])
-      if (!isRequestCurrent()) return
-      commitSemanticScene({
-        nodes: mutation.currentNodes,
-        environmentVariables: mutation.environmentVariables,
-        specs: mutation.currentSpecifications,
-        availability: mutation
-      })
-      environmentChanges = mutation.environmentChanges
-      const created = mutation.affectedDevices[0]
-      await focusCreatedDeviceNode(created)
-      if (!isRequestCurrent()) return
-      saved = true
-    } catch (error: any) {
-      if (!isRequestCurrent()) return
-      if (!isDefinitiveMutationRejection(error) && requestedNode) {
-        const [nodesRefreshed, environmentRefreshed] = await Promise.all([
-          refreshDevices(),
-          refreshEnvironmentVariables()
-        ])
-        if (!isRequestCurrent()) return
-        await reloadUndoAvailability()
-        if (!isRequestCurrent()) return
-        const created = nodes.value.find(candidate => candidate.id === requestedNode?.id)
-        if (nodesRefreshed && environmentRefreshed && created) {
-          await focusCreatedDeviceNode(created)
-          if (!isRequestCurrent()) return
-          refreshedDeviceLabel = created.label
-          saved = true
-          return
-        }
-        notifyBlocked(t(nodesRefreshed && environmentRefreshed
-          ? 'app.deviceCreateOutcomeNotMatched' : 'app.deviceCreateOutcomeUnknownRefreshFailed'))
-        return
-      }
-      saveFailure = errorDetails(error)
-    } finally {
-      data.complete(saved, saveFailure)
-      if (saved && isRequestCurrent()) {
-        await nextTick()
-        if (!isRequestCurrent()) return
-        reportEnvironmentChanges(environmentChanges)
-        if (refreshedDeviceLabel !== null) {
-          notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: refreshedDeviceLabel }))
-        }
-      }
+  let receipt: DeviceCreationReceipt | null = null
+  let failure: ApiErrorDetails | undefined
+  try {
+    receipt = await createDeviceInstanceAt(data.template, getNextNodePosition, data.customName.trim(), data.runtime, {
+      nameConflictMessage: () => t('app.deviceNameAlreadyExists')
+    })
+    if (!isRequestCurrent()) return
+    if (receipt?.status === 'rejected') failure = errorDetails(receipt.error)
+    if (receipt?.status === 'unconfirmed') {
+      failure = unconfirmedDeviceCreationFailure(unconfirmedDeviceCreationMessage(receipt))
     }
-  }).catch(error => {
-    if (!isPollingAbortedError(error)) throw error
-    data.complete(false)
-  })
+  } finally {
+    data.complete(receipt?.status === 'confirmed' && isRequestCurrent(), isRequestCurrent() ? failure : undefined)
+  }
+  if (receipt?.status === 'confirmed') {
+    await nextTick()
+    if (isRequestCurrent()) reportEnvironmentChanges(receipt.environmentChanges)
+  }
 }
 
 const handleCreateDevices = async (data: {
   items: Array<{ template: DeviceTemplate, customName: string, runtime?: DeviceRuntimeConfig }>
   environmentVariables?: ModelEnvironmentVariable[]
-  complete: (saved: boolean) => void
+  complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
-  if (!ensurePlaybackClosedForMutation()) {
-    data.complete(false)
-    return
-  }
-  if (!ensureBoardDataReady(['nodes', 'templates', 'environment'])) {
-    data.complete(false)
-    return
-  }
-  return enqueueBoardMutation(async () => {
-    let savedSuccessfully = false
-    let outcomeRefreshed = false
-    let environmentChanges: EnvironmentVariableChange[] = []
-    const items = Array.isArray(data.items) ? data.items : []
-
-    if (items.length === 0) {
-      notifyBlocked(t('app.noDevicesToCreate'))
-      data.complete(false)
-      return
-    }
-    if (!ensureBoardItemCapacity(
-      'devices', getVisibleDeviceNodes().length, items.length, REQUEST_LIMITS.devices
-    )) {
-      data.complete(false)
-      return
-    }
-    if (items.some(item => !item?.template?.manifest?.Name || !item.customName?.trim())) {
-      notifyBlocked(t('app.deviceBatchContainsInvalidItems'))
-      data.complete(false)
-      return
-    }
-    if (items.some(item => !ensureDeviceRuntimeCapacity(item.runtime))) {
-      data.complete(false)
-      return
-    }
-
-    const createdNodes: DeviceNode[] = []
-    const occupiedNodes = [...getVisibleDeviceNodes()]
-    const nameConflicts: string[] = []
-
-    for (const item of items) {
-      const requestedLabel = item.customName.trim()
-      const uniqueLabel = getUniqueLabel(requestedLabel, occupiedNodes)
-      if (uniqueLabel !== requestedLabel) {
-        nameConflicts.push(`${requestedLabel} -> ${uniqueLabel}`)
+  const requestToken = getToken()
+  const scopeEpoch = boardAuthScopeEpoch
+  const isCurrent = () => isCurrentSessionToken(requestToken) && isCurrentBoardAuthScope(scopeEpoch)
+  let receipt: DeviceCreationReceipt | null = null
+  let failure: ApiErrorDetails | undefined
+  const items = Array.isArray(data.items) ? data.items : []
+  try {
+    if (!ensurePlaybackClosedForMutation() || !ensureBoardDataReady(['nodes', 'templates', 'environment'])) return
+    receipt = await enqueueDeviceCreation(() => {
+      if (!ensureBoardDataReady(['nodes', 'templates', 'environment'])) return null
+      const occupiedNodes = [...getVisibleDeviceNodes()]
+      if (items.length === 0) {
+        notifyBlocked(t('app.noDevicesToCreate'))
+        return null
       }
-      const node: DeviceNode = {
-        id: createDeviceInstanceId(occupiedNodes),
-        templateName: item.template.manifest.Name,
-        label: uniqueLabel,
-        position: getNextNodePosition(occupiedNodes),
-        state: item.template.manifest.InitState || 'Working',
-        width: DEFAULT_NODE_WIDTH,
-        height: DEFAULT_NODE_HEIGHT,
-        ...(item.runtime || {})
+      if (!ensureBoardItemCapacity('devices', occupiedNodes.length, items.length, REQUEST_LIMITS.devices)) return null
+      if (items.some(item => !item?.template?.manifest?.Name || !item.customName?.trim())) {
+        notifyBlocked(t('app.deviceBatchContainsInvalidItems'))
+        return null
       }
-      occupiedNodes.push(node)
-      createdNodes.push(node)
-    }
+      if (items.some(item => !ensureDeviceRuntimeCapacity(item.runtime))) return null
 
-    if (nameConflicts.length > 0) {
-      notifyBlocked(t('app.deviceBatchNameConflictBlocked', {
-        changes: nameConflicts.join(', ')
-      }))
-      data.complete(false)
-      return
-    }
-
-    try {
-      const mutation = await boardApi.addNodes(createdNodes, data.environmentVariables || [])
-      commitSemanticScene({
-        nodes: mutation.currentNodes,
-        environmentVariables: mutation.environmentVariables,
-        specs: mutation.currentSpecifications,
-        availability: mutation
-      })
-      environmentChanges = mutation.environmentChanges
-      const lastCreated = mutation.affectedDevices[mutation.affectedDevices.length - 1]
-      await focusCreatedDeviceNode(lastCreated)
-      savedSuccessfully = true
-    } catch (error: any) {
-      console.error('Failed to batch-create devices or save environment variables', error)
-      if (!isDefinitiveMutationRejection(error)) {
-        const [nodesRefreshed, environmentRefreshed] = await Promise.all([
-          refreshDevices(),
-          refreshEnvironmentVariables()
-        ])
-        await reloadUndoAvailability()
-        const allPresent = createdNodes.length > 0
-          && createdNodes.every(created => nodes.value.some(candidate => candidate.id === created.id))
-        if (nodesRefreshed && environmentRefreshed && allPresent) {
-          const lastCreated = nodes.value.find(candidate => candidate.id === createdNodes[createdNodes.length - 1].id)
-          if (lastCreated) await focusCreatedDeviceNode(lastCreated)
-          outcomeRefreshed = true
-          savedSuccessfully = true
-          return
+      const createdNodes: DeviceNode[] = []
+      const nameConflicts: string[] = []
+      for (const item of items) {
+        const requestedLabel = item.customName.trim()
+        const uniqueLabel = getUniqueLabel(requestedLabel, occupiedNodes)
+        if (uniqueLabel !== requestedLabel) nameConflicts.push(`${requestedLabel} -> ${uniqueLabel}`)
+        const node: DeviceNode = {
+          id: createDeviceInstanceId(occupiedNodes),
+          templateName: item.template.manifest.Name,
+          label: uniqueLabel,
+          position: getNextNodePosition(occupiedNodes),
+          state: item.template.manifest.InitState || 'Working',
+          width: DEFAULT_NODE_WIDTH,
+          height: DEFAULT_NODE_HEIGHT,
+          ...(item.runtime || {})
         }
+        occupiedNodes.push(node)
+        createdNodes.push(node)
       }
+      if (nameConflicts.length) {
+        notifyBlocked(t('app.deviceBatchNameConflictBlocked', { changes: nameConflicts.join(', ') }))
+        return null
+      }
+      return createdNodes
+    }, data.environmentVariables)
+    if (!isCurrent()) return
+    if (receipt?.status === 'unconfirmed') {
+      failure = unconfirmedDeviceCreationFailure(receipt.snapshotRefreshed
+        ? t('app.devicesCreateOutcomeRefreshed', { found: receipt.devices.length, count: items.length })
+        : t('app.deviceCreateOutcomeUnknownRefreshFailed'))
+    } else if (receipt?.status === 'rejected') {
       const fallbackMessage = data.environmentVariables?.length
         ? t('app.saveEnvironmentFailed')
         : t('app.saveNodesFailed')
-      notifyError(localizedErrorMessage(error, fallbackMessage, locale.value))
-    } finally {
-      data.complete(savedSuccessfully)
-      if (savedSuccessfully) {
-        await nextTick()
-        reportEnvironmentChanges(environmentChanges)
-        if (outcomeRefreshed) {
-          notifyBlocked(t('app.devicesCreateOutcomeRefreshed', { count: createdNodes.length }))
-        } else {
-          notifySuccess(t('app.devicesAddedWithCount', { count: createdNodes.length }))
-        }
-      }
+      notifyError(localizedErrorMessage(receipt.error, fallbackMessage, locale.value))
     }
-  })
+  } finally {
+    data.complete(receipt?.status === 'confirmed' && isCurrent(), isCurrent() ? failure : undefined)
+  }
+  if (receipt?.status === 'confirmed') {
+    await nextTick()
+    if (!isCurrent()) return
+    reportEnvironmentChanges(receipt.environmentChanges)
+    notifySuccess(t('app.devicesAddedWithCount', { count: receipt.devices.length }))
+  }
 }
 
 // Both editors retain their opened baseline; a refresh must not silently authorise overwriting newer work.
@@ -6400,7 +6030,6 @@ const saveBoardItemEdit = async <T extends { id?: string }>(options: {
   update: (expected: T, desired: T) => Promise<CollectionMutationResult<T>>
   commit: (result: CollectionMutationResult<T>) => void
   focus: (id?: string) => unknown
-  refresh: (token?: string | null) => Promise<boolean>
   complete: (saved: boolean, failure?: ApiErrorDetails) => void
 }) => {
   const token = getToken()
@@ -6413,22 +6042,25 @@ const saveBoardItemEdit = async <T extends { id?: string }>(options: {
   try {
     if (!ensurePlaybackClosedForMutation()) return
     await enqueueBoardMutation(async () => {
-      try {
-        if (!ownsRequest() || !ensurePlaybackClosedForMutation()
-          || !ensureBoardDataReady(options.requiredKeys)) return
-        const mutation = await options.update(expected, desired)
-        if (!ownsRequest()) return
+      if (!ownsRequest() || !ensurePlaybackClosedForMutation()
+        || !ensureBoardDataReady(options.requiredKeys)) return
+      const receipt = await readBoardWriteReceipt(() => options.update(expected, desired), ownsRequest, {
+        refreshOnRejection: (error: any) => [404, 409].includes(error?.response?.status)
+      })
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        const { mutation } = receipt
         options.commit(mutation)
         saved = true
         await options.focus(mutation.affectedItem.id)
-      } catch (error: unknown) {
-        if (!ownsRequest()) return
-        failure = errorDetails(error)
-        // Recovery owns the queue too: a late refresh must not replace a later edit's snapshot.
-        await options.refresh(token)
-        if (!ownsRequest()) { failure = undefined; return }
-        await reloadUndoAvailability()
-        if (!ownsRequest()) failure = undefined
+      } else if (receipt.status === 'unconfirmed') {
+        failure = {
+          reasonCode: BOARD_ITEM_EDIT_OUTCOME_UNKNOWN,
+          cause: t(receipt.snapshotRefreshed ? 'app.boardItemEditOutcomeRefreshed' : 'app.boardItemEditOutcomeUnknown'),
+          details: [], fields: {}
+        }
+      } else {
+        failure = errorDetails(receipt.error)
       }
     })
   } catch (error: unknown) {
@@ -6445,7 +6077,7 @@ const handleSaveRule = (request: {
   expected: request.expected, desired: request.rule, complete: request.complete,
   requiredKeys: ['nodes', 'templates', 'rules'], update: boardApi.updateRule,
   commit: mutation => commitSemanticScene({ rules: mutation.currentItems, availability: mutation, semanticChanged: mutation.operation !== 'unchanged' }),
-  focus: focusRuleOnCanvas, refresh: refreshRules
+  focus: focusRuleOnCanvas
 }) : handleAddRule(request)
 
 const handleSaveSpecification = (data: Parameters<typeof handleAddSpec>[0] & { expected?: Specification }) => {
@@ -6459,7 +6091,7 @@ const handleSaveSpecification = (data: Parameters<typeof handleAddSpec>[0] & { e
     requiredKeys: ['nodes', 'templates', 'specs'], update: boardApi.updateSpec,
     commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation,
       semanticChanged: !isSameSpecification(data.expected!, desired, deviceModeCount) }),
-    focus: focusSpecInInspector, refresh: refreshSpecifications
+    focus: focusSpecInInspector
   })
 }
 
@@ -6489,7 +6121,20 @@ const openRuleBuilder = () => {
   openControlSection('rules')
 }
 
-const handleAddSpec = async (data: {
+const isSpecificationDuplicateRejection = (error: unknown) =>
+  (error as { response?: { status?: number } })?.response?.status === 409
+  && errorDetails(error).reasonCode === 'DUPLICATE_SPECIFICATION'
+
+const readSpecificationCreationReceipt = (specification: Specification, isCurrent: () => boolean) =>
+  readBoardWriteReceipt(() => boardApi.addSpec(specification), isCurrent, {
+    refreshOnRejection: isSpecificationDuplicateRejection
+  })
+
+const specificationCreateRecoveryMessage = (specification: Specification, snapshotRefreshed: boolean) =>
+  t(!snapshotRefreshed ? 'app.specCreateOutcomeUnknown'
+    : specificationExists(specification) ? 'app.specCreateOutcomeRefreshed' : 'app.specCreateOutcomeNotFound')
+
+const handleAddSpec = (data: {
   name: string,
   templateId: string, 
   devices: Array<{deviceId: string, deviceLabel: string, selectedApis: string[]}>, 
@@ -6498,99 +6143,50 @@ const handleAddSpec = async (data: {
   ifConditions: SpecCondition[],
   thenConditions: SpecCondition[],
   complete: (saved: boolean, failure?: ApiErrorDetails) => void
-}) => {
-  if (!ensurePlaybackClosedForMutation()) {
-    data.complete(false)
-    return
-  }
-  const requestToken = getToken()
-  const requestAuthScopeEpoch = boardAuthScopeEpoch
-  let saved = false
-  let outcomeRefreshed = false
-  let attemptedSpec: Specification | null = null
-  let saveFailure: ApiErrorDetails | undefined
-  try {
-    await enqueueBoardMutation(async () => {
-      try {
-        if (!ensureBoardDataReady(['nodes', 'templates', 'specs'])) return
-        if (!ensureBoardItemCapacity(
-          'specifications', specifications.value.length, 1, REQUEST_LIMITS.specifications
-        )) return
-        const { templateId, aConditions, ifConditions, thenConditions } = data
-        if (![aConditions, ifConditions, thenConditions].every(conditions =>
-          ensureNestedItemCapacity(
-            t('app.specificationConditions'), conditions?.length || 0,
-            REQUEST_LIMITS.specificationConditions
-          ))) return
-        const specTemplate = defaultSpecTemplates.find(t => t.id === templateId)
-        const templateLabel = specTemplate?.label || templateId
+}) => saveNewBoardItem<Specification>({
+  requiredKey: 'specs', complete: data.complete,
+  readReceipt: readSpecificationCreationReceipt, focus: focusSpecInInspector,
+  recoveryMessage: specificationCreateRecoveryMessage, isDuplicateRejection: isSpecificationDuplicateRejection,
+  failureKey: 'app.saveSpecsFailed',
+  commit: mutation => commitSemanticScene({ specs: mutation.currentItems, availability: mutation }),
+  prepare: () => {
+    if (!ensureBoardItemCapacity(
+      'specifications', specifications.value.length, 1, REQUEST_LIMITS.specifications
+    )) return null
+    const { templateId, aConditions, ifConditions, thenConditions } = data
+    if (![aConditions, ifConditions, thenConditions].every(conditions =>
+      ensureNestedItemCapacity(
+        t('app.specificationConditions'), conditions?.length || 0,
+        REQUEST_LIMITS.specificationConditions
+      ))) return null
+    const specTemplate = defaultSpecTemplates.find(t => t.id === templateId)
+    const templateLabel = specTemplate?.label || templateId
 
-        const newSpec: Specification = {
-          id: 'spec_' + Date.now(),
-          name: data.name.trim(),
-          templateId: templateId as any,
-          templateLabel,
-          aConditions: aConditions || [],
-          ifConditions: ifConditions || [],
-          thenConditions: thenConditions || []
-        }
-        attemptedSpec = newSpec
-        newSpec.formula = buildSpecFormula(newSpec, {
-          nodes: nodes.value, modeCount: deviceModeCount
-        })
-        newSpec.devices = buildSpecDeviceRefsFromConditions([
-          ...(aConditions || []),
-          ...(ifConditions || []),
-          ...(thenConditions || [])
-        ], nodes.value)
-
-        if (specifications.value.some(spec => isSameSpecification(spec, newSpec, deviceModeCount))) {
-          notifyBlocked(t('app.specDuplicate'))
-          return
-        }
-
-        const mutation = await boardApi.addSpec(newSpec)
-        commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
-        const createdSpec = mutation.affectedItem
-        await focusSpecInInspector(createdSpec?.id)
-        saved = true
-      } catch (error: any) {
-        console.error('[Board] Failed to add specification:', error)
-        if (Number(error?.response?.status) === 409
-          && error?.response?.data?.data?.reasonCode === 'DUPLICATE_SPECIFICATION') {
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          await refreshSpecifications(requestToken)
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          await reloadUndoAvailability()
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          saveFailure = errorDetails(error)
-          return
-        }
-        if (isDefinitiveMutationRejection(error) && [400, 422].includes(Number(error?.response?.status))) {
-          if (!isCurrentSessionToken(requestToken) || !isCurrentBoardAuthScope(requestAuthScopeEpoch)) return
-          saveFailure = errorDetails(error)
-          return
-        }
-        if (!isDefinitiveMutationRejection(error) && attemptedSpec) {
-          const refreshed = await refreshSpecifications()
-          await reloadUndoAvailability()
-          if (refreshed && specifications.value.some(spec => isSameSpecification(spec, attemptedSpec!, deviceModeCount))) {
-            outcomeRefreshed = true
-            saved = true
-            return
-          }
-        }
-        notifyError(extractApiErrorMessage(error, t('app.saveSpecsFailed')))
-      }
-    })
-  } finally {
-    data.complete(saved, saveFailure)
-    if (outcomeRefreshed) {
-      await nextTick()
-      notifyBlocked(t('app.specCreateOutcomeRefreshed'))
+    const newSpec: Specification = {
+      id: 'spec_' + Date.now(),
+      name: data.name.trim(),
+      templateId: templateId as SpecTemplateId,
+      templateLabel,
+      aConditions: aConditions || [],
+      ifConditions: ifConditions || [],
+      thenConditions: thenConditions || []
     }
+    newSpec.formula = buildSpecFormula(newSpec, {
+      nodes: nodes.value, modeCount: deviceModeCount
+    })
+    newSpec.devices = buildSpecDeviceRefsFromConditions([
+      ...(aConditions || []),
+      ...(ifConditions || []),
+      ...(thenConditions || [])
+    ], nodes.value)
+
+    if (specificationExists(newSpec)) {
+      notifyBlocked(t('app.specDuplicate'))
+      return null
+    }
+    return newSpec
   }
-}
+})
 
 const getNextNodePosition = (occupiedNodes: DeviceNode[] = nodes.value): { x: number; y: number } => {
   // 将节点放置在画布网格中央附近，确保无重叠
@@ -6688,25 +6284,11 @@ onBeforeUnmount(() => {
   boardLifecycleDisposed = true
   layoutSaveFeedbackSuppressed = true
   pollingEpoch += 1
-  stopTraceAnimation()
-  ruleRecommendationRequestEpoch += 1
-  cancelRecommendationDuringTeardown(
-    ruleRecommendationRequestId.value,
-    ruleRecommendationAbortController.value
-  )
-  ruleRecommendationAbortController.value = null
-  deviceRecommendationRequestEpoch += 1
-  cancelRecommendationDuringTeardown(
-    deviceRecommendationRequestId.value,
-    deviceRecommendationAbortController.value
-  )
-  deviceRecommendationAbortController.value = null
-  specRecommendationRequestEpoch += 1
-  cancelRecommendationDuringTeardown(
-    specRecommendationRequestId.value,
-    specRecommendationAbortController.value
-  )
-  specRecommendationAbortController.value = null
+  for (const panel of recommendationPanels) {
+    panel.epoch += 1
+    cancelRecommendationDuringTeardown(panel.requestId.value, panel.abortController.value)
+    panel.abortController.value = null
+  }
   if (recommendationProgressTimer) {
     clearInterval(recommendationProgressTimer)
     recommendationProgressTimer = null
@@ -6725,41 +6307,6 @@ onBeforeUnmount(() => {
   finishCanvasMapDrag()
   activeNodeLayoutInteractions.clear()
 })
-
-// Assistant device/environment/rule/spec edits go through journal-recording write paths, so they change undo
-// availability. Partial collection refreshes must re-read it just as the full snapshot reader does.
-//
-// Called through a late-bound reference because `useBoardUndo` is set up further down this file and
-// `const` does not hoist.
-let reloadUndoAvailability: (placement?: 'outside-queue') => Promise<void> = async () => undefined
-
-const refreshDevicesFromChat = async () => enqueueBoardMutation(async () => {
-  const ok = await refreshDevices()
-  await reloadUndoAvailability()
-  return ok
-})
-const refreshEnvironmentFromChat = async () => enqueueBoardMutation(async () => {
-  const ok = await refreshEnvironmentVariables()
-  await reloadUndoAvailability()
-  return ok
-})
-const refreshRulesFromChat = async () => enqueueBoardMutation(async () => {
-  const ok = await refreshRules()
-  await reloadUndoAvailability()
-  return ok
-})
-const refreshSpecificationsFromChat = async () => enqueueBoardMutation(async () => {
-  const ok = await refreshSpecifications()
-  await reloadUndoAvailability()
-  return ok
-})
-const refreshTemplatesFromChat = async () => enqueueBoardMutation(async () => {
-  const ok = await refreshDeviceTemplates()
-  await reloadUndoAvailability()
-  return ok
-})
-const refreshRunHistoryFromChat = async () => refreshRunHistory()
-const refreshAllBoardStateFromChat = async () => enqueueBoardMutation(() => refreshAllBoardState())
 
 const getChatSuggestionContext = () => {
   const visibleNodes = getVisibleDeviceNodes()
@@ -6794,21 +6341,14 @@ const getChatSuggestionContext = () => {
 }
 
 defineExpose({
-  refreshDevices: refreshDevicesFromChat,
-  refreshEnvironmentVariables: refreshEnvironmentFromChat,
-  refreshRules: refreshRulesFromChat,
-  refreshSpecifications: refreshSpecificationsFromChat,
-  refreshDeviceTemplates: refreshTemplatesFromChat,
-  refreshRunHistory: refreshRunHistoryFromChat,
-  refreshAllBoardState: refreshAllBoardStateFromChat,
+  refreshBoardSnapshot: () => enqueueBoardMutation(refreshBoardSnapshot),
+  refreshRunHistory: () => refreshRunHistory(),
+  refreshAllBoardState: () => enqueueBoardMutation(refreshAllBoardState),
   getChatSuggestionContext,
   isChatInteractionLocked: () => !isBoardDataReady.value || isSceneReplacementInProgress.value || isOpeningAccount.value,
   prepareChatInteraction: () => prepareBoardChatInteraction({
     sceneReplacementInProgress: isSceneReplacementInProgress.value,
-    tracePlaybackVisible: traceAnimationState.value.visible,
-    simulationPlaybackVisible: simulationAnimationState.value.visible,
-    closeTracePlayback: closeTraceAnimation,
-    closeSimulationPlayback: closeSimulationTimeline
+    dismissPlayback
   })
 })
 
@@ -6871,30 +6411,17 @@ const presentRunFailure = (
   kind: 'verification' | 'simulation', messageKey: string, error?: unknown, present = true
 ) => {
   const failure = makeRunFailure(messageKey, error)
+  const target = kind === 'verification' ? verificationError : simulationError
   if (automaticRunPresentation(present) === 'foreground') {
-    if (kind === 'verification') verificationError.value = failure
-    else simulationError.value = failure
+    target.value = failure
     return
   }
-  const ownerAuthScopeEpoch = boardAuthScopeEpoch
-  const ownerUserId = currentAuthUserId.value
-  let close!: () => void
-  close = notifyAvailableResult({
+  offerDeferredRunNotice({
     title: () => runFailureTitle(kind, failure),
     message: () => formatRunFailure(kind, failure).message,
     actionLabel: () => t('app.viewDetails'),
-    discardLabel: () => t('app.close'),
-    onAction: () => {
-      if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
-      if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
-      closeOtherWorkflowSurfaces()
-      if (kind === 'verification') verificationError.value = failure
-      else simulationError.value = failure
-      return true
-    },
-    onClose: () => unsavedRunNotifications.delete(close)
-  })
-  unsavedRunNotifications.add(close)
+    discardLabel: () => t('app.close')
+  }, () => { target.value = failure })
 }
 
 /*
@@ -6932,7 +6459,7 @@ const markVerificationResultStale = () => {
  * See `board/semanticCommit.ts` for the ordering guarantee.
  */
 const commitSemanticScene = createBoardSemanticCommit({
-  setNodes: next => { replaceNodesFromServer(next) },
+  setNodes: replaceNodesFromServer,
   setEnvironmentVariables: next => { environmentVariables.value = next },
   setRules: next => { rules.value = next },
   setSpecs: next => { specifications.value = next },
@@ -6940,7 +6467,7 @@ const commitSemanticScene = createBoardSemanticCommit({
   markVerificationResultStale: () => markVerificationResultStale(),
   // Declared later in setup; both are only reached from async handlers, never during setup.
   syncUndoAvailability: availability => syncBoardUndoAvailability(availability),
-  clearDanglingFocus: scene => reconcileDanglingBoardFocus(scene)
+  clearDanglingFocus: scene => reconcileDanglingBoardFocus(scene.nodes ? { ...scene, nodes: nodes.value } : scene)
 })
 
 type VerificationResultView = VerificationResult
@@ -6972,9 +6499,6 @@ const ruleRecommendationRequested = ref(false)
 const ruleRecommendationFilters = reactive({
   userRequirement: ''
 })
-const ruleRecommendationAbortController = ref<AbortController | null>(null)
-const ruleRecommendationRequestId = ref<string | null>(null)
-let ruleRecommendationRequestEpoch = 0
 
 // Wording rules live in `board/recommendationFilterText.ts` so they can be tested without the board.
 const recommendationTextContext = computed(() => ({ t, locale: locale.value }))
@@ -7065,8 +6589,8 @@ const formatRecommendationAdjustmentItem = (
   })
 }
 
-const specificationExists = (recommendation: any): boolean => {
-  const key = buildSpecificationSemanticKey(recommendation, deviceModeCount)
+const specificationExists = (specification: Parameters<typeof buildSpecificationSemanticKey>[0]): boolean => {
+  const key = buildSpecificationSemanticKey(specification, deviceModeCount)
   return specifications.value.some(spec => buildSpecificationSemanticKey(spec, deviceModeCount) === key)
 }
 
@@ -7093,7 +6617,7 @@ const reportRecommendationFailure = (
 ) => {
   recommendationFailures[kind] = {
     outcomeUnknown,
-    message: outcomeUnknown ? t('app.recommendationResponseLostRecovering')
+    message: outcomeUnknown ? t(error === undefined ? 'app.recommendationStopOutcomeUnknown' : 'app.recommendationResponseLostRecovering')
       : extractRecommendationErrorMessage(error, fallback),
     suggestion: t(outcomeUnknown ? 'app.recommendationUnknownNextStep' : 'app.recommendationFailureNextStep'),
     ...errorDetails(error)
@@ -7103,15 +6627,15 @@ const reportRecommendationFailure = (
 /**
  * The in-flight request identity for one recommendation panel.
  *
- * Every step of the ownership / cancellation / recovery machinery needs the same four things,
- * and they always belong to the same panel. Bundling them per panel means a call site names
- * the panel once instead of re-threading four arguments that must not be mixed between panels.
+ * The epoch also fences writes and feedback from an obsolete candidate list.
  */
 type RecommendationRequestHandle = {
   kind: RecommendationPanelKind
   requestId: Ref<string | null>
   abortController: Ref<AbortController | null>
   running: Ref<boolean>
+  requested: Ref<boolean>
+  epoch: number
   cancelledMessageKey: string
 }
 
@@ -7125,13 +6649,11 @@ type RecommendationStopRecovery = {
   requestId: string
   ownerUserId: number | null
   ownerAuthToken: string
-  requestIdRef: Ref<string | null>
-  abortControllerRef: Ref<AbortController | null>
+  panel: RecommendationRequestHandle
   controller: AbortController | null
-  setRunning: (running: boolean) => void
-  cancelledMessageKey: string
   showMessage: boolean
   cancellationAccepted: boolean
+  postResponseReceived: boolean
   acceptanceNotified: boolean
   consecutiveStatusFailures: number
   retryNotBeforeMs: number
@@ -7218,16 +6740,17 @@ const releaseRecommendationTracking = (
   if (recovery?.requestId === requestId) {
     recommendationStopRecoveries.delete(kind)
     recovery.controller?.abort()
-    if (recovery.abortControllerRef.value === recovery.controller) {
-      recovery.abortControllerRef.value = null
+    const { panel } = recovery
+    if (panel.abortController.value === recovery.controller) {
+      panel.abortController.value = null
     }
-    const wasCurrent = recovery.requestIdRef.value === requestId
-    recovery.requestIdRef.value = requestIdAfterTerminalSettlement(
-      recovery.requestIdRef.value,
+    const wasCurrent = panel.requestId.value === requestId
+    panel.requestId.value = requestIdAfterTerminalSettlement(
+      panel.requestId.value,
       requestId
     )
     if (wasCurrent) {
-      recovery.setRunning(false)
+      panel.running.value = false
       const failure = recommendationFailures[kind]
       if (failure?.outcomeUnknown) {
         failure.outcomeUnknown = false
@@ -7238,9 +6761,6 @@ const releaseRecommendationTracking = (
   }
   recommendationRequestOwners.delete(requestId)
   recommendationOutcomeUnknownWarnings.delete(requestId)
-  if (recommendationProgressRequestId.value === requestId) {
-    recommendationProgressRequestId.value = null
-  }
   if (options.terminalEvidence) {
     recordRecommendationTerminalEvidence(requestId, options.terminalEvidence)
   }
@@ -7252,10 +6772,10 @@ const settleRecommendationPost = (
   controller: AbortController
 ) => {
   const { kind, requestId: requestIdRef, abortController: abortControllerRef } = panel
-  const setRunning = (running: boolean) => { panel.running.value = running }
   const recovery = recommendationStopRecoveries.get(kind)
   if (recovery?.requestId === requestId) {
-    releaseRecommendationTracking(kind, requestId, { terminalEvidence: 'post-terminal' })
+    // An interrupted POST can return while the provider is still unwinding.
+    recovery.postResponseReceived = true
     return
   }
   recommendationRequestOwners.delete(requestId)
@@ -7264,10 +6784,14 @@ const settleRecommendationPost = (
   const wasCurrent = requestIdRef.value === requestId
   requestIdRef.value = requestIdAfterTerminalSettlement(requestIdRef.value, requestId)
   if (abortControllerRef.value === controller) abortControllerRef.value = null
-  if (recommendationProgressRequestId.value === requestId) {
-    recommendationProgressRequestId.value = null
+  if (wasCurrent) panel.running.value = false
+}
+
+const markRecommendationOutcomeUnknown = (panel: RecommendationRequestHandle, error?: unknown) => {
+  panel.running.value = false
+  if (!recommendationFailures[panel.kind]?.outcomeUnknown) {
+    reportRecommendationFailure(panel.kind, error, '', true)
   }
-  if (wasCurrent) setRunning(false)
 }
 
 const beginUnknownRecommendationRecovery = (
@@ -7276,7 +6800,7 @@ const beginUnknownRecommendationRecovery = (
   error?: unknown
 ) => {
   if (panel.requestId.value !== requestId) return
-  if (error !== undefined) reportRecommendationFailure(panel.kind, error, '', true)
+  markRecommendationOutcomeUnknown(panel, error)
   if (!recommendationOutcomeUnknownWarnings.has(requestId)) {
     recommendationOutcomeUnknownWarnings.add(requestId)
     notifyBlocked(t('app.recommendationResponseLostRecovering'))
@@ -7288,10 +6812,8 @@ const ensureRecommendationStopRecovery = (
   panel: RecommendationRequestHandle,
   options: { showMessage?: boolean } = {}
 ): RecommendationStopRecovery | null => {
-  const { kind, requestId: requestIdRef, abortController: abortControllerRef } = panel
-  const setRunning = (running: boolean) => { panel.running.value = running }
-  const cancelledMessageKey = panel.cancelledMessageKey
-  const requestId = requestIdRef.value
+  const { kind } = panel
+  const requestId = panel.requestId.value
   if (!requestId) return null
   const existing = recommendationStopRecoveries.get(kind)
   if (existing?.requestId === requestId) {
@@ -7304,20 +6826,19 @@ const ensureRecommendationStopRecovery = (
     requestId,
     ownerUserId: owner.userId,
     ownerAuthToken: owner.authToken,
-    requestIdRef,
-    abortControllerRef,
-    controller: abortControllerRef.value,
-    setRunning,
-    cancelledMessageKey,
+    panel,
+    controller: panel.abortController.value,
     showMessage: options.showMessage !== false,
     cancellationAccepted: false,
+    postResponseReceived: false,
     acceptanceNotified: false,
     consecutiveStatusFailures: 0,
     retryNotBeforeMs: 0
   }
+  // Stop intent retires any candidate response, even if the server cannot acknowledge it yet.
+  panel.epoch += 1
   recommendationStopRecoveries.set(kind, recovery)
   recommendationProgressStage.value = 'CANCELLING'
-  setRunning(true)
   return recovery
 }
 
@@ -7326,15 +6847,15 @@ const acceptRecommendationCancellation = (
   requestId: string
 ) => {
   const recovery = recommendationStopRecoveries.get(kind)
-  if (!recovery || recovery.requestId !== requestId) return
+  if (!recovery || recovery.requestId !== requestId || recovery.panel.requestId.value !== requestId) return
   recovery.cancellationAccepted = true
   recovery.controller?.abort()
-  if (recovery.abortControllerRef.value === recovery.controller) {
-    recovery.abortControllerRef.value = null
+  if (recovery.panel.abortController.value === recovery.controller) {
+    recovery.panel.abortController.value = null
   }
-  if (recovery.showMessage && !recovery.acceptanceNotified) {
+  if (!boardLifecycleDisposed && recovery.showMessage && !recovery.acceptanceNotified) {
     recovery.acceptanceNotified = true
-    notifyInfo(t(recovery.cancelledMessageKey))
+    notifyInfo(t(recovery.panel.cancelledMessageKey))
   }
 }
 
@@ -7380,66 +6901,79 @@ const stopActiveRecommendation = async (
     })
     if (cancellationAccepted) {
       acceptRecommendationCancellation(kind, requestId)
-    } else {
+    } else if (panel.running.value && !boardLifecycleDisposed && recommendationStopRecoveries.get(kind) === recovery) {
       notifyBlocked(t('app.recommendationStopRequestMayStillBeRunning'))
     }
   } catch (error) {
     console.error('Failed to cancel recommendation request:', error)
-    notifyBlocked(t('app.recommendationStopRequestMayStillBeRunning'))
+    if (panel.running.value && !boardLifecycleDisposed && recommendationStopRecoveries.get(kind) === recovery) {
+      notifyBlocked(t('app.recommendationStopRequestMayStillBeRunning'))
+    }
   } finally {
     recommendationStopRequestsInFlight.delete(kind)
-    void refreshRecommendationProgress(kind)
+    if (panel.requestId.value === requestId) void refreshRecommendationProgress(panel)
   }
 }
 
-const getRunningRecommendationKind = (): RecommendationPanelKind | null => {
-  if (isRecommendingRules.value) return 'rule'
-  if (isRecommendingDevices.value) return 'device'
-  if (isRecommendingSpecs.value) return 'spec'
-  return null
-}
-
-const isAnyRecommendationRunning = (): boolean => getRunningRecommendationKind() !== null
+const isAnyRecommendationRunning = () => isRecommendingRules.value || isRecommendingDevices.value || isRecommendingSpecs.value
 
 const recommendationProgressElapsed = ref(0)
 const recommendationProgressStage = ref<InteractiveOperationStage>('QUEUED')
-const recommendationProgressRequestId = ref<string | null>(null)
+const recommendationProgress = computed(() => ({
+  elapsedSeconds: recommendationProgressElapsed.value,
+  stage: recommendationProgressStage.value,
+  templateCount: deviceTemplates.value.length,
+  deviceCount: nodes.value.length,
+  ruleCount: rules.value.length,
+  specCount: specifications.value.length
+}))
 let recommendationProgressTimer: ReturnType<typeof setInterval> | null = null
-let recommendationProgressRefreshInFlight = false
-const refreshRecommendationProgress = async (kind: RecommendationPanelKind) => {
-  if (recommendationProgressRefreshInFlight) return
-  const requestId = recommendationProgressRequestId.value
-  if (!requestId) return
+let recommendationProgressInFlightId: string | null = null
+const refreshRecommendationProgress = async (panel: RecommendationRequestHandle, force = false) => {
+  const { kind } = panel
+  const requestId = panel.requestId.value
+  if (boardLifecycleDisposed || !requestId || recommendationProgressInFlightId === requestId) return
+  const isCurrent = () => !boardLifecycleDisposed && panel.requestId.value === requestId
   const scheduledRecovery = recommendationStopRecoveries.get(kind)
-  if (scheduledRecovery?.requestId === requestId
+  if (!force && scheduledRecovery?.requestId === requestId
     && scheduledRecovery.retryNotBeforeMs > Date.now()) return
-  recommendationProgressRefreshInFlight = true
+  recommendationProgressInFlightId = requestId
+  let postResponseReceivedBeforeStatusRead = false
   try {
     const recovery = recommendationStopRecoveries.get(kind)
     if (recovery?.requestId === requestId && !recovery.cancellationAccepted) {
       try {
-        if (await cancelRecommendationAsOwner(requestId, recovery.ownerAuthToken)) {
+        if (await cancelRecommendationAsOwner(requestId, recovery.ownerAuthToken) && isCurrent()) {
           acceptRecommendationCancellation(kind, requestId)
         }
       } catch {
         // The status read below remains the source of truth while cancellation is retried.
       }
     }
+    if (!isCurrent()) return
     const statusOwner = getRecommendationRequestOwner(requestId)
     if (!statusOwner) throw new Error('Recommendation owner credential is unavailable')
+    postResponseReceivedBeforeStatusRead = recovery?.requestId === requestId && recovery.postResponseReceived
     const status = await readRecommendationStatusAsOwner(requestId, statusOwner.authToken)
-    if (getRunningRecommendationKind() === kind && recommendationProgressRequestId.value === requestId) {
-      recommendationProgressStage.value = status.stage
-      const currentRecovery = recommendationStopRecoveries.get(kind)
-      if (currentRecovery?.requestId === requestId) {
-        currentRecovery.consecutiveStatusFailures = 0
-        currentRecovery.retryNotBeforeMs = 0
-        if (status.state === 'FINISHED') finishRecommendationStopRecovery(kind, requestId)
-      }
+    if (!isCurrent()) return
+    if (status.requestId !== requestId) throw new Error('Recommendation status does not match the requested ID')
+    recommendationProgressStage.value = status.stage
+    const currentRecovery = recommendationStopRecoveries.get(kind)
+    if (currentRecovery?.requestId === requestId) {
+      currentRecovery.consecutiveStatusFailures = 0
+      currentRecovery.retryNotBeforeMs = 0
+      if (status.state === 'FINISHED') finishRecommendationStopRecovery(kind, requestId)
     }
   } catch (error: any) {
+    if (!isCurrent()) return
     const recovery = recommendationStopRecoveries.get(kind)
     if (recovery?.requestId === requestId) {
+      // A POST rejected before admission has no status record to finish.
+      if (postResponseReceivedBeforeStatusRead && !recovery.cancellationAccepted
+        && error?.response?.status === 404) {
+        releaseRecommendationTracking(kind, requestId, { terminalEvidence: 'post-terminal' })
+        return
+      }
       // A 404 can mean DELETE beat POST registration, while a transport failure says
       // nothing about server completion. Retain the owner and back off without releasing.
       const retryPlan = planRecommendationRecoveryAfterStatusFailure(
@@ -7447,121 +6981,123 @@ const refreshRecommendationProgress = async (kind: RecommendationPanelKind) => {
       )
       recovery.consecutiveStatusFailures = retryPlan.consecutiveFailures
       recovery.retryNotBeforeMs = Date.now() + retryPlan.retryDelayMs
+      if (retryPlan.outcomeUnknown) markRecommendationOutcomeUnknown(panel)
     }
     // Registration and ordinary completion can race with this read; the POST remains authoritative.
   } finally {
-    recommendationProgressRefreshInFlight = false
+    if (recommendationProgressInFlightId === requestId) recommendationProgressInFlightId = null
   }
 }
-watch(
-  () => [getRunningRecommendationKind(), recommendationProgressRequestId.value] as const,
-  ([kind, requestId]) => {
-    if (recommendationProgressTimer) {
-      clearInterval(recommendationProgressTimer)
-      recommendationProgressTimer = null
-    }
-    recommendationProgressElapsed.value = 0
-    recommendationProgressStage.value = 'QUEUED'
-    if (!kind || !requestId) return
-    const startedAt = Date.now()
-    void refreshRecommendationProgress(kind)
-    recommendationProgressTimer = setInterval(() => {
-      recommendationProgressElapsed.value = Math.floor((Date.now() - startedAt) / 1000)
-      void refreshRecommendationProgress(kind)
-    }, 1000)
-  }
-)
 
-const isRecommendationRunningForAnother = (kind: RecommendationPanelKind): boolean => {
-  const runningKind = getRunningRecommendationKind()
-  return runningKind !== null && runningKind !== kind
+const hasPendingRecommendationInAnotherPanel = (kind: RecommendationPanelKind) => {
+  const trackedKind = trackedRecommendationPanel.value?.kind
+  return trackedKind !== undefined && trackedKind !== kind
 }
 
 const canGenerateRecommendations = (kind: RecommendationPanelKind): boolean => {
   if (recommendationBatch.value?.running) return false
   if (!ensureBoardDataReady()) return false
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return false
-  }
-  if (simulationAnimationState.value.visible) {
+  if (isSimulationPlaybackActive.value) {
     notifyBlocked(t('app.closeCurrentSimulationFirst'))
     return false
   }
-  if (traceAnimationState.value.visible) {
+  if (isTracePlaybackActive.value) {
     notifyBlocked(t('app.closeCounterexampleFirst'))
     return false
   }
-  if (isRecommendationRunningForAnother(kind)) {
+  if (hasPendingRecommendationInAnotherPanel(kind)) {
     notifyBlocked(t('app.recommendationGenerationInProgress'))
     return false
   }
   return true
 }
 
-const resetRuleRecommendationResults = () => {
-  delete recommendationBatches.rule
-  recommendationApplyFailures.rule = {}
-  delete recommendationFailures.rule
-  ruleRecommendations.value = []
-  ruleRecommendationMessage.value = ''
-  ruleRecommendationFilteredCount.value = 0
-  ruleRecommendationFilteredItems.value = []
-  ruleRecommendationAdjustedItems.value = []
-  ruleRecommendationRawCandidateCount.value = 0
-  ruleRecommendationInspectedCount.value = 0
-  ruleRecommendationTruncatedCount.value = 0
-  ruleRecommendationIsAppliedConfirmation.value = false
-  appliedRuleRecommendations.value.clear()
-  applyingRuleRecommendations.value.clear()
-  ruleRecommendationRequested.value = false
+const generateRecommendations = async <T,>({
+  panel, requiredKeys, request, adopt, failureMessageKey
+}: {
+  panel: RecommendationRequestHandle
+  requiredKeys: BoardDataKey[]
+  request: (options: Required<OwnedRecommendationPostOptions>) => Promise<T>
+  adopt: (response: T) => void
+  failureMessageKey: string
+}) => {
+  if (isRecommendationRequestActive(panel.running.value, panel.requestId.value)) {
+    if (panel.running.value) await stopActiveRecommendation(panel)
+    else await refreshRecommendationProgress(panel, true)
+    return
+  }
+  if (isSceneReplacementInProgress.value) {
+    notifyBlocked(t('app.sceneReplacementInProgress'))
+    return
+  }
+  if (!ensureBoardDataReady(requiredKeys) || !canGenerateRecommendations(panel.kind)) return
+  const owner = captureRecommendationRequestOwner()
+  if (!owner) return
+
+  const controller = new AbortController()
+  const requestId = crypto.randomUUID()
+  panel.running.value = true
+  resetRecommendationResults(panel.kind)
+  panel.requested.value = true
+  const epoch = ++panel.epoch
+  const sceneGeneration = recommendationSceneGeneration
+  const isCurrent = () => !boardLifecycleDisposed && currentAuthUserId.value === owner.userId
+    && panel.epoch === epoch && recommendationSceneGeneration === sceneGeneration
+    && panel.requestId.value === requestId
+  panel.abortController.value = controller
+  panel.requestId.value = requestId
+  recommendationRequestOwners.set(requestId, owner)
+
+  let postResponseReceived = false
+  try {
+    const response = await request({ requestId, authToken: owner.authToken, signal: controller.signal })
+    postResponseReceived = true
+    if (isCurrent()) adopt(response)
+  } catch (error: unknown) {
+    const cancellation = error as { name?: unknown; code?: unknown } | null
+    if (cancellation?.name === 'CanceledError' || cancellation?.code === 'ERR_CANCELED') return
+    if (!postResponseReceived && isRecommendationPostOutcomeUnknown(error)) {
+      if (!boardLifecycleDisposed) beginUnknownRecommendationRecovery(panel, requestId, isCurrent() ? error : undefined)
+      return
+    }
+    postResponseReceived = true
+    if (isCurrent()) {
+      console.error(`Failed to fetch ${panel.kind} recommendations:`, error)
+      reportRecommendationFailure(panel.kind, error, t(failureMessageKey))
+    }
+  } finally {
+    if (postResponseReceived) settleRecommendationPost(panel, requestId, controller)
+  }
 }
 
-const resetDeviceRecommendationResults = () => {
-  delete recommendationBatches.device
-  recommendationApplyFailures.device = {}
-  delete recommendationFailures.device
-  deviceRecommendations.value = []
-  deviceRecommendationMessage.value = ''
-  deviceRecommendationFilteredCount.value = 0
-  deviceRecommendationFilteredItems.value = []
-  deviceRecommendationAdjustedItems.value = []
-  deviceRecommendationRawCandidateCount.value = 0
-  deviceRecommendationInspectedCount.value = 0
-  deviceRecommendationTruncatedCount.value = 0
-  deviceRecommendationIsAppliedConfirmation.value = false
-  appliedDeviceRecommendations.value.clear()
-  applyingDeviceRecommendations.value.clear()
-  deviceRecommendationRequested.value = false
+const invalidateRecommendationPanel = (panel: RecommendationRequestHandle) => {
+  panel.epoch += 1
+  void stopActiveRecommendation(panel, { showMessage: false })
+  resetRecommendationResults(panel.kind)
 }
 
-const resetSpecRecommendationResults = () => {
-  delete recommendationBatches.spec
-  recommendationApplyFailures.spec = {}
-  delete recommendationFailures.spec
-  specRecommendations.value = []
-  specRecommendationMessage.value = ''
-  specRecommendationFilteredCount.value = 0
-  specRecommendationFilteredItems.value = []
-  specRecommendationRawCandidateCount.value = 0
-  specRecommendationInspectedCount.value = 0
-  specRecommendationTruncatedCount.value = 0
-  specRecommendationAdjustedItems.value = []
-  specRecommendationIsAppliedConfirmation.value = false
-  appliedSpecRecommendations.value.clear()
-  applyingSpecRecommendations.value.clear()
-  specRecommendationRequested.value = false
+const resetRecommendationResults = (kind: RecommendationPanelKind) => {
+  delete recommendationBatches[kind]
+  recommendationApplyFailures[kind] = {}
+  if (!recommendationFailures[kind]?.outcomeUnknown) delete recommendationFailures[kind]
+  const results = recommendationResultsByKind[kind]
+  results.candidates.value = []
+  results.message.value = ''
+  results.filteredCount.value = 0
+  results.filteredItems.value = []
+  results.adjustedItems.value = []
+  for (const count of results.candidateCounts) count.value = 0
+  results.isAppliedConfirmation.value = false
+  results.applied.value.clear()
+  results.applying.value.clear()
+  results.requested.value = false
 }
 
 // Closing a surface is not a fresh result, so it must not clear a stale flag: `lastVerificationResult`
 // and `lastSimulationResult` outlive every dialog, and reopening one must still warn that the canvas
 // changed under it. Only a new run clears the flag.
 function closeResultSurfaces() {
-  // Every in-flight run-detail load has to be invalidated, not just the fuzzing epoch: the only
-  // staleness guard in `openVerificationRun` and `selectAndPlaySimulationTrace` is
-  // `historyDetailRequests.isCurrent`, which stays true for the newest request — so a load resolving
-  // after this ran would repopulate the surface it just cleared. Same defect that let a dismissed
-  // verification dialog reopen itself.
+  // A pending detail must not restore a surface after workspace teardown.
   historyDetailRequests.invalidate()
   fuzzingResultRequestEpoch += 1
   verificationResult.value = null
@@ -7571,89 +7107,6 @@ function closeResultSurfaces() {
   fuzzingError.value = null
   fuzzingResultLoading.value = false
   showFuzzingResultDialog.value = false
-}
-
-const fetchRuleRecommendations = async () => {
-  if (isRecommendationRequestActive(isRecommendingRules.value, ruleRecommendationRequestId.value)) {
-    ruleRecommendationRequestEpoch += 1
-    await stopActiveRecommendation(ruleRecommendationPanel)
-    return
-  }
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return
-  }
-  if (!ensureBoardDataReady(['nodes', 'templates', 'rules'])) return
-
-  if (!canGenerateRecommendations('rule')) return
-
-  const requestOwner = captureRecommendationRequestOwner()
-  if (!requestOwner) return
-
-  isRecommendingRules.value = true
-  resetRuleRecommendationResults()
-  ruleRecommendationRequested.value = true
-  const requestEpoch = ++ruleRecommendationRequestEpoch
-  const requestSceneGeneration = recommendationSceneGeneration
-  const controller = new AbortController()
-  const requestId = crypto.randomUUID()
-  ruleRecommendationAbortController.value = controller
-  ruleRecommendationRequestId.value = requestId
-  recommendationRequestOwners.set(requestId, requestOwner)
-  recommendationProgressRequestId.value = requestId
-  let postTerminal = false
-  try {
-    const response = await rulesApi.recommendRules(
-      {
-        requestId,
-        authToken: requestOwner.authToken,
-        signal: controller.signal
-      },
-      undefined,
-      locale.value,
-      ruleRecommendationFilters.userRequirement
-    )
-    postTerminal = true
-    if (requestEpoch !== ruleRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-    ruleRecommendations.value = response.recommendations
-    ruleRecommendationMessage.value = localizedRecommendationText(
-      response.message,
-      t('app.recommendationsFound', { count: response.count })
-    )
-    ruleRecommendationFilteredCount.value = response.filteredCount
-    ruleRecommendationFilteredItems.value = response.filteredItems
-    ruleRecommendationAdjustedItems.value = response.adjustedItems
-    ruleRecommendationRawCandidateCount.value = response.rawCandidateCount
-    ruleRecommendationInspectedCount.value = response.inspectedCount
-    ruleRecommendationTruncatedCount.value = response.truncatedCount
-  } catch (error: any) {
-    // 如果是取消请求，不显示错误
-    if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
-      return
-    }
-    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(ruleRecommendationPanel, requestId,
-        requestEpoch === ruleRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
-      return
-    }
-    postTerminal = true
-    if (requestEpoch !== ruleRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-    console.error('Failed to fetch rule recommendations:', error)
-    reportRecommendationFailure('rule', error, t('app.failedToFetchRuleRecommendations'))
-  } finally {
-    if (postTerminal) {
-      settleRecommendationPost(ruleRecommendationPanel, requestId, controller)
-    }
-  }
-}
-
-// 关闭推荐面板
-const invalidateRuleRecommendations = () => {
-  ruleRecommendationRequestEpoch += 1
-  void stopActiveRecommendation(ruleRecommendationPanel, { showMessage: false })
-  resetRuleRecommendationResults()
 }
 
 // ==== Device Recommendation Logic ====
@@ -7668,13 +7121,10 @@ const deviceRecommendationTruncatedCount = ref(0)
 const deviceRecommendationIsAppliedConfirmation = ref(false)
 const appliedDeviceRecommendations = ref<Set<number>>(new Set())
 const applyingDeviceRecommendations = ref<Set<number>>(new Set())
-const deviceRecommendationAbortController = ref<AbortController | null>(null)
-const deviceRecommendationRequestId = ref<string | null>(null)
 const deviceRecommendationRequested = ref(false)
 const deviceRecommendationFilters = reactive({
   userRequirement: ''
 })
-let deviceRecommendationRequestEpoch = 0
 
 // ==== Specification Recommendation Logic ====
 const specRecommendations = ref<SpecificationRecommendation[]>([])
@@ -7697,46 +7147,65 @@ const specRecommendationTruncatedCount = ref(0)
 const specRecommendationIsAppliedConfirmation = ref(false)
 const appliedSpecRecommendations = ref<Set<number>>(new Set())
 const applyingSpecRecommendations = ref<Set<number>>(new Set())
-const specRecommendationAbortController = ref<AbortController | null>(null)
-const specRecommendationRequestId = ref<string | null>(null)
 const specRecommendationRequested = ref(false)
 const specRecommendationFilters = reactive({
   userRequirement: ''
 })
-let specRecommendationRequestEpoch = 0
 
-/**
- * One handle per recommendation panel, so the shared ownership / cancellation / recovery
- * machinery is told which panel to act on instead of receiving its refs one by one.
- */
 const ruleRecommendationPanel: RecommendationRequestHandle = {
   kind: 'rule',
-  requestId: ruleRecommendationRequestId,
-  abortController: ruleRecommendationAbortController,
+  requestId: ref<string | null>(null),
+  abortController: ref<AbortController | null>(null),
   running: isRecommendingRules,
+  requested: ruleRecommendationRequested,
+  epoch: 0,
   cancelledMessageKey: 'app.ruleRecommendationCancelled'
 }
 const deviceRecommendationPanel: RecommendationRequestHandle = {
   kind: 'device',
-  requestId: deviceRecommendationRequestId,
-  abortController: deviceRecommendationAbortController,
+  requestId: ref<string | null>(null),
+  abortController: ref<AbortController | null>(null),
   running: isRecommendingDevices,
+  requested: deviceRecommendationRequested,
+  epoch: 0,
   cancelledMessageKey: 'app.deviceRecommendationCancelled'
 }
 const specRecommendationPanel: RecommendationRequestHandle = {
   kind: 'spec',
-  requestId: specRecommendationRequestId,
-  abortController: specRecommendationAbortController,
+  requestId: ref<string | null>(null),
+  abortController: ref<AbortController | null>(null),
   running: isRecommendingSpecs,
+  requested: specRecommendationRequested,
+  epoch: 0,
   cancelledMessageKey: 'app.specificationRecommendationCancelled'
 }
 
+const recommendationPanels = [ruleRecommendationPanel, deviceRecommendationPanel, specRecommendationPanel]
+const trackedRecommendationPanel = computed(() => recommendationPanels.find(panel => panel.requestId.value !== null))
+
+watch(() => trackedRecommendationPanel.value?.requestId.value, requestId => {
+  if (recommendationProgressTimer !== null) {
+    clearInterval(recommendationProgressTimer)
+    recommendationProgressTimer = null
+  }
+  recommendationProgressElapsed.value = 0
+  recommendationProgressStage.value = 'QUEUED'
+  const panel = trackedRecommendationPanel.value
+  if (!requestId || !panel) return
+  const startedAt = Date.now()
+  void refreshRecommendationProgress(panel)
+  recommendationProgressTimer = setInterval(() => {
+    if (panel.requestId.value !== requestId) return
+    if (panel.running.value) recommendationProgressElapsed.value = Math.floor((Date.now() - startedAt) / 1000)
+    void refreshRecommendationProgress(panel)
+  }, 1000)
+})
+
+const recommendationActionLabel = (panel: RecommendationRequestHandle, stopKey: string) =>
+  t(panel.running.value ? stopKey : panel.requestId.value ? 'app.recommendationCheckStatus' : 'app.generateRecommendations')
+
 const prepareActiveRecommendationsForLogout = async (): Promise<InteractiveLogoutPreparation> => {
-  const activeRequests = [
-    ruleRecommendationPanel,
-    deviceRecommendationPanel,
-    specRecommendationPanel
-  ].flatMap(panel => {
+  const activeRequests = recommendationPanels.flatMap(panel => {
     const requestId = panel.requestId.value
     const owner = requestId ? getRecommendationRequestOwner(requestId) : null
     return requestId ? [{ panel, requestId, owner }] : []
@@ -7762,50 +7231,32 @@ const prepareActiveRecommendationsForLogout = async (): Promise<InteractiveLogou
   return outcomes.every(outcome => outcome === 'ready') ? 'ready' : 'outcome-unknown'
 }
 
-const fetchDeviceRecommendations = async () => {
-  if (isRecommendationRequestActive(isRecommendingDevices.value, deviceRecommendationRequestId.value)) {
-    deviceRecommendationRequestEpoch += 1
-    await stopActiveRecommendation(deviceRecommendationPanel)
-    return
-  }
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return
-  }
-  if (!ensureBoardDataReady(['nodes', 'templates'])) return
-
-  if (!canGenerateRecommendations('device')) return
-
-  const requestOwner = captureRecommendationRequestOwner()
-  if (!requestOwner) return
-  
-  isRecommendingDevices.value = true
-  resetDeviceRecommendationResults()
-  deviceRecommendationRequested.value = true
-  const requestEpoch = ++deviceRecommendationRequestEpoch
-  const requestSceneGeneration = recommendationSceneGeneration
-  const controller = new AbortController()
-  const requestId = crypto.randomUUID()
-  deviceRecommendationAbortController.value = controller
-  deviceRecommendationRequestId.value = requestId
-  recommendationRequestOwners.set(requestId, requestOwner)
-  recommendationProgressRequestId.value = requestId
-  let postTerminal = false
-
-  try {
-    const response = await boardApi.recommendRelatedDevices(
-      {
-        requestId,
-        authToken: requestOwner.authToken,
-        signal: controller.signal
-      },
-      undefined,
-      locale.value,
-      deviceRecommendationFilters.userRequirement
+const fetchRuleRecommendations = () => generateRecommendations({
+  panel: ruleRecommendationPanel,
+  requiredKeys: ['nodes', 'templates', 'rules'],
+  request: options => recommendRules(options, undefined, locale.value, ruleRecommendationFilters.userRequirement),
+  failureMessageKey: 'app.failedToFetchRuleRecommendations',
+  adopt: response => {
+    ruleRecommendations.value = response.recommendations
+    ruleRecommendationMessage.value = localizedRecommendationText(
+      response.message,
+      t('app.recommendationsFound', { count: response.count })
     )
-    postTerminal = true
-    if (requestEpoch !== deviceRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
+    ruleRecommendationFilteredCount.value = response.filteredCount
+    ruleRecommendationFilteredItems.value = response.filteredItems
+    ruleRecommendationAdjustedItems.value = response.adjustedItems
+    ruleRecommendationRawCandidateCount.value = response.rawCandidateCount
+    ruleRecommendationInspectedCount.value = response.inspectedCount
+    ruleRecommendationTruncatedCount.value = response.truncatedCount
+  }
+})
+
+const fetchDeviceRecommendations = () => generateRecommendations({
+  panel: deviceRecommendationPanel,
+  requiredKeys: ['nodes', 'templates'],
+  request: options => boardApi.recommendRelatedDevices(options, undefined, locale.value, deviceRecommendationFilters.userRequirement),
+  failureMessageKey: 'app.failedToFetchDeviceRecommendations',
+  adopt: response => {
     deviceRecommendations.value = response.recommendations
     deviceRecommendationMessage.value = localizedRecommendationText(
       response.message,
@@ -7817,79 +7268,15 @@ const fetchDeviceRecommendations = async () => {
     deviceRecommendationRawCandidateCount.value = response.rawCandidateCount
     deviceRecommendationInspectedCount.value = response.inspectedCount
     deviceRecommendationTruncatedCount.value = response.truncatedCount
-  } catch (error: any) {
-    if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
-      return
-    }
-    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(deviceRecommendationPanel, requestId,
-        requestEpoch === deviceRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
-      return
-    }
-    postTerminal = true
-    if (requestEpoch !== deviceRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-    console.error('Failed to fetch device recommendations:', error)
-    reportRecommendationFailure('device', error, t('app.failedToFetchDeviceRecommendations'))
-  } finally {
-    if (postTerminal) {
-      settleRecommendationPost(deviceRecommendationPanel, requestId, controller)
-    }
   }
-}
+})
 
-// 关闭设备推荐面板
-const invalidateDeviceRecommendations = () => {
-  deviceRecommendationRequestEpoch += 1
-  void stopActiveRecommendation(deviceRecommendationPanel, { showMessage: false })
-  resetDeviceRecommendationResults()
-}
-
-// 获取规约推荐
-const fetchSpecRecommendations = async () => {
-  if (isRecommendationRequestActive(isRecommendingSpecs.value, specRecommendationRequestId.value)) {
-    specRecommendationRequestEpoch += 1
-    await stopActiveRecommendation(specRecommendationPanel)
-    return
-  }
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return
-  }
-  if (!ensureBoardDataReady(['nodes', 'templates', 'rules', 'specs'])) return
-
-  if (!canGenerateRecommendations('spec')) return
-
-  const requestOwner = captureRecommendationRequestOwner()
-  if (!requestOwner) return
-
-  isRecommendingSpecs.value = true
-  resetSpecRecommendationResults()
-  specRecommendationRequested.value = true
-  const requestEpoch = ++specRecommendationRequestEpoch
-  const requestSceneGeneration = recommendationSceneGeneration
-  const controller = new AbortController()
-  const requestId = crypto.randomUUID()
-  specRecommendationAbortController.value = controller
-  specRecommendationRequestId.value = requestId
-  recommendationRequestOwners.set(requestId, requestOwner)
-  recommendationProgressRequestId.value = requestId
-  let postTerminal = false
-
-  try {
-    const response = await boardApi.recommendSpecifications(
-      {
-        requestId,
-        authToken: requestOwner.authToken,
-        signal: controller.signal
-      },
-      undefined,
-      locale.value,
-      specRecommendationFilters.userRequirement
-    )
-    postTerminal = true
-    if (requestEpoch !== specRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
+const fetchSpecRecommendations = () => generateRecommendations({
+  panel: specRecommendationPanel,
+  requiredKeys: ['nodes', 'templates', 'rules', 'specs'],
+  request: options => boardApi.recommendSpecifications(options, undefined, locale.value, specRecommendationFilters.userRequirement),
+  failureMessageKey: 'app.failedToFetchSpecificationRecommendations',
+  adopt: response => {
     specRecommendations.value = response.recommendations
     specRecommendationMessage.value = localizedRecommendationText(
       response.message,
@@ -7901,39 +7288,24 @@ const fetchSpecRecommendations = async () => {
     specRecommendationInspectedCount.value = response.inspectedCount
     specRecommendationTruncatedCount.value = response.truncatedCount
     specRecommendationAdjustedItems.value = response.adjustedItems || []
-  } catch (error: any) {
-    if (error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
-      return
-    }
-    if (!postTerminal && isRecommendationPostOutcomeUnknown(error)) {
-      beginUnknownRecommendationRecovery(specRecommendationPanel, requestId,
-        requestEpoch === specRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration ? error : undefined)
-      return
-    }
-    postTerminal = true
-    if (requestEpoch !== specRecommendationRequestEpoch
-      || requestSceneGeneration !== recommendationSceneGeneration) return
-    console.error('Failed to fetch specification recommendations:', error)
-    reportRecommendationFailure('spec', error, t('app.failedToFetchSpecificationRecommendations'))
-  } finally {
-    if (postTerminal) {
-      settleRecommendationPost(specRecommendationPanel, requestId, controller)
-    }
   }
-}
+})
 
-// 关闭规约推荐面板
-const invalidateSpecRecommendations = () => {
-  specRecommendationRequestEpoch += 1
-  void stopActiveRecommendation(specRecommendationPanel, { showMessage: false })
-  resetSpecRecommendationResults()
-}
+const invalidateRuleRecommendations = () =>
+  invalidateRecommendationPanel(ruleRecommendationPanel)
+
+const invalidateDeviceRecommendations = () =>
+  invalidateRecommendationPanel(deviceRecommendationPanel)
+
+const invalidateSpecRecommendations = () =>
+  invalidateRecommendationPanel(specRecommendationPanel)
 
 type RecommendationBatchState = {
   kind: 'rule' | 'device' | 'spec'
   running: boolean
   applied: number
   total: number
+  checkingSimilarity: boolean
   deviceOrigin?: { x: number; y: number }
 }
 const recommendationBatches = reactive<Partial<Record<RecommendationPanelKind, RecommendationBatchState>>>({})
@@ -7944,6 +7316,7 @@ const isRecommendationBatchLocked = (kind: RecommendationBatchState['kind']) =>
 const recommendationBatchBlockedReason = (kind: RecommendationBatchState['kind']): string => {
   const batch = recommendationBatches[kind]
   if (batch) {
+    if (batch.checkingSimilarity) return t('app.checkingAiSimilarity')
     return t(batch.running ? 'app.recommendationBatchProgress'
       : batch.applied === batch.total ? 'app.recommendationBatchComplete' : 'app.recommendationBatchStopped',
     { count: batch.applied, total: batch.total })
@@ -7968,27 +7341,42 @@ const applyAllRecommendations = async (kind: RecommendationBatchState['kind']) =
   const generation = recommendationSceneGeneration
   const authEpoch = boardAuthScopeEpoch
   const token = getToken()
-  recommendationBatches[kind] = { kind, running: true, applied: 0, total: candidates.length, deviceOrigin }
+  recommendationBatches[kind] = {
+    kind, running: true, applied: 0, total: candidates.length, checkingSimilarity: kind === 'rule', deviceOrigin
+  }
   const batch = recommendationBatches[kind]!
   const isCurrent = () => recommendationBatches[kind] === batch && generation === recommendationSceneGeneration
     && isCurrentBoardAuthScope(authEpoch) && isCurrentSessionToken(token)
   let index = 0
   try {
-    // Each item uses the ordinary targeted write and its own undo entry. A failed or
-    // unconfirmed item must stop the batch before any later item is dispatched.
+    let checkedRules: CheckedRuleRecommendation[] | undefined
+    if (kind === 'rule') {
+      const drafts = ruleRecommendations.value.map((rec, index) => materializeRuleRecommendation(rec, `rule_${index}`))
+      const similarities = await boardApi.checkRuleSimilarityBatch(drafts)
+      checkedRules = drafts.map((rule, index) => ({ rule, similarity: similarities[index]! }))
+      batch.checkingSimilarity = false
+    }
+    // Snapshot recovery can retain a card. Advancing the batch requires a write receipt.
     for (; index < candidates.length && isCurrent(); index++) {
       if (recommendationApplyFailures[kind][index]?.outcomeUnknown) break
-      if (kind === 'rule') await applyRecommendation(candidates[index] as RuleRecommendation, index, true)
-      else if (kind === 'device') await applyDeviceRecommendation(candidates[index] as DeviceRecommendation, index, true)
-      else await applySpecRecommendation(candidates[index] as SpecificationRecommendation, index, true)
-      if (!isCurrent() || !applied.has(index)) break
+      let receipt: RecommendationWriteReceipt
+      if (checkedRules) {
+        receipt = await applyRecommendation(candidates[index] as RuleRecommendation, index, checkedRules[index]!)
+      } else if (kind === 'device') {
+        receipt = await applyDeviceRecommendation(candidates[index] as DeviceRecommendation, index, true)
+      } else {
+        receipt = await applySpecRecommendation(candidates[index] as SpecificationRecommendation, index, true)
+      }
+      if (!isCurrent() || receipt !== 'confirmed') break
       batch.applied += 1
     }
   } catch (error) {
     if (isCurrent()) reportRecommendationApplyFailure(kind, index, error,
-      t('app.recommendationBatchStopped', { count: batch.applied, total: batch.total }),
-      !isDefinitiveMutationRejection(error))
+      batch.checkingSimilarity ? t('app.recommendationBatchPreflightFailed')
+        : t('app.recommendationBatchStopped', { count: batch.applied, total: batch.total }),
+      !batch.checkingSimilarity && !isDefinitiveMutationRejection(error))
   } finally {
+    batch.checkingSimilarity = false
     batch.running = false
     if (isCurrent()) recommendationSceneGeneration += 1
   }
@@ -8001,92 +7389,83 @@ const keepAppliedRecommendationAdjustments = (
   .filter(item => item.index === undefined || item.index === appliedIndex + 1)
   .map(item => item.index === undefined ? item : { ...item, index: 1 })
 
+const recommendationResultsByKind = {
+  rule: {
+    candidates: ruleRecommendations,
+    message: ruleRecommendationMessage,
+    filteredCount: ruleRecommendationFilteredCount,
+    filteredItems: ruleRecommendationFilteredItems,
+    adjustedItems: ruleRecommendationAdjustedItems,
+    candidateCounts: [ruleRecommendationRawCandidateCount, ruleRecommendationInspectedCount, ruleRecommendationTruncatedCount],
+    isAppliedConfirmation: ruleRecommendationIsAppliedConfirmation,
+    requested: ruleRecommendationRequested,
+    applied: appliedRuleRecommendations,
+    applying: applyingRuleRecommendations
+  },
+  device: {
+    candidates: deviceRecommendations,
+    message: deviceRecommendationMessage,
+    filteredCount: deviceRecommendationFilteredCount,
+    filteredItems: deviceRecommendationFilteredItems,
+    adjustedItems: deviceRecommendationAdjustedItems,
+    candidateCounts: [deviceRecommendationRawCandidateCount, deviceRecommendationInspectedCount, deviceRecommendationTruncatedCount],
+    isAppliedConfirmation: deviceRecommendationIsAppliedConfirmation,
+    requested: deviceRecommendationRequested,
+    applied: appliedDeviceRecommendations,
+    applying: applyingDeviceRecommendations
+  },
+  spec: {
+    candidates: specRecommendations,
+    message: specRecommendationMessage,
+    filteredCount: specRecommendationFilteredCount,
+    filteredItems: specRecommendationFilteredItems,
+    adjustedItems: specRecommendationAdjustedItems,
+    candidateCounts: [specRecommendationRawCandidateCount, specRecommendationInspectedCount, specRecommendationTruncatedCount],
+    isAppliedConfirmation: specRecommendationIsAppliedConfirmation,
+    requested: specRecommendationRequested,
+    applied: appliedSpecRecommendations,
+    applying: applyingSpecRecommendations
+  }
+}
+
+const invalidateOtherRecommendations = (kind: RecommendationPanelKind) => {
+  if (kind !== 'rule') invalidateRuleRecommendations()
+  if (kind !== 'device') invalidateDeviceRecommendations()
+  if (kind !== 'spec') invalidateSpecRecommendations()
+}
+
 const preserveAppliedRecommendationAfterSceneChange = (
-  kind: 'rule' | 'device' | 'spec',
+  kind: RecommendationPanelKind,
   appliedIndex: number
 ) => {
   if (recommendationBatch.value?.running && recommendationBatch.value.kind === kind) {
     // Only this explicitly selected batch survives its own appends. Other board edits
     // still invalidate the generation and stop the loop, including cross-tab refreshes.
-    if (kind !== 'rule') invalidateRuleRecommendations()
-    if (kind !== 'device') invalidateDeviceRecommendations()
-    if (kind !== 'spec') invalidateSpecRecommendations()
+    invalidateOtherRecommendations(kind)
     return
   }
-  recommendationApplyFailures[kind] = {}
-  if (kind === 'rule') {
-    const appliedRecommendation = ruleRecommendations.value[appliedIndex]
-    if (!appliedRecommendation) {
-      invalidateRecommendationsForSceneChange({ notify: true })
-      return
-    }
-    const hadOtherCandidates = ruleRecommendations.value.length > 1
-    recommendationSceneGeneration += 1
-    invalidateDeviceRecommendations()
-    invalidateSpecRecommendations()
-    ruleRecommendations.value = [appliedRecommendation]
-    ruleRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
-    ruleRecommendationFilteredCount.value = 0
-    ruleRecommendationFilteredItems.value = []
-    ruleRecommendationAdjustedItems.value = keepAppliedRecommendationAdjustments(
-      ruleRecommendationAdjustedItems.value,
-      appliedIndex
-    )
-    ruleRecommendationRawCandidateCount.value = 0
-    ruleRecommendationInspectedCount.value = 0
-    ruleRecommendationTruncatedCount.value = 0
-    ruleRecommendationIsAppliedConfirmation.value = true
-    appliedRuleRecommendations.value = new Set([0])
-    applyingRuleRecommendations.value = new Set()
-    return
-  }
-  if (kind === 'device') {
-    const appliedRecommendation = deviceRecommendations.value[appliedIndex]
-    if (!appliedRecommendation) {
-      invalidateRecommendationsForSceneChange({ notify: true })
-      return
-    }
-    const hadOtherCandidates = deviceRecommendations.value.length > 1
-    recommendationSceneGeneration += 1
-    invalidateRuleRecommendations()
-    invalidateSpecRecommendations()
-    deviceRecommendations.value = [appliedRecommendation]
-    deviceRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
-    deviceRecommendationFilteredCount.value = 0
-    deviceRecommendationFilteredItems.value = []
-    deviceRecommendationAdjustedItems.value = keepAppliedRecommendationAdjustments(
-      deviceRecommendationAdjustedItems.value,
-      appliedIndex
-    )
-    deviceRecommendationRawCandidateCount.value = 0
-    deviceRecommendationInspectedCount.value = 0
-    deviceRecommendationTruncatedCount.value = 0
-    deviceRecommendationIsAppliedConfirmation.value = true
-    appliedDeviceRecommendations.value = new Set([0])
-    applyingDeviceRecommendations.value = new Set()
-    return
-  }
-
-  const appliedRecommendation = specRecommendations.value[appliedIndex]
-  if (!appliedRecommendation) {
+  const failure = recommendationApplyFailures[kind][appliedIndex]
+  const unconfirmed = failure?.outcomeUnknown ? failure : null
+  recommendationApplyFailures[kind] = unconfirmed ? { 0: unconfirmed } : {}
+  const results = recommendationResultsByKind[kind]
+  const { candidates } = results
+  if (!candidates.value[appliedIndex]) {
     invalidateRecommendationsForSceneChange({ notify: true })
     return
   }
-  const hadOtherCandidates = specRecommendations.value.length > 1
+  const retainedCandidates = candidates.value.slice(appliedIndex, appliedIndex + 1)
+  const hadOtherCandidates = candidates.value.length > 1
   recommendationSceneGeneration += 1
-  invalidateRuleRecommendations()
-  invalidateDeviceRecommendations()
-  specRecommendations.value = [appliedRecommendation]
-  specRecommendationMessage.value = hadOtherCandidates ? t('app.appliedRecommendationOnlyNotice') : ''
-  specRecommendationFilteredCount.value = 0
-  specRecommendationFilteredItems.value = []
-  specRecommendationRawCandidateCount.value = 0
-  specRecommendationInspectedCount.value = 0
-  specRecommendationTruncatedCount.value = 0
-  specRecommendationAdjustedItems.value = []
-  specRecommendationIsAppliedConfirmation.value = true
-  appliedSpecRecommendations.value = new Set([0])
-  applyingSpecRecommendations.value = new Set()
+  invalidateOtherRecommendations(kind)
+  candidates.value = retainedCandidates
+  results.message.value = hadOtherCandidates && !unconfirmed ? t('app.appliedRecommendationOnlyNotice') : ''
+  results.filteredCount.value = 0
+  results.filteredItems.value = []
+  results.adjustedItems.value = kind === 'spec' ? [] : keepAppliedRecommendationAdjustments(results.adjustedItems.value, appliedIndex)
+  for (const count of results.candidateCounts) count.value = 0
+  results.isAppliedConfirmation.value = !unconfirmed
+  results.applied.value = new Set(unconfirmed ? [] : [0])
+  results.applying.value = new Set()
 }
 
 const invalidateRecommendationsForSceneChange = ({ notify = false }: { notify?: boolean } = {}) => {
@@ -8106,6 +7485,8 @@ const invalidateRecommendationsForSceneChange = ({ notify = false }: { notify?: 
 
 const invalidateForFullSceneReplacement = () => {
   boardSceneGeneration += 1
+  unconfirmedRuleOrder.value = null
+  unconfirmedEnvironmentPatches.clear()
   // Scene import/clear opt out of fingerprint tracking, so mark staleness explicitly here.
   markVerificationResultStale()
   invalidateRecommendationsForSceneChange()
@@ -8132,7 +7513,9 @@ const recommendedSpecTemplateLabel = (templateId: unknown): string => {
 }
 
 // 应用规约推荐 - 将推荐的规约添加到画布
-const applySpecRecommendation = async (recommendation: SpecificationRecommendation, index: number, fromBatch = false) => {
+const applySpecRecommendation = async (
+  recommendation: SpecificationRecommendation, index: number, fromBatch = false
+): Promise<RecommendationWriteReceipt> => {
   if (!fromBatch && isRecommendationBatchLocked('spec')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (!ensureBoardDataReady(['nodes', 'templates', 'specs'])) return
@@ -8141,15 +7524,15 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
     return
   }
   if (applyingSpecRecommendations.value.has(index) || recommendationApplyFailures.spec[index]?.outcomeUnknown) return
-  const recommendationEpoch = specRecommendationRequestEpoch
+  const recommendationEpoch = specRecommendationPanel.epoch
   const requestSceneGeneration = recommendationSceneGeneration
   const requestToken = getToken()
   const applyAuthScopeEpoch = boardAuthScopeEpoch
   const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
   const isApplyCandidateCurrent = () => isApplyAccountCurrent()
-    && recommendationEpoch === specRecommendationRequestEpoch && requestSceneGeneration === recommendationSceneGeneration
+    && recommendationEpoch === specRecommendationPanel.epoch && requestSceneGeneration === recommendationSceneGeneration
   delete recommendationApplyFailures.spec[index]
-  let recommendationConfirmedApplied = false
+  let keepRecommendation = false
 
   // Reject an invalid recommendation before issuing the targeted create request.
   const rawTemplateId = recommendation.templateId
@@ -8214,55 +7597,40 @@ const applySpecRecommendation = async (recommendation: SpecificationRecommendati
   applyingSpecRecommendations.value.add(index)
   try {
     if (!isApplyCandidateCurrent() || isSceneReplacementInProgress.value) return
-    await enqueueBoardMutation(async () => {
+    return await enqueueBoardMutation<RecommendationWriteReceipt>(async () => {
       if (!isApplyCandidateCurrent()
         || !isBoardDataReady.value
         || isSceneReplacementInProgress.value) return
-      try {
-        const mutation = await boardApi.addSpec(newSpec)
-        if (!isApplyAccountCurrent()) return
+      const receipt = await readSpecificationCreationReceipt(newSpec, isApplyAccountCurrent)
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        const { mutation } = receipt
         commitSemanticScene({ specs: mutation.currentItems, availability: mutation })
-        recommendationConfirmedApplied = true
+        keepRecommendation = true
         if (isApplyCandidateCurrent()) {
           appliedSpecRecommendations.value.add(index)
         }
-      } catch (error: any) {
-        if (!isApplyAccountCurrent()) return
-        console.error('Failed to save specification:', error)
-        let refreshed = false
-        if (!isDefinitiveMutationRejection(error)) {
-          refreshed = await refreshSpecifications(requestToken)
-          if (!isApplyAccountCurrent()) return
-          await reloadUndoAvailability()
-          if (!isApplyAccountCurrent()) return
-          if (refreshed && specifications.value.some(spec => isSameSpecification(spec, newSpec, deviceModeCount))) {
-            recommendationConfirmedApplied = true
-            if (isApplyCandidateCurrent()) {
-              appliedSpecRecommendations.value.add(index)
-              notifyBlocked(t('app.specCreateOutcomeRefreshed'))
-            }
-            return
-          }
-        }
-        if (!isApplyCandidateCurrent()) return
-        if (error?.response?.data?.data?.reasonCode === 'DUPLICATE_SPECIFICATION') {
-          notifyBlocked(t('app.specDuplicate'))
-          return
-        }
-        const outcomeUnknown = !isDefinitiveMutationRejection(error)
-        reportRecommendationApplyFailure('spec', index, error, t(outcomeUnknown
-          ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
-          : 'app.failedToSaveSpecification'), outcomeUnknown)
+        return 'confirmed'
+      }
+      if (!isApplyCandidateCurrent()) return
+      if (receipt.status === 'unconfirmed') {
+        keepRecommendation = true
+        reportRecommendationApplyFailure('spec', index, receipt.error,
+          specificationCreateRecoveryMessage(newSpec, receipt.snapshotRefreshed), true)
+      } else if (isSpecificationDuplicateRejection(receipt.error)) {
+        notifyBlocked(t('app.specDuplicate'))
+      } else {
+        reportRecommendationApplyFailure('spec', index, receipt.error, t('app.failedToSaveSpecification'))
       }
     }, {
       onSemanticChange: () => handleRecommendationApplySceneChange(
-        recommendationConfirmedApplied,
+        keepRecommendation,
         () => preserveAppliedRecommendationAfterSceneChange('spec', index),
         () => invalidateRecommendationsForSceneChange({ notify: true })
       )
     })
   } finally {
-    if (recommendationEpoch === specRecommendationRequestEpoch) {
+    if (recommendationEpoch === specRecommendationPanel.epoch) {
       applyingSpecRecommendations.value.delete(index)
     }
   }
@@ -8374,7 +7742,9 @@ const buildRecommendedDeviceRuntime = (recommendation: DeviceRecommendation): Re
 }
 
 // 应用设备推荐 - 将推荐的设备添加到画布
-const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, index: number, fromBatch = false) => {
+const applyDeviceRecommendation = async (
+  recommendation: DeviceRecommendation, index: number, fromBatch = false
+): Promise<RecommendationWriteReceipt> => {
   if (!fromBatch && isRecommendationBatchLocked('device')) return
   if (!ensurePlaybackClosedForMutation()) return
   if (appliedDeviceRecommendations.value.has(index)) {
@@ -8382,15 +7752,15 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
     return
   }
   if (applyingDeviceRecommendations.value.has(index) || recommendationApplyFailures.device[index]?.outcomeUnknown) return
-  const recommendationEpoch = deviceRecommendationRequestEpoch
+  const recommendationEpoch = deviceRecommendationPanel.epoch
   const requestSceneGeneration = recommendationSceneGeneration
   const requestToken = getToken()
   const applyAuthScopeEpoch = boardAuthScopeEpoch
   const isApplyAccountCurrent = () => isCurrentBoardAuthScope(applyAuthScopeEpoch) && isCurrentSessionToken(requestToken)
   delete recommendationApplyFailures.device[index]
-  let recommendationConfirmedApplied = false
+  let keepRecommendation = false
   const isApplyCandidateCurrent = () =>
-    isApplyAccountCurrent() && recommendationEpoch === deviceRecommendationRequestEpoch
+    isApplyAccountCurrent() && recommendationEpoch === deviceRecommendationPanel.epoch
     && requestSceneGeneration === recommendationSceneGeneration
   const isRecommendationCurrent = () => isApplyCandidateCurrent()
     && isBoardDataReady.value
@@ -8447,40 +7817,36 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
   
   applyingDeviceRecommendations.value.add(index)
   try {
-    const outcome = await createDeviceInstanceAt(
+    const receipt = await createDeviceInstanceAt(
       template,
-      center,
+      () => center,
       confirmedLabel,
       runtime,
       {
         admissionGuard: isRecommendationCurrent,
-        onConfirmedCreate: () => { recommendationConfirmedApplied = true },
-        onFailure: (error, refreshed) => {
+        onReceipt: receipt => {
           if (!isApplyCandidateCurrent()) return
-          const outcomeUnknown = !isDefinitiveMutationRejection(error)
-          reportRecommendationApplyFailure('device', index, error, t(outcomeUnknown
-            ? refreshed ? 'app.recommendationApplyOutcomeRefreshed' : 'app.recommendationApplyOutcomeUnknown'
-            : 'app.saveNodesFailed'), outcomeUnknown)
+          keepRecommendation = receipt.status !== 'rejected'
+          if (receipt.status === 'confirmed') appliedDeviceRecommendations.value.add(index)
+          else if (receipt.status === 'unconfirmed') {
+            reportRecommendationApplyFailure('device', index, receipt.error, unconfirmedDeviceCreationMessage(receipt), true)
+          } else {
+            reportRecommendationApplyFailure('device', index, receipt.error, t('app.saveNodesFailed'))
+          }
         },
         onSemanticChange: () => handleRecommendationApplySceneChange(
-          recommendationConfirmedApplied,
+          keepRecommendation,
           () => preserveAppliedRecommendationAfterSceneChange('device', index),
           () => invalidateRecommendationsForSceneChange({ notify: true })
         )
       }
     )
-    if (!isApplyAccountCurrent()) return
-    if (isApplyCandidateCurrent()) {
-      appliedDeviceRecommendations.value.add(index)
+    if (isApplyAccountCurrent() && receipt?.status === 'confirmed') {
+      reportEnvironmentChanges(receipt.environmentChanges)
+      return 'confirmed'
     }
-    reportEnvironmentChanges(outcome.environmentChanges)
-    if (!outcome.responseConfirmed && isApplyCandidateCurrent()) {
-      notifyBlocked(t('app.deviceCreateOutcomeRefreshed', { name: outcome.device.label }))
-    }
-  } catch {
-    // The creating helper reports the failure to this candidate's owner.
   } finally {
-    if (recommendationEpoch === deviceRecommendationRequestEpoch) {
+    if (recommendationEpoch === deviceRecommendationPanel.epoch) {
       applyingDeviceRecommendations.value.delete(index)
     }
   }
@@ -8489,29 +7855,37 @@ const applyDeviceRecommendation = async (recommendation: DeviceRecommendation, i
 // ==== Simulation Logic ====
 const isSimulating = ref(false)
 const simulationError = ref<RunFailure | null>(null)
-// Result of the last successful simulation, kept so its logs / NuSMV diagnostics stay reachable while
-// the timeline is open. The result dialog only auto-opens on error; on success we go straight to the
-// timeline (by design) and let the user open the logs on demand via openSimulationLogs().
+// The adopted simulation and its freshness outlive the playback surface.
 const lastSimulationResult = ref<SimulationResultView | null>(null)
 // Only notification handles live here; each notice owns its local result through its action closure.
 const unsavedRunNotifications = new Set<() => void>()
+
+const offerDeferredRunNotice = (
+  options: Omit<Parameters<typeof notifyAvailableResult>[0], 'onAction' | 'onClose'>,
+  open: () => void
+) => {
+  const ownsRun = captureBoardRunOwner()
+  let close!: () => void
+  close = notifyAvailableResult({
+    ...options,
+    onAction: () => {
+      if (!ownsRun()) return true
+      if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
+      closeOtherWorkflowSurfaces()
+      open()
+      return true
+    },
+    onClose: () => unsavedRunNotifications.delete(close)
+  })
+  unsavedRunNotifications.add(close)
+}
+
 onBeforeUnmount(() => {
   unsavedRunNotifications.forEach(close => close())
   unsavedRunNotifications.clear()
 })
 
-/**
- * Make a completed run *the* current trajectory: the one every simulation surface describes.
- *
- * The pairing is the point. `lastSimulationResult` is the manifest the replay bar and the details dialog
- * read, and the stale flag qualifies that same manifest, so the two must be written together or the
- * banner ends up describing a different run than the header — which is what happened when each async
- * path assigned them inline. Taking the submission's scene-change count as an argument keeps the
- * comparison at the call site, where the run's own baseline is known.
- *
- * Callers must only adopt a run they are about to show or that no surface will show; a run arriving
- * behind an open replay is deferred, not adopted.
- */
+/** Adopt a completed trajectory and its freshness together before opening playback. */
 const adoptSimulationRunResult = (
   result: SimulationResultView,
   submissionSceneChanges: number
@@ -8524,7 +7898,6 @@ const adoptSimulationRunResult = (
 const adoptVerificationRunResult = (result: VerificationResult, submissionSceneChanges: number) => {
   // A history read started earlier must not replace this verdict after its URL has changed.
   historyDetailRequests.invalidate()
-  deepLinkLoadRequests.invalidate()
   verificationResult.value = result
   verificationResultStale.value = semanticSceneChangeCount !== submissionSceneChanges
   void refreshCurrentBoardModelFingerprints()
@@ -8851,7 +8224,7 @@ const simulationRunBlockedReason = computed(() => {
   if (!simulationForm.isAsync && synchronousVerificationRunning.value) {
     return t('app.formalOperationBusy')
   }
-  if (traceAnimationState.value.visible || simulationAnimationState.value.visible) {
+  if (isModelPlaybackActive.value) {
     return t('app.playbackMustCloseBeforeSimulation')
   }
   return boardRunBlockedReason.value
@@ -8953,7 +8326,6 @@ const fuzzingSettingsNotice = ref<{ key: string; params?: Record<string, number>
 const fuzzingSettingsNoticeMessage = computed(() => fuzzingSettingsNotice.value
   ? t(fuzzingSettingsNotice.value.key, fuzzingSettingsNotice.value.params || {}) : '')
 const fuzzingResultLoading = ref(false)
-const activeFuzzingFinding = ref<FuzzingFinding | null>(null)
 let fuzzingResultRequestEpoch = 0
 const fuzzingWorkloadPreview = ref<FuzzWorkloadPreview | null>(null)
 const fuzzingWorkloadPreviewLoading = ref(false)
@@ -9241,73 +8613,18 @@ onBeforeUnmount(() => {
   historyDetailRequests.invalidate()
 })
 
-const currentBoardModelFingerprints = ref<BoardModelFingerprints | null>(null)
-const loadingCurrentBoardModelFingerprints = ref(false)
-let boardModelRevision = 0
-const fingerprintRequestGuard = createLatestBoardRequestGuard()
-
-// Geometry and display names can change during canvas work without changing the model.
-const serializeBoardModelSource = (scene: BoardSemanticSnapshot) => JSON.stringify({
-  devices: scene.nodes.map(node => ({
-    id: node.id,
-    templateName: node.templateName,
-    state: node.state,
-    currentStateTrust: node.currentStateTrust,
-    currentStatePrivacy: node.currentStatePrivacy,
-    variables: node.variables,
-    privacies: node.privacies
-  })).sort((left, right) => left.id.localeCompare(right.id)),
-  rules: scene.rules,
-  specifications: scene.specifications,
-  environmentVariables: scene.environmentVariables,
-  deviceTemplates: [...scene.deviceTemplates].sort((left, right) =>
-    left.name < right.name ? -1 : left.name === right.name ? 0 : 1)
-})
-const boardModelSource = computed(() => serializeBoardModelSource({
-  nodes: nodes.value, rules: rules.value, specifications: specifications.value,
-  environmentVariables: environmentVariables.value, deviceTemplates: deviceTemplates.value
-}))
-
-const invalidateCurrentBoardModelFingerprints = () => {
-  boardModelRevision += 1
-  currentBoardModelFingerprints.value = null
-  fingerprintRequestGuard.invalidate()
-  loadingCurrentBoardModelFingerprints.value = false
-}
-
-watch(boardModelSource, invalidateCurrentBoardModelFingerprints, { flush: 'sync' })
-watch(boardModelSource, () => {
-  // Snapshot adoption already starts a read for this revision before post-flush watchers run.
-  if (!loadingCurrentBoardModelFingerprints.value) void refreshCurrentBoardModelFingerprints()
-}, { flush: 'post' })
-
-const refreshCurrentBoardModelFingerprints = async (
-  expectedModelRevision = boardModelRevision
-): Promise<BoardModelFingerprints | null> => {
-  const requestEpoch = fingerprintRequestGuard.begin()
-  currentBoardModelFingerprints.value = null
-  loadingCurrentBoardModelFingerprints.value = true
-  try {
-    const { fingerprints, scene } = await boardApi.getModelFingerprints()
-    if (boardLifecycleDisposed || !fingerprintRequestGuard.isCurrent(requestEpoch)
-      || expectedModelRevision !== boardModelRevision || hydratedBoardAuthScopeEpoch !== boardAuthScopeEpoch
-      || serializeBoardModelSource(scene) !== boardModelSource.value) {
-      return null
-    }
-    currentBoardModelFingerprints.value = fingerprints
-    return fingerprints
-  } catch {
-    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)
-      && expectedModelRevision === boardModelRevision) {
-      currentBoardModelFingerprints.value = null
-    }
-    return null
-  } finally {
-    if (!boardLifecycleDisposed && fingerprintRequestGuard.isCurrent(requestEpoch)) {
-      loadingCurrentBoardModelFingerprints.value = false
-    }
-  }
-}
+const {
+  fingerprints: currentBoardModelFingerprints,
+  loading: loadingCurrentBoardModelFingerprints,
+  invalidate: invalidateCurrentBoardModelFingerprints,
+  refresh: refreshCurrentBoardModelFingerprints,
+  adoptSnapshot: adoptBoardComparisonSnapshot
+} = useBoardModelComparison(
+  () => ({ nodes: nodes.value, rules: rules.value, specifications: specifications.value,
+    environmentVariables: environmentVariables.value, deviceTemplates: deviceTemplates.value }),
+  () => boardApi.getModelFingerprints(),
+  () => hasHydratedBoardSnapshot.value
+)
 
 const fuzzingBoardComparison = computed(() => compareModelSnapshot(
   fuzzingResult.value?.modelSnapshot, currentBoardModelFingerprints.value, 'fuzzing'
@@ -9473,10 +8790,7 @@ const fuzzRunRecoveryNextAttemptAt = new Map<number, number>()
 const fuzzRunRecoveryRequests = new Map<number, Promise<FuzzingRun>>()
 
 const historyActionLocked = computed(() =>
-  traceAnimationState.value.visible ||
-  simulationAnimationState.value.visible ||
-  isAnimationLocked.value ||
-  pendingHistoryDeleteKeys.value.size > 0
+  isModelPlaybackActive.value || pendingHistoryDeleteKeys.value.size > 0
 )
 
 const isCurrentHistoryPanelIntent = (
@@ -9746,85 +9060,40 @@ const runningSimulationTask = computed(() => isSimulating.value && asyncSimulati
   ? simulationTasks.value.find(task => task.id === asyncSimulationTask.value.taskId) : undefined)
 
 const miniTaskItems = computed(() => {
-  const items: Array<{
-    key: string
-    kind: 'verification' | 'fuzzing' | 'simulation'
-    id: number
-    label: string
-    status: string
-    progress: number
-  }> = []
-
-  const currentVerificationId = watchedTaskId('verification')
-  if (currentVerificationId) {
-    items.push({
-      key: `verification-${currentVerificationId}`,
+  const groups = [
+    {
       kind: 'verification',
-      id: currentVerificationId,
-      label: t('app.verification'),
-      status: formatWatchedTaskStatus(asyncVerificationTask.value.statusKey, cancellingVerificationTask.value),
-      progress: normalizeTaskProgress(asyncVerificationTask.value.progress)
-    })
-  }
-  for (const task of activeVerificationTasks.value) {
-    if (task.id === currentVerificationId) continue
-    items.push({
-      key: `verification-${task.id}`,
-      kind: 'verification',
-      id: task.id,
-      label: t('app.verification'),
-      status: formatTaskProgressStage(task.progressStage, task.status),
-      progress: normalizeTaskProgress(task.progress)
-    })
-  }
-
-  const currentFuzzingId = watchedTaskId('fuzzing')
-  if (currentFuzzingId) {
-    items.push({
-      key: `fuzzing-${currentFuzzingId}`,
+      labelKey: 'app.verification',
+      watched: asyncVerificationTask.value,
+      cancelling: cancellingVerificationTask.value,
+      tasks: activeVerificationTasks.value
+    },
+    {
       kind: 'fuzzing',
-      id: currentFuzzingId,
-      label: t('app.fuzzSearch'),
-      status: formatWatchedTaskStatus(asyncFuzzingTask.value.statusKey, cancellingFuzzingTask.value),
-      progress: normalizeTaskProgress(asyncFuzzingTask.value.progress)
-    })
-  }
-  for (const task of activeFuzzingTasks.value) {
-    if (task.id === currentFuzzingId) continue
-    items.push({
-      key: `fuzzing-${task.id}`,
-      kind: 'fuzzing',
-      id: task.id,
-      label: t('app.fuzzSearch'),
-      status: formatTaskProgressStage(task.progressStage, task.status),
-      progress: normalizeTaskProgress(task.progress)
-    })
-  }
-
-  const currentSimulationId = watchedTaskId('simulation')
-  if (currentSimulationId) {
-    items.push({
-      key: `simulation-${currentSimulationId}`,
+      labelKey: 'app.fuzzSearch',
+      watched: asyncFuzzingTask.value,
+      cancelling: cancellingFuzzingTask.value,
+      tasks: activeFuzzingTasks.value
+    },
+    {
       kind: 'simulation',
-      id: currentSimulationId,
-      label: t('app.simulation'),
-      status: formatWatchedTaskStatus(asyncSimulationTask.value.statusKey, cancellingSimulationTask.value),
-      progress: normalizeTaskProgress(asyncSimulationTask.value.progress)
+      labelKey: 'app.simulation',
+      watched: asyncSimulationTask.value,
+      cancelling: cancellingSimulationTask.value,
+      tasks: activeSimulationTasks.value
+    }
+  ] as const
+  return groups.flatMap(({ kind, labelKey, watched, cancelling, tasks }) => {
+    const watchedId = watchedTaskId(kind)
+    const label = t(labelKey)
+    const item = (id: number, status: string, progress?: number | null) => ({
+      key: `${kind}-${id}`, kind, id, label, status, progress: normalizeTaskProgress(progress)
     })
-  }
-  for (const task of activeSimulationTasks.value) {
-    if (task.id === currentSimulationId) continue
-    items.push({
-      key: `simulation-${task.id}`,
-      kind: 'simulation',
-      id: task.id,
-      label: t('app.simulation'),
-      status: formatTaskProgressStage(task.progressStage, task.status),
-      progress: normalizeTaskProgress(task.progress)
-    })
-  }
-
-  return items
+    const items = tasks.filter(task => task.id !== watchedId)
+      .map(task => item(task.id, formatTaskProgressStage(task.progressStage, task.status), task.progress))
+    if (watchedId) items.unshift(item(watchedId, formatWatchedTaskStatus(watched.statusKey, cancelling), watched.progress))
+    return items
+  })
 })
 
 const invalidateTaskInboxRequests = () => {
@@ -9834,35 +9103,23 @@ const invalidateTaskInboxRequests = () => {
   loadingTaskHistory.value = false
 }
 
-const upsertVerificationTaskSummary = (task: Partial<VerificationTaskSummary> & { id?: number }) => {
+const upsertTaskSummary = <T extends { id?: number },>(tasks: Ref<T[]>, task: Partial<T>) => {
   if (!task.id) return
   invalidateTaskInboxRequests()
-  const existing = verificationTasks.value.findIndex(item => item.id === task.id)
-  const next = task as VerificationTaskSummary
-  verificationTasks.value = existing >= 0
-    ? verificationTasks.value.map(item => item.id === task.id ? { ...item, ...next } : item)
-    : [next, ...verificationTasks.value]
+  const next = task as T
+  tasks.value = tasks.value.some(item => item.id === task.id)
+    ? tasks.value.map(item => item.id === task.id ? { ...item, ...next } : item)
+    : [next, ...tasks.value]
 }
 
-const upsertSimulationTaskSummary = (task: Partial<SimulationTaskSummary> & { id?: number }) => {
-  if (!task.id) return
-  invalidateTaskInboxRequests()
-  const existing = simulationTasks.value.findIndex(item => item.id === task.id)
-  const next = task as SimulationTaskSummary
-  simulationTasks.value = existing >= 0
-    ? simulationTasks.value.map(item => item.id === task.id ? { ...item, ...next } : item)
-    : [next, ...simulationTasks.value]
-}
+const upsertVerificationTaskSummary = (task: Partial<VerificationTaskSummary>) =>
+  upsertTaskSummary(verificationTasks, task)
 
-const upsertFuzzingTaskSummary = (task: Partial<FuzzingTaskSummary> & { id?: number }) => {
-  if (!task.id) return
-  invalidateTaskInboxRequests()
-  const existing = fuzzingTasks.value.findIndex(item => item.id === task.id)
-  const next = task as FuzzingTaskSummary
-  fuzzingTasks.value = existing >= 0
-    ? fuzzingTasks.value.map(item => item.id === task.id ? { ...item, ...next } : item)
-    : [next, ...fuzzingTasks.value]
-}
+const upsertSimulationTaskSummary = (task: Partial<SimulationTaskSummary>) =>
+  upsertTaskSummary(simulationTasks, task)
+
+const upsertFuzzingTaskSummary = (task: Partial<FuzzingTaskSummary>) =>
+  upsertTaskSummary(fuzzingTasks, task)
 
 const hasCancelledTaskRow = (kind: RunPanelKind, taskId: number): boolean => {
   const tasks = kind === 'verification' ? verificationTasks.value
@@ -9882,21 +9139,21 @@ const notifyObservedTaskCancellation = (kind: RunPanelKind, taskId: number | nul
     : kind === 'simulation' ? 'app.simulationCancelled' : 'app.fuzzSearchCancelled'))
 }
 
-const applyTaskCancellationReceipt = (kind: RunPanelKind, result: TaskCancellationResult) => {
-  const cancelled = result.taskStatus === 'CANCELLED'
-  if (watchedTaskId(kind) === result.taskId) {
+const applyTaskCancellationStatus = (kind: RunPanelKind, taskId: number, status: TaskCancellationResult['taskStatus']) => {
+  const cancelled = status === 'CANCELLED'
+  if (watchedTaskId(kind) === taskId) {
     const current = kind === 'verification' ? asyncVerificationTask.value
       : kind === 'simulation' ? asyncSimulationTask.value : asyncFuzzingTask.value
     const requested = kind === 'verification' ? verificationCancelRequested
       : kind === 'simulation' ? simulationCancelRequested : fuzzingCancelRequested
-    current.statusKey = taskProgressStatusKey(undefined, result.taskStatus)
+    current.statusKey = taskProgressStatusKey(undefined, status)
     requested.value = cancelled
   }
   if (!cancelled) return
   const tasks = kind === 'verification' ? verificationTasks.value
     : kind === 'simulation' ? simulationTasks.value : fuzzingTasks.value
-  if (!tasks.some(task => task.id === result.taskId)) return
-  const update = { id: result.taskId, status: 'CANCELLED' as const, progressStage: undefined }
+  if (!tasks.some(task => task.id === taskId)) return
+  const update = { id: taskId, status: 'CANCELLED' as const, progressStage: undefined }
   if (kind === 'verification') upsertVerificationTaskSummary(update)
   else if (kind === 'simulation') upsertSimulationTaskSummary(update)
   else upsertFuzzingTaskSummary(update)
@@ -10039,39 +9296,30 @@ const loadTaskInbox = async (
   const showLoading = options.showLoading ?? true
   const token = taskInboxRequests.beginReplace()
   const loadingEpoch = ++taskInboxLoadingEpoch
+  const isCurrent = () => taskInboxRequests.isCurrent(token)
+  const read = async <T extends { id?: number; createdAt?: string },>(
+    request: Promise<TaskInboxBatch<T>>, rows: Ref<T[]>,
+    reconcile?: (tasks: T[], excludedIds: number[], isCurrent: () => boolean) => Promise<void>
+  ) => {
+    const { tasks, excludedIds } = await request
+    if (!isCurrent()) return
+    rows.value = mergeTaskSummariesPreservingExcluded(rows.value, tasks, excludedIds)
+    if (reconcile) await reconcile(tasks, excludedIds, isCurrent)
+  }
   if (showLoading) loadingTaskHistory.value = true
   try {
-    const [verification, simulation, fuzzing] = await Promise.all([
-      fetchVerificationTasks(),
-      fetchSimulationTasks(),
-      fetchFuzzingTasks()
+    const results = await Promise.allSettled([
+      read(fetchVerificationTasks(), verificationTasks),
+      read(fetchSimulationTasks(), simulationTasks),
+      read(fetchFuzzingTasks(), fuzzingTasks, reconcileTrackedFuzzTasks)
     ])
-    if (!taskInboxRequests.isCurrent(token)) return false
-    await reconcileTrackedFuzzTasks(
-      fuzzing.tasks,
-      fuzzing.excludedIds,
-      () => taskInboxRequests.isCurrent(token)
-    )
-    if (!taskInboxRequests.isCurrent(token)) return false
-    verificationTasks.value = mergeTaskSummariesPreservingExcluded(
-      verificationTasks.value,
-      verification.tasks,
-      verification.excludedIds
-    )
-    simulationTasks.value = mergeTaskSummariesPreservingExcluded(
-      simulationTasks.value,
-      simulation.tasks,
-      simulation.excludedIds
-    )
-    fuzzingTasks.value = mergeTaskSummariesPreservingExcluded(
-      fuzzingTasks.value,
-      fuzzing.tasks,
-      fuzzing.excludedIds
-    )
+    if (!isCurrent()) return false
+    const failure = results.find(result => result.status === 'rejected')
+    if (failure) throw failure.reason
     taskInboxError.value = null
     return true
   } catch (e: any) {
-    if (!taskInboxRequests.isCurrent(token)) return false
+    if (!isCurrent()) return false
     console.error('Failed to load async tasks:', e)
     taskInboxError.value = errorDetails(e)
     return false
@@ -10098,61 +9346,54 @@ const isHistoryResultErrorVisible = (source: HistoryResultSource): boolean =>
   showHistoryPanel.value && activeHistoryLayer.value === 'results'
   && (activeHistoryResultFilter.value === 'all' || activeHistoryResultFilter.value === source)
 
-const loadVerificationRuns = async (showError = true): Promise<boolean> => {
+const loadUnpagedRuns = async <T,>(
+  source: 'verification' | 'simulation',
+  requests: ReturnType<typeof createPagedRequestCoordinator>,
+  read: () => Promise<T[]>,
+  adopt: (runs: T[]) => void,
+  showError: boolean,
+  failureKey: string
+): Promise<boolean> => {
   if (boardLifecycleDisposed) return false
-  const token = verificationHistoryRequests.beginReplace()
+  const token = requests.beginReplace()
   try {
-    const runs = await boardApi.getVerificationRuns()
-    if (!verificationHistoryRequests.isCurrent(token)) return false
-    verificationRuns.value = retainKnownVerificationHistoryAvailability(runs || [])
-    historyResultErrors.verification = null
+    const runs = await read()
+    if (!requests.isCurrent(token)) return false
+    adopt(runs || [])
+    historyResultErrors[source] = null
     return true
-  } catch (e: any) {
-    if (!verificationHistoryRequests.isCurrent(token)) return false
-    console.error('Failed to load verification run history:', e)
-    historyResultErrors.verification = errorDetails(e)
-    if (showError && !isHistoryResultErrorVisible('verification')) {
-      notifyError(t('app.failedToLoadVerificationHistory'))
+  } catch (error) {
+    if (!requests.isCurrent(token)) return false
+    console.error(`Failed to load ${source} run history:`, error)
+    historyResultErrors[source] = errorDetails(error)
+    if (showError && !isHistoryResultErrorVisible(source)) {
+      notifyError(t(failureKey))
     }
     return false
   } finally {
-    verificationHistoryRequests.finish(token)
+    requests.finish(token)
   }
 }
 
-const loadSimulationRuns = async (showError = true): Promise<boolean> => {
-  if (boardLifecycleDisposed) return false
-  const token = simulationHistoryRequests.beginReplace()
-  try {
-    const runs = await simulationApi.getUserSimulations()
-    if (!simulationHistoryRequests.isCurrent(token)) return false
-    simulationRuns.value = retainKnownSimulationHistoryAvailability(runs || [])
-    historyResultErrors.simulation = null
-    return true
-  } catch (e: any) {
-    if (!simulationHistoryRequests.isCurrent(token)) return false
-    console.error('Failed to load simulation run history:', e)
-    historyResultErrors.simulation = errorDetails(e)
-    if (showError && !isHistoryResultErrorVisible('simulation')) {
-      notifyError(t('app.failedToLoadSimulationHistory'))
-    }
-    return false
-  } finally {
-    simulationHistoryRequests.finish(token)
-  }
-}
+const loadVerificationRuns = (showError = true) => loadUnpagedRuns(
+  'verification', verificationHistoryRequests, boardApi.getVerificationRuns,
+  runs => { verificationRuns.value = retainKnownVerificationHistoryAvailability(runs) },
+  showError, 'app.failedToLoadVerificationHistory'
+)
+
+const loadSimulationRuns = (showError = true) => loadUnpagedRuns(
+  'simulation', simulationHistoryRequests, simulationApi.getUserSimulations,
+  runs => { simulationRuns.value = retainKnownSimulationHistoryAvailability(runs) },
+  showError, 'app.failedToLoadSimulationHistory'
+)
 
 const executeFuzzingRunsRequest = async (
   token: PagedRequestToken,
-  showError = true,
-  page = 0,
-  append = false
+  page: number,
+  append: boolean
 ): Promise<boolean> => {
   try {
-    const [runs] = await Promise.all([
-      fuzzingApi.getRuns(page, FUZZ_RUN_HISTORY_PAGE_SIZE),
-      refreshCurrentBoardModelFingerprints()
-    ])
+    const runs = await fuzzingApi.getRuns(page, FUZZ_RUN_HISTORY_PAGE_SIZE)
     if (!fuzzingHistoryRequests.isCurrent(token)) return false
     const retainedRuns = retainKnownFuzzingHistoryAvailability(runs)
     if (append) {
@@ -10174,9 +9415,6 @@ const executeFuzzingRunsRequest = async (
     if (!fuzzingHistoryRequests.isCurrent(token)) return false
     console.error('Failed to load fuzzing run history:', e)
     historyResultErrors.fuzzing = errorDetails(e)
-    if (showError && !isHistoryResultErrorVisible('fuzzing')) {
-      notifyError(t('app.failedToLoadFuzzingHistory'))
-    }
     return false
   } finally {
     fuzzingHistoryRequests.finish(token)
@@ -10184,7 +9422,6 @@ const executeFuzzingRunsRequest = async (
 }
 
 const loadFuzzingRuns = (
-  showError = true,
   options: { page?: number; append?: boolean } = {}
 ): Promise<boolean> => {
   if (boardLifecycleDisposed) return Promise.resolve(false)
@@ -10197,11 +9434,11 @@ const loadFuzzingRuns = (
     : fuzzingHistoryRequests.beginReplace()
   if (!token) return Promise.resolve(false)
 
-  if (!append) return executeFuzzingRunsRequest(token, showError, page, false)
+  if (!append) return executeFuzzingRunsRequest(token, page, false)
 
   loadingMoreFuzzingRuns.value = true
   let trackedRequest: Promise<boolean>
-  trackedRequest = executeFuzzingRunsRequest(token, showError, page, true)
+  trackedRequest = executeFuzzingRunsRequest(token, page, true)
     .finally(() => {
       if (fuzzingHistoryAppendPromise === trackedRequest) {
         fuzzingHistoryAppendPromise = null
@@ -10214,7 +9451,7 @@ const loadFuzzingRuns = (
 
 const loadMoreFuzzingRuns = async () => {
   if (boardLifecycleDisposed || loadingMoreFuzzingRuns.value || !fuzzingRunsHasMore.value) return
-  await loadFuzzingRuns(true, { page: fuzzingRunsPage.value + 1, append: true })
+  await loadFuzzingRuns({ page: fuzzingRunsPage.value + 1, append: true })
 }
 
 const loadHistoryResults = async (): Promise<boolean> => {
@@ -10225,7 +9462,7 @@ const loadHistoryResults = async (): Promise<boolean> => {
     const results = await Promise.all([
       loadVerificationRuns(false),
       loadSimulationRuns(false),
-      loadFuzzingRuns(false)
+      loadFuzzingRuns()
     ])
     if (loadingEpoch !== historyResultsLoadingEpoch) return false
     return results.every(Boolean)
@@ -10234,28 +9471,27 @@ const loadHistoryResults = async (): Promise<boolean> => {
   }
 }
 
-const refreshRunHistory = async (): Promise<boolean> => {
-  const results = await Promise.all([
+const refreshRunHistory = async ({ compareModel = true } = {}): Promise<boolean> => {
+  const [tasksLoaded, resultsLoaded, addressedHistoryChecked] = await Promise.all([
     loadTaskInbox({ showLoading: false }),
     loadHistoryResults(),
-    recheckAddressedHistory()
+    recheckAddressedHistory(),
+    compareModel ? refreshCurrentBoardModelFingerprints() : null
   ])
-  return results.every(Boolean)
+  return tasksLoaded && resultsLoaded && addressedHistoryChecked
 }
 
 const refreshAllBoardState = async (): Promise<boolean> => {
   const results = await Promise.all([
-    refreshSceneForReconciliation(),
-    refreshRunHistory()
+    refreshBoardSnapshot(),
+    refreshRunHistory({ compareModel: false })
   ])
   return results.every(Boolean)
 }
 
 const refreshHistoryLayer = async (layer: HistoryLayer): Promise<boolean> => {
-  // Result loading already refreshes fingerprints alongside the fuzzing history request.
-  if (layer === 'results') return loadHistoryResults()
   const [loaded] = await Promise.all([
-    loadTaskInbox(),
+    layer === 'results' ? loadHistoryResults() : loadTaskInbox(),
     refreshCurrentBoardModelFingerprints()
   ])
   return loaded
@@ -10283,7 +9519,7 @@ const setHistoryResultFilter = async (filter: HistoryResultFilter) => {
   if (showHistoryPanel.value
     && activeHistoryLayer.value === 'results'
     && (filter === 'all' || filter === 'fuzzing')) {
-    const loaded = await loadFuzzingRuns(true)
+    const [loaded] = await Promise.all([loadFuzzingRuns(), refreshCurrentBoardModelFingerprints()])
     if (loaded && isCurrentHistoryPanelIntent(intentEpoch, 'results', filter)) {
       clearVisibleFuzzResultNotifications()
     }
@@ -10350,75 +9586,87 @@ const refreshHistoryResults = () => {
   if (showHistoryPanel.value && activeHistoryLayer.value === 'results') return setHistoryLayer('results')
 }
 
-const deleteVerificationRun = async (run: VerificationRunSummary) => {
-  const runId = run.id
-  const pendingKey = `verification:${runId}`
+const deleteHistoryRun = async (target: BoardRunTarget, options: {
+  confirm: () => Promise<boolean>
+  remove: () => Promise<void>
+  read: () => Promise<unknown>
+  forget: () => void
+  successKey: string
+  failedKey: string
+  refreshHistory?: () => Promise<boolean>
+}) => {
+  const pendingKey = `${target.kind === 'exploration' ? 'fuzzing' : target.kind}:${target.runId}`
   if (!beginHistoryDelete(pendingKey)) return
+  const ownsBoard = captureBoardRunOwner()
   try {
-    if (!await confirmHistoryDeletion(
-      () => confirmDestructive({
-        title: t('app.deleteVerificationRunTitle'),
-        message: t('app.deleteVerificationRunMessage', {
-          time: formatRunTimestamp(run.completedAt),
-          counterexamples: run.counterexampleCount
-        }),
-        confirmText: t('app.delete')
-      }),
-      historyDetailRequests.invalidate
-    )) return
-    await boardApi.deleteVerificationRun(runId)
-    if (boardLifecycleDisposed) return
-    verificationHistoryRequests.invalidate()
-    unavailableVerificationRunIds.delete(runId)
-    for (const trace of run.counterexamples) {
-      unavailableVerificationTraceIds.delete(trace.id)
-      rejectedVerificationRepairTraceIds.value.delete(trace.id)
-    }
-    verificationRuns.value = verificationRuns.value.filter(item => item.id !== runId)
-    // The deleted run may be the one on screen. Nothing used to close it, so the dialog kept showing a
-    // run that no longer existed, with its model download still enabled — and clicking it answered
-    // "SMV model not available (may be a record saved before model persistence was enabled)", blaming a
-    // historical data limitation for a deletion the user had just performed. Measured end to end.
-    // Surfaces derived from this run go too: `savedTraces` and any replay of its counterexamples are
-    // evidence of a run that is gone.
-    dismissRunSurfacesForDeletedVerificationRun(runId)
-    notifySuccess(t('app.verificationRunDeleted'))
-  } catch (e: any) {
-    if (boardLifecycleDisposed) return
-    console.error('Failed to delete verification run:', e)
-    const refreshed = await loadVerificationRuns(false)
-    if (boardLifecycleDisposed) return
-    if (refreshed && !verificationRuns.value.some(item => item.id === runId)) {
-      notifyBlocked(t('app.verificationRunDeleteOutcomeRefreshed'))
+    if (!ownsBoard() || !await options.confirm() || !ownsBoard()) return
+    const receipt = await readDeletionReceipt(options.remove, options.read, ownsBoard)
+    if (!receipt) return
+    if (receipt.status !== 'confirmed' && receipt.status !== 'absent') {
+      if (receipt.status === 'unconfirmed') notifyBlocked(t('app.historyDeleteOutcomeUnconfirmed'))
+      else notifyError(localizedErrorMessage(receipt.error, t(options.failedKey), locale.value))
       return
     }
-    notifyError(localizedErrorMessage(e, t('app.failedToDeleteVerificationRun'), locale.value))
+
+    options.forget()
+    dismissDeletedRunSurfaces(target)
+    if (receipt.status === 'absent') {
+      // A lost DELETE response could not notify other tabs through the HTTP interceptor.
+      publishBoardInvalidation(currentAuthUserId.value, 'manual', 'run-history')
+      notifyBlocked(t('app.historyDeleteOutcomeMissing'))
+    }
+    const refreshed = await options.refreshHistory?.()
+    if (!ownsBoard() || receipt.status !== 'confirmed') return
+    if (refreshed === false) notifyBlocked(t('app.historyRunDeletedRefreshPending'))
+    else notifySuccess(t(options.successKey))
   } finally {
     finishHistoryDelete(pendingKey)
   }
 }
 
+const deleteVerificationRun = (run: VerificationRunSummary) => deleteHistoryRun({ kind: 'verification', runId: run.id }, {
+  confirm: () => confirmDestructive({
+    title: t('app.deleteVerificationRunTitle'),
+    message: t('app.deleteVerificationRunMessage', {
+      time: formatRunTimestamp(run.completedAt), counterexamples: run.counterexampleCount
+    }),
+    confirmText: t('app.delete')
+  }),
+  remove: () => boardApi.deleteVerificationRun(run.id),
+  read: () => boardApi.getVerificationRun(run.id),
+  forget: () => {
+    verificationHistoryRequests.invalidate()
+    unavailableVerificationRunIds.delete(run.id)
+    for (const trace of run.counterexamples) {
+      unavailableVerificationTraceIds.delete(trace.id)
+      verificationRepairBlocks.value.delete(trace.id)
+    }
+    verificationRuns.value = verificationRuns.value.filter(item => item.id !== run.id)
+  },
+  successKey: 'app.verificationRunDeleted',
+  failedKey: 'app.failedToDeleteVerificationRun'
+})
+
 const openVerificationRun = async (
   runId: number,
-  deepLinkLoad?: DeepLinkLoadContext
-): Promise<boolean> => {
-  const requestToken = historyDetailRequests.beginReplace()
+  isCurrent: () => boolean,
+  checkedRun?: VerificationRun
+) => {
   let runDetailLoaded = false
   try {
-    const run = await boardApi.getVerificationRun(runId)
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return false
+    const run = checkedRun ?? await boardApi.getVerificationRun(runId)
+    if (!isCurrent()) return
     runDetailLoaded = true
     void refreshCurrentBoardModelFingerprints()
     const traces = shouldLoadVerificationEvidence(run.counterexampleCount)
       ? await boardApi.getVerificationRunTraces(runId)
       : []
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return false
+    if (!isCurrent()) return
     verificationResult.value = buildVerificationResultFromRun(run, traces)
     verificationResultStale.value = false
     closeHistoryPanel(false)
-    return true
   } catch (e: any) {
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return false
+    if (!isCurrent()) return
     console.error('Failed to load verification run:', e)
     if (isPersistedHistoryDataInvalid(e)) {
       // A complete-run view needs every trace, but one damaged child must not disable its
@@ -10426,96 +9674,83 @@ const openVerificationRun = async (
       const traceId = persistedHistoryInvalidRecordId(e, 'verification trace')
       if (traceId !== null) markVerificationTraceUnavailable(traceId)
       else if (!runDetailLoaded) markVerificationRunUnavailable(runId)
-      if (shouldClearUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-        reportUnusableDeepLink(deepLinkLoad)
-      }
+      reportUnusableDeepLink()
       notifyBlocked(t(runDetailLoaded
         ? 'app.historyRunHasUnavailableEvidenceDetail'
         : 'app.historyItemUnavailableDetail'))
-      return false
+      return
     }
-    if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-      reportUnusableDeepLink(deepLinkLoad)
-    }
-    else notifyError(t('app.failedToLoadVerificationRun'))
-    return false
-  } finally {
-    historyDetailRequests.finish(requestToken)
+    reportHistoryDetailFailure(e, 'app.failedToLoadVerificationRun')
   }
 }
 
-const watchVerificationTask = async (taskId: number) => {
-  if (isVerifying.value) {
-    if (asyncVerificationActive.value && asyncVerificationTask.value.taskId === taskId) {
-      if (!verificationPanelTracksRun.value) openRunPanel('verification', 'run')
+const formalRunState = (kind: FormalRunKind) => kind === 'verification'
+  ? {
+      running: isVerifying, asyncActive: asyncVerificationActive, watchedTask: asyncVerificationTask,
+      tracksTask: verificationPanelTracksRun, cancelRequested: verificationCancelRequested, failure: verificationError
+    }
+  : {
+      running: isSimulating, asyncActive: asyncSimulationActive, watchedTask: asyncSimulationTask,
+      tracksTask: simulationPanelTracksRun, cancelRequested: simulationCancelRequested, failure: simulationError
+    }
+
+type FormalRunState = ReturnType<typeof formalRunState>
+
+const showFormalRunFailure = (
+  kind: FormalRunKind, state: FormalRunState, error: unknown, taskId: number | null, submitted: boolean
+) => {
+  if (isPollingAbortedError(error)) return
+  if ((error as { code?: unknown } | null)?.code === 'TASK_STATUS_GONE') {
+    notifyInfo(t('app.taskNoLongerAvailable'))
+  } else if (isAsyncTaskCancelledError(error)) {
+    state.failure.value = null
+    notifyObservedTaskCancellation(kind, taskId, state.cancelRequested.value)
+  } else {
+    const verification = kind === 'verification'
+    if (submitted) console.error(verification ? 'Verification failed:' : 'Simulation failed:', error)
+    presentRunFailure(kind, verification ? 'app.verificationFailed' : 'app.simulationFailed', error, state.tracksTask.value)
+  }
+}
+
+const finishFormalRun = (kind: FormalRunKind, state: FormalRunState) => {
+  setRunPanelView(kind, 'settings')
+  state.running.value = false
+  state.asyncActive.value = false
+  state.cancelRequested.value = false
+}
+
+const watchFormalTask = async (kind: FormalRunKind, taskId: number) => {
+  const verification = kind === 'verification'
+  const state = formalRunState(kind)
+  const { running, asyncActive, watchedTask, tracksTask, cancelRequested, failure } = state
+  if (running.value) {
+    if (asyncActive.value && watchedTask.value.taskId === taskId) {
+      if (!verification || !tracksTask.value) openRunPanel(kind, 'run')
     } else {
       notifyInfo(t('app.taskWatchAlreadyActive'))
     }
     return
   }
-  const ownsRun = captureBoardRunOwner()
-  const taskSummary = verificationTasks.value.find(task => task.id === taskId)
-  verificationError.value = null
-  isVerifying.value = true
-  asyncVerificationActive.value = true
-  verificationCancelRequested.value = false
-  asyncVerificationTask.value = {
-    taskId,
-    progress: normalizeTaskProgress(taskSummary?.progress),
-    statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
-  }
-  openRunPanel('verification', 'run')
-  try {
-    await pollAsyncVerification(taskId)
-  } catch (error: any) {
-    if (ownsRun() && !isPollingAbortedError(error)) {
-      if (error?.code === 'TASK_STATUS_GONE') {
-        notifyInfo(t('app.taskNoLongerAvailable'))
-      } else if (isAsyncTaskCancelledError(error)) {
-        verificationError.value = null
-        notifyObservedTaskCancellation('verification', taskId, verificationCancelRequested.value)
-      } else {
-        presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
-      }
-    }
-  } finally {
-    if (ownsRun()) {
-      setRunPanelView('verification', 'settings')
-      isVerifying.value = false
-      asyncVerificationActive.value = false
-      verificationCancelRequested.value = false
-      await loadTaskInbox({ showLoading: false })
-    }
-  }
-}
 
-const watchSimulationTask = async (taskId: number) => {
-  if (isSimulating.value) {
-    if (asyncSimulationActive.value && asyncSimulationTask.value.taskId === taskId) {
-      openRunPanel('simulation', 'run')
-    } else {
-      notifyInfo(t('app.taskWatchAlreadyActive'))
-    }
-    return
-  }
   const ownsRun = captureBoardRunOwner()
-  const taskSummary = simulationTasks.value.find(task => task.id === taskId)
-  simulationError.value = null
-  isSimulating.value = true
-  asyncSimulationActive.value = true
-  simulationCancelRequested.value = false
-  asyncSimulationTask.value = {
+  const taskSummary = (verification ? verificationTasks : simulationTasks).value.find(task => task.id === taskId)
+  failure.value = null
+  running.value = true
+  asyncActive.value = true
+  cancelRequested.value = false
+  watchedTask.value = {
     taskId,
     progress: normalizeTaskProgress(taskSummary?.progress),
     statusKey: taskProgressStatusKey(taskSummary?.progressStage, taskSummary?.status)
   }
-  openRunPanel('simulation', 'run')
-  /*
-   * Same exposure as a run started from the panel, and reached more often: watching a task from the
-   * inbox is exactly when a user carries on editing. `handleSimulate` documents the mechanism.
-   */
-  const watchSubmissionSceneChanges = semanticSceneChangeCount
+  openRunPanel(kind, 'run')
   try {
+    if (verification) {
+      await pollAsyncVerification(taskId)
+      return
+    }
+    // The user can edit this Board while the simulation is watched from the inbox.
+    const watchSubmissionSceneChanges = semanticSceneChangeCount
     const result = await pollAsyncSimulation(taskId)
     if (!ownsRun()) return
     const summary = summarizeSimulationResult(result)
@@ -10524,27 +9759,18 @@ const watchSimulationTask = async (taskId: number) => {
       simulationRuns.value = [summary, ...simulationRuns.value.filter(item => item.id !== summary.id)]
     }
     deliverSimulationRunResult(result, watchSubmissionSceneChanges)
-  } catch (error: any) {
-    if (ownsRun() && !isPollingAbortedError(error)) {
-      if (error?.code === 'TASK_STATUS_GONE') {
-        notifyInfo(t('app.taskNoLongerAvailable'))
-      } else if (isAsyncTaskCancelledError(error)) {
-        simulationError.value = null
-        notifyObservedTaskCancellation('simulation', taskId, simulationCancelRequested.value)
-      } else {
-        presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
-      }
-    }
+  } catch (error) {
+    if (ownsRun()) showFormalRunFailure(kind, state, error, taskId, false)
   } finally {
     if (ownsRun()) {
-      setRunPanelView('simulation', 'settings')
-      isSimulating.value = false
-      asyncSimulationActive.value = false
-      simulationCancelRequested.value = false
+      finishFormalRun(kind, state)
       await loadTaskInbox({ showLoading: false })
     }
   }
 }
+
+const watchVerificationTask = (taskId: number) => watchFormalTask('verification', taskId)
+const watchSimulationTask = (taskId: number) => watchFormalTask('simulation', taskId)
 
 const upsertFuzzingRunSummary = (run: FuzzingRunSummary) => {
   fuzzingHistoryRequests.invalidate()
@@ -10688,128 +9914,37 @@ const watchFuzzingTask = async (taskId: number) => {
   }
 }
 
-const cancelVerificationTaskFromInbox = (taskId: number) => withTaskActionLock(
-  taskActionKey('cancel', 'verification', taskId),
-  async () => {
-    try {
-      if (watchedTaskId('verification') === taskId) {
-        await cancelWatchedVerification(taskId)
-      } else {
-        const result = await boardApi.cancelTask(taskId)
-        if (boardLifecycleDisposed) return
-        applyTaskCancellationReceipt('verification', result)
-        notifyTaskCancellationResult('verification', result)
-      }
-    } catch (error) {
-      if (boardLifecycleDisposed || isTaskCancellationKnown('verification', taskId)) return
-      console.error('Failed to cancel verification task from inbox:', error)
-      notifyError(t('app.failedToCancelVerificationTask'))
-    } finally {
-      if (!boardLifecycleDisposed) {
-        await loadTaskInbox({ showLoading: false })
-      }
+const dismissBoardTask = (kind: RunPanelKind, taskId: number) => withTaskActionLock(
+  taskActionKey('dismiss', kind, taskId), async () => {
+    const ownsBoard = captureBoardRunOwner()
+    const api = kind === 'verification' ? boardApi : kind === 'simulation' ? simulationApi : fuzzingApi
+    const receipt = await readDeletionReceipt(() => api.deleteTask(taskId), () => api.getTask(taskId), ownsBoard)
+    if (!receipt) return
+    if (receipt.status === 'unconfirmed') {
+      notifyBlocked(t(receipt.snapshotRefreshed ? 'app.taskDismissOutcomePresent' : 'app.taskDismissOutcomeUnconfirmed'))
+      return
     }
-  }
-)
-
-const cancelSimulationTaskFromInbox = (taskId: number) => withTaskActionLock(
-  taskActionKey('cancel', 'simulation', taskId),
-  async () => {
-    try {
-      if (watchedTaskId('simulation') === taskId) {
-        await cancelWatchedSimulation(taskId)
-      } else {
-        const result = await simulationApi.cancelTask(taskId)
-        if (boardLifecycleDisposed) return
-        applyTaskCancellationReceipt('simulation', result)
-        notifyTaskCancellationResult('simulation', result)
-      }
-    } catch (error) {
-      if (boardLifecycleDisposed || isTaskCancellationKnown('simulation', taskId)) return
-      console.error('Failed to cancel simulation task from inbox:', error)
-      notifyError(t('app.failedToCancelSimulationTask'))
-    } finally {
-      if (!boardLifecycleDisposed) {
-        await loadTaskInbox({ showLoading: false })
-      }
+    if (receipt.status === 'rejected') {
+      notifyError(extractApiErrorMessage(receipt.error, t('app.failedToDismissTask')))
+      await loadTaskInbox({ showLoading: false })
+      return
     }
-  }
-)
 
-const cancelFuzzingTaskFromInbox = (taskId: number) => withTaskActionLock(
-  taskActionKey('cancel', 'fuzzing', taskId),
-  async () => {
-    try {
-      if (watchedTaskId('fuzzing') === taskId) {
-        await cancelWatchedFuzzing(taskId)
-      } else {
-        const result = await fuzzingApi.cancelTask(taskId)
-        if (boardLifecycleDisposed) return
-        applyTaskCancellationReceipt('fuzzing', result)
-        notifyTaskCancellationResult('fuzzing', result)
-      }
-    } catch (error) {
-      if (boardLifecycleDisposed || isTaskCancellationKnown('fuzzing', taskId)) return
-      console.error('Failed to cancel fuzzing task from inbox:', error)
-      notifyError(t('app.failedToCancelFuzzingTask'))
-    } finally {
-      if (!boardLifecycleDisposed) {
-        await loadTaskInbox({ showLoading: false })
-      }
-    }
-  }
-)
-
-const dismissVerificationTask = (taskId: number) => withTaskActionLock(
-  taskActionKey('dismiss', 'verification', taskId),
-  async () => {
-    try {
-      await boardApi.deleteTask(taskId)
-      if (boardLifecycleDisposed) return
-      invalidateTaskInboxRequests()
+    invalidateTaskInboxRequests()
+    if (kind === 'verification') {
       verificationTasks.value = verificationTasks.value.filter(task => task.id !== taskId)
-      notifySuccess(t('app.taskDismissed'))
-    } catch (e: any) {
-      if (boardLifecycleDisposed) return
-      notifyError(extractApiErrorMessage(e, t('app.failedToDismissTask')))
-      await loadTaskInbox({ showLoading: false })
-    }
-  }
-)
-
-const dismissSimulationTask = (taskId: number) => withTaskActionLock(
-  taskActionKey('dismiss', 'simulation', taskId),
-  async () => {
-    try {
-      await simulationApi.deleteTask(taskId)
-      if (boardLifecycleDisposed) return
-      invalidateTaskInboxRequests()
+    } else if (kind === 'simulation') {
       simulationTasks.value = simulationTasks.value.filter(task => task.id !== taskId)
-      notifySuccess(t('app.taskDismissed'))
-    } catch (e: any) {
-      if (boardLifecycleDisposed) return
-      notifyError(extractApiErrorMessage(e, t('app.failedToDismissTask')))
-      await loadTaskInbox({ showLoading: false })
-    }
-  }
-)
-
-const dismissFuzzingTask = (taskId: number) => withTaskActionLock(
-  taskActionKey('dismiss', 'fuzzing', taskId),
-  async () => {
-    try {
-      await fuzzingApi.deleteTask(taskId)
-      if (boardLifecycleDisposed) return
-      invalidateTaskInboxRequests()
+    } else {
       fuzzingTasks.value = fuzzingTasks.value.filter(task => task.id !== taskId)
       clearFuzzNotifications(undefined, taskId)
       untrackFuzzTask(taskId)
+    }
+    if (receipt.status === 'absent') {
+      publishBoardInvalidation(currentAuthUserId.value, 'manual', 'tasks')
+      notifyBlocked(t('app.taskDismissOutcomeMissing'))
+    } else {
       notifySuccess(t('app.taskDismissed'))
-    } catch (e: any) {
-      if (boardLifecycleDisposed) return
-      console.error('Failed to dismiss fuzzing task:', e)
-      notifyError(t('app.failedToDismissTask'))
-      await loadTaskInbox({ showLoading: false })
     }
   }
 )
@@ -10826,26 +9961,16 @@ const miniTaskCancelLabel = (kind: 'verification' | 'fuzzing' | 'simulation') =>
   ? t('app.cancelVerificationTask')
   : kind === 'fuzzing' ? t('app.cancelFuzzingTask') : t('app.cancelSimulationTask')
 
-const cancelMiniTask = async (kind: 'verification' | 'fuzzing' | 'simulation', taskId: number) => {
-  if (kind === 'verification') {
-    await cancelVerificationTaskFromInbox(taskId)
-  } else if (kind === 'fuzzing') {
-    await cancelFuzzingTaskFromInbox(taskId)
-  } else {
-    await cancelSimulationTaskFromInbox(taskId)
-  }
-}
-
 const ensureHistoricalPlaybackUiAdmission = (): boolean => {
   if (isSceneReplacementInProgress.value) {
     notifyBlocked(t('app.sceneReplacementInProgress'))
     return false
   }
-  if (traceAnimationState.value.visible) {
+  if (isTracePlaybackActive.value) {
     notifyBlocked(t('app.closeCounterexampleFirst'))
     return false
   }
-  if (simulationAnimationState.value.visible) {
+  if (isSimulationPlaybackActive.value) {
     notifyBlocked(t('app.closeCurrentSimulationFirst'))
     return false
   }
@@ -10857,36 +9982,60 @@ const ensureHistoricalPlaybackUiAdmission = (): boolean => {
 }
 
 const revalidateHistoricalPlaybackAfterLoad = async (
-  requestToken: PagedRequestToken,
+  isCurrent: () => boolean,
   initialMutationEpoch: number
 ): Promise<boolean> => {
   const result = await revalidateHistoricalPlaybackAdmission({
     waitForPendingMutations: waitForPendingBoardMutations,
-    isRequestCurrent: () => historyDetailRequests.isCurrent(requestToken) && !boardLifecycleDisposed,
+    isRequestCurrent: isCurrent,
     initialMutationEpoch,
     currentMutationEpoch: () => boardMutationAdmissionEpoch,
     recheckUiAdmission: ensureHistoricalPlaybackUiAdmission
   })
+  if (!isCurrent()) return false
   if (result === 'board-changed') {
     notifyBlocked(t('app.historicalPlaybackDeferredForBoardChange'))
   }
   return result === 'admitted'
 }
 
-const selectAndPlayVerificationTrace = async (
-  traceId: number,
-  deepLinkLoad?: DeepLinkLoadContext,
-  expectedRunId?: number
-) => {
+const playHistoricalResult = async <T,>({
+  isCurrent, load, play, failureLog, failedKey, markUnavailable
+}: {
+  isCurrent: () => boolean
+  load: () => Promise<T>
+  play: (result: T) => void
+  failureLog: string
+  failedKey: string
+  markUnavailable: (error: unknown) => string
+}) => {
   if (!ensureHistoricalPlaybackUiAdmission()) return
   const initialMutationEpoch = boardMutationAdmissionEpoch
-  const requestToken = historyDetailRequests.beginReplace()
   try {
-    const trace = await boardApi.getVerificationTrace(traceId)
-    if (!await revalidateHistoricalPlaybackAfterLoad(requestToken, initialMutationEpoch)) return
-    if (expectedRunId !== undefined && !verificationTraceBelongsToRun(trace, expectedRunId)) {
-      if (isCurrentDeepLinkLoad(deepLinkLoad)) reportUnusableDeepLink(deepLinkLoad)
-      else notifyError(t('app.failedToLoadTrace'))
+    const result = await load()
+    if (!await revalidateHistoricalPlaybackAfterLoad(isCurrent, initialMutationEpoch) || !isCurrent()) return
+    play(result)
+  } catch (error) {
+    if (!isCurrent()) return
+    console.error(failureLog, error)
+    if (isPersistedHistoryDataInvalid(error)) {
+      const messageKey = markUnavailable(error)
+      reportUnusableDeepLink()
+      notifyBlocked(t(messageKey))
+    } else {
+      reportHistoryDetailFailure(error, failedKey)
+    }
+  }
+}
+
+const selectAndPlayVerificationTrace = (
+  traceId: number, expectedRunId: number, isCurrent: () => boolean
+) => playHistoricalResult({
+  isCurrent,
+  load: () => boardApi.getVerificationTrace(traceId),
+  play: trace => {
+    if (!verificationTraceBelongsToRun(trace, expectedRunId)) {
+      reportUnusableDeepLink()
       return
     }
     if (!trace?.states?.length) {
@@ -10895,56 +10044,29 @@ const selectAndPlayVerificationTrace = async (
     }
     closeResultDialog()
     closeHistoryPanel(false)
-    activeFuzzingFinding.value = null
-    savedTraces.value = [trace]
-    // Selects the violating state and writes both selection refs. A second `highlightedTrace` write here
-    // used to reset it to state 0, contradicting the timeline.
-    openTraceAnimationAt(0)
-  } catch (e: any) {
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return
-    console.error('Failed to load trace:', e)
-    if (isPersistedHistoryDataInvalid(e)) {
-      markVerificationTraceUnavailable(traceId)
-      if (shouldClearUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-        reportUnusableDeepLink(deepLinkLoad)
-      }
-      notifyBlocked(t('app.historyTraceUnavailableDetail'))
-      return
-    }
-    if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-      reportUnusableDeepLink(deepLinkLoad)
-    }
-    else notifyError(t('app.failedToLoadTrace'))
-  } finally {
-    historyDetailRequests.finish(requestToken)
+    startPlayback({ kind: 'counterexample', trace }, trace.states.length - 1)
+  },
+  failureLog: 'Failed to load trace:',
+  failedKey: 'app.failedToLoadTrace',
+  markUnavailable: () => {
+    markVerificationTraceUnavailable(traceId)
+    return 'app.historyTraceUnavailableDetail'
   }
-}
+})
 
 const openFixForVerificationTrace = (trace: TraceSummary) => {
   const run = verificationRuns.value.find(item => item.id === trace.verificationTaskId)
-  if (rejectedVerificationRepairTraceIds.value.has(trace.id) || !trace.dataAvailable || !run?.dataAvailable
-    || compareModelSnapshot(run.modelSnapshot, currentBoardModelFingerprints.value, 'verification') !== 'UNCHANGED') return
-  if (!trace.violatedSpecId) {
-    notifyBlocked(t('app.traceMissingViolatedSpec'))
-    return
-  }
+  if (!trace.dataAvailable || !run?.dataAvailable || verificationTraceRepairBlock(trace)
+    || getVerificationRepairRunBlock(compareRunToCurrentBoard(run, 'verification'))) return
   closeHistoryPanel()
   openFixDialog(trace.id, trace.violatedSpecId, trace.violatedSpec.name)
 }
 
-/**
- * Download the SMV model for a verification run.
- *
- * All counterexamples from one run share the same model, and a run where every spec holds has
- * no counterexample to key the download on — so the run-keyed endpoint makes the model of a
- * *passing* run downloadable, which is the case where confirming what was proved matters most.
- */
-const downloadVerificationRunSmv = async (runId: number) => {
+const downloadSavedRunSmv = async (download: () => Promise<void>) => {
   try {
-    await boardApi.downloadRunSmvModel(runId)
+    await download()
   } catch (error) {
-    const status = (error as any)?.response?.status
-    if (status === 404) {
+    if ((error as { response?: { status?: number } } | null)?.response?.status === 404) {
       notifyBlocked(t('app.smvModelNotAvailable'))
     } else {
       notifyError(t('app.smvDownloadFailed'))
@@ -10952,107 +10074,47 @@ const downloadVerificationRunSmv = async (runId: number) => {
   }
 }
 
-/**
- * Download the SMV model a simulation trajectory ran.
- *
- * Call sites pass `historyPersistence.runId`, which looks like a mismatch against the `traceId`
- * parameter and is not: a simulation trajectory *is* its own run, so the backend sets
- * `historyPersistence.runId` to the saved trace id, and `validateSimulationShape` rejects a response
- * where the two disagree. Verification is the case where they differ — a run owns many traces — which
- * is why only that side has a separate run-keyed endpoint.
- *
- * A 404 means the record or model is unavailable, including deletion after the list was loaded.
- */
-const downloadSimulationTraceSmv = async (traceId: number) => {
-  try {
-    await simulationApi.downloadSimulationSmvModel(traceId)
-  } catch (error) {
-    const status = (error as any)?.response?.status
-    if (status === 404) {
-      notifyBlocked(t('app.smvModelNotAvailable'))
-    } else {
-      notifyError(t('app.smvDownloadFailed'))
-    }
-  }
-}
+// Verification traces share a run's model. A saved simulation is itself the trajectory.
+const downloadVerificationRunSmv = (runId: number) =>
+  downloadSavedRunSmv(() => boardApi.downloadRunSmvModel(runId))
+const downloadSimulationTraceSmv = (traceId: number) =>
+  downloadSavedRunSmv(() => simulationApi.downloadSimulationSmvModel(traceId))
 
-const selectAndPlaySimulationTrace = async (
-  traceId: number,
-  deepLinkLoad?: DeepLinkLoadContext
-) => {
-  if (!ensureHistoricalPlaybackUiAdmission()) return
-  const initialMutationEpoch = boardMutationAdmissionEpoch
-  const requestToken = historyDetailRequests.beginReplace()
-  try {
-    const trace = await simulationApi.getSimulation(traceId)
-    if (!await revalidateHistoricalPlaybackAfterLoad(requestToken, initialMutationEpoch)) return
-
+const selectAndPlaySimulationTrace = (traceId: number, isCurrent: () => boolean) => playHistoricalResult({
+  isCurrent,
+  load: () => simulationApi.getSimulation(traceId),
+  play: trace => {
     const result = simulationResultFromTrace(trace)
-
     closeHistoryPanel(false)
     lastSimulationResult.value = result
-    // Staleness belongs to the run being shown. This is a freshly loaded historical run, so it cannot
-    // have been invalidated by an edit made against an earlier one — without this, whether a historical
-    // run showed the re-run banner depended on unrelated history. `openVerificationRun` clears its flag
-    // for the same reason. The two run paths reach the same conclusion by comparison instead
-    // (`adoptSimulationRunResult`): a run just executed is stale only if the scene moved while it ran,
-    // whereas a stored trajectory has no such window. This is not written through that helper because
-    // the comparison it performs is exactly what does not apply here.
+    // A saved result has no local submission window. Its freshness comes from model comparison.
     simulationResultStale.value = false
-    openSimulationAnimationFromSavedStates()
-  } catch (e: any) {
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return
-    console.error('Failed to load simulation trace:', e)
-    if (isPersistedHistoryDataInvalid(e)) {
-      markSimulationTraceUnavailable(traceId)
-      if (shouldClearUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-        reportUnusableDeepLink(deepLinkLoad)
-      }
-      notifyBlocked(t('app.historyItemUnavailableDetail'))
-      return
-    }
-    if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-      reportUnusableDeepLink(deepLinkLoad)
-    }
-    else notifyError(t('app.failedToLoadSimulationRun'))
-  } finally {
-    historyDetailRequests.finish(requestToken)
+    openSimulationAnimationFromSavedStates(false)
+  },
+  failureLog: 'Failed to load simulation trace:',
+  failedKey: 'app.failedToLoadSimulationRun',
+  markUnavailable: () => {
+    markSimulationTraceUnavailable(traceId)
+    return 'app.historyItemUnavailableDetail'
   }
-}
+})
 
-const deleteSimulationRun = async (run: SimulationTraceSummary) => {
-  const traceId = run.id
-  const pendingKey = `simulation:${traceId}`
-  if (!beginHistoryDelete(pendingKey)) return
-  try {
-    if (!await confirmHistoryDeletion(
-      () => confirmDestructive({
-        title: t('app.deleteSimulationRunTitle'),
-        message: t('app.deleteSimulationRunMessage', { time: formatRunTimestamp(run.createdAt) }),
-        confirmText: t('app.delete')
-      }),
-      historyDetailRequests.invalidate
-    )) return
-    await simulationApi.deleteSimulation(traceId)
-    if (boardLifecycleDisposed) return
+const deleteSimulationRun = (run: SimulationTraceSummary) => deleteHistoryRun({ kind: 'simulation', runId: run.id }, {
+  confirm: () => confirmDestructive({
+    title: t('app.deleteSimulationRunTitle'),
+    message: t('app.deleteSimulationRunMessage', { time: formatRunTimestamp(run.createdAt) }),
+    confirmText: t('app.delete')
+  }),
+  remove: () => simulationApi.deleteSimulation(run.id),
+  read: () => simulationApi.getSimulation(run.id),
+  forget: () => {
     simulationHistoryRequests.invalidate()
-    unavailableSimulationTraceIds.delete(traceId)
-    simulationRuns.value = simulationRuns.value.filter(t => t.id !== traceId)
-    notifySuccess(t('app.simulationRunDeleted'))
-  } catch (e: any) {
-    if (boardLifecycleDisposed) return
-    console.error('Failed to delete simulation trace:', e)
-    const refreshed = await loadSimulationRuns(false)
-    if (boardLifecycleDisposed) return
-    if (refreshed && !simulationRuns.value.some(item => item.id === traceId)) {
-      notifyBlocked(t('app.simulationDeleteOutcomeRefreshed'))
-      return
-    }
-    notifyError(localizedErrorMessage(e, t('app.failedToDeleteSimulationRun'), locale.value))
-  } finally {
-    finishHistoryDelete(pendingKey)
-  }
-}
+    unavailableSimulationTraceIds.delete(run.id)
+    simulationRuns.value = simulationRuns.value.filter(item => item.id !== run.id)
+  },
+  successKey: 'app.simulationRunDeleted',
+  failedKey: 'app.failedToDeleteSimulationRun'
+})
 
 const fuzzingCompletionMessage = (run: AvailableFuzzingRunSummary | FuzzingRun): string => {
   if (compareRunToCurrentBoard(run, 'fuzzing') === 'SEMANTICS_CHANGED') return t('app.runBoardSemanticsChanged')
@@ -11065,14 +10127,13 @@ const fuzzingCompletionMessage = (run: AvailableFuzzingRunSummary | FuzzingRun):
 
 const openFuzzingRun = async (
   runId: number,
-  deepLinkLoad?: DeepLinkLoadContext
-): Promise<boolean> => {
+  isCurrent: () => boolean
+) => {
   if (isModelPlaybackActive.value) {
     notifyBlocked(t('app.playbackReadOnlyCloseFirst'))
-    return false
+    return
   }
   const requestEpoch = ++fuzzingResultRequestEpoch
-  const requestToken = historyDetailRequests.beginReplace()
   try {
     fuzzingError.value = null
     fuzzingResult.value = null
@@ -11080,22 +10141,15 @@ const openFuzzingRun = async (
     showFuzzingResultDialog.value = true
     // Its ready event dismisses history after the lazy dialog captures its opener.
     await nextTick()
-    if (requestEpoch !== fuzzingResultRequestEpoch
-      || !historyDetailRequests.isCurrent(requestToken)
-      || boardLifecycleDisposed) return false
+    if (!isCurrent()) return
     const [run] = await Promise.all([
       fuzzingApi.getRun(runId),
       refreshCurrentBoardModelFingerprints()
     ])
-    if (requestEpoch !== fuzzingResultRequestEpoch
-      || !historyDetailRequests.isCurrent(requestToken)
-      || boardLifecycleDisposed) return false
+    if (!isCurrent()) return
     presentFuzzingRun(run)
-    return true
   } catch (e: any) {
-    if (requestEpoch !== fuzzingResultRequestEpoch
-      || !historyDetailRequests.isCurrent(requestToken)
-      || boardLifecycleDisposed) return false
+    if (!isCurrent()) return
     console.error('Failed to load fuzzing run:', e)
     showFuzzingResultDialog.value = false
     fuzzingError.value = null
@@ -11106,27 +10160,20 @@ const openFuzzingRun = async (
       } else {
         markFuzzingRunUnavailable(runId)
       }
-      if (shouldClearUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-        reportUnusableDeepLink(deepLinkLoad)
-      }
+      reportUnusableDeepLink()
       notifyBlocked(t(findingId !== null
         ? 'app.historyRunHasUnavailableFindingDetail'
         : 'app.historyItemUnavailableDetail'))
-      return false
+      return
     }
-    if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-      reportUnusableDeepLink(deepLinkLoad)
-    }
-    else notifyError(t('app.failedToLoadFuzzingRun'))
-    return false
+    reportHistoryDetailFailure(e, 'app.failedToLoadFuzzingRun')
   } finally {
     if (requestEpoch === fuzzingResultRequestEpoch) {
       fuzzingResultLoading.value = false
-      if (!historyDetailRequests.isCurrent(requestToken) && !fuzzingResult.value) {
+      if (!isCurrent() && !fuzzingResult.value) {
         showFuzzingResultDialog.value = false
       }
     }
-    historyDetailRequests.finish(requestToken)
   }
 }
 
@@ -11151,20 +10198,15 @@ const dismissFuzzingResult = () => {
   clearRunDeepLink()
 }
 
-const deleteFuzzingRun = async (run: FuzzingRunSummary) => {
-  const pendingKey = `fuzzing:${run.id}`
-  if (!beginHistoryDelete(pendingKey)) return
-  try {
-    if (!await confirmHistoryDeletion(
-      () => confirmDestructive({
-        title: t('app.deleteFuzzingRunTitle'),
-        message: t('app.deleteFuzzingRunMessage', { time: formatRunTimestamp(run.completedAt || run.createdAt) }),
-        confirmText: t('app.delete')
-      }),
-      historyDetailRequests.invalidate
-    )) return
-    await fuzzingApi.deleteRun(run.id)
-    if (boardLifecycleDisposed) return
+const deleteFuzzingRun = (run: FuzzingRunSummary) => deleteHistoryRun({ kind: 'exploration', runId: run.id }, {
+  confirm: () => confirmDestructive({
+    title: t('app.deleteFuzzingRunTitle'),
+    message: t('app.deleteFuzzingRunMessage', { time: formatRunTimestamp(run.completedAt || run.createdAt) }),
+    confirmText: t('app.delete')
+  }),
+  remove: () => fuzzingApi.deleteRun(run.id),
+  read: () => fuzzingApi.getRun(run.id),
+  forget: () => {
     fuzzingHistoryRequests.invalidate()
     unavailableFuzzingRunIds.delete(run.id)
     for (const finding of run.findings) {
@@ -11173,49 +10215,21 @@ const deleteFuzzingRun = async (run: FuzzingRunSummary) => {
     fuzzingRuns.value = fuzzingRuns.value.filter(item => item.id !== run.id)
     fuzzingRunsPage.value = 0
     fuzzingRunsHasMore.value = false
-    const refreshed = await loadFuzzingRuns(false)
-    if (boardLifecycleDisposed) return
-    // `dismissFuzzingResult`, not `closeFuzzingResult`: this is a user-facing close, so the
-    // `?run=exploration:<id>` deep link goes with it. `closeFuzzingResult` documents itself as leaving
-    // the URL alone — it exists for internal transitions such as opening a finding replay — so using it
-    // here left the deleted run's id in the URL, where the deep-link watcher would reload it and answer
-    // with the unusable-link banner. The verification path already draws this distinction
-    // (`dismissRunSurfacesForDeletedVerificationRun` calls `dismissResultDialog` for the same reason).
-    if (fuzzingResult.value?.id === run.id) dismissFuzzingResult()
-    if (!refreshed) {
-      notifyBlocked(t('app.fuzzingRunDeletedRefreshPending'))
-      return
-    }
-    notifySuccess(t('app.fuzzingRunDeleted'))
-  } catch (e: any) {
-    if (boardLifecycleDisposed) return
-    console.error('Failed to delete fuzzing run:', e)
-    const refreshed = await loadFuzzingRuns(false)
-    if (boardLifecycleDisposed) return
-    if (refreshed && !fuzzingRuns.value.some(item => item.id === run.id)) {
-      notifyBlocked(t('app.fuzzingDeleteOutcomeRefreshed'))
-      return
-    }
-    notifyError(t('app.failedToDeleteFuzzingRun'))
-  } finally {
-    finishHistoryDelete(pendingKey)
-  }
-}
+    clearFuzzNotifications(undefined, run.id)
+  },
+  successKey: 'app.fuzzingRunDeleted',
+  failedKey: 'app.failedToDeleteFuzzingRun',
+  refreshHistory: loadFuzzingRuns
+})
 
-const selectAndPlayFuzzingFinding = async (
-  findingId: number,
-  runId: number,
-  deepLinkLoad?: DeepLinkLoadContext
-) => {
-  if (!ensureHistoricalPlaybackUiAdmission()) return
-  const initialMutationEpoch = boardMutationAdmissionEpoch
-  const requestToken = historyDetailRequests.beginReplace()
-  try {
-    const replay = await fuzzingApi.getFinding(findingId)
-    if (!await revalidateHistoricalPlaybackAfterLoad(requestToken, initialMutationEpoch)) return
+const selectAndPlayFuzzingFinding = (
+  findingId: number, runId: number, isCurrent: () => boolean
+) => playHistoricalResult({
+  isCurrent,
+  load: () => fuzzingApi.getFinding(findingId),
+  play: replay => {
     if (!fuzzingFindingBelongsToRun(replay.finding, runId)) {
-      if (isCurrentDeepLinkLoad(deepLinkLoad)) reportUnusableDeepLink(deepLinkLoad)
-      else notifyError(t('app.failedToLoadFuzzingFinding'))
+      reportUnusableDeepLink()
       return
     }
     const finding = replay.finding
@@ -11240,52 +10254,20 @@ const selectAndPlayFuzzingFinding = async (
 
     closeHistoryPanel(false)
     closeFuzzingResult()
-    activeFuzzingFinding.value = finding
-    savedTraces.value = [trace]
-    openTraceAnimationAt(0)
-    // Open on the step the finding names, and let `goToState` write both selection refs. Previously this
-    // forced state 0 while `openTraceAnimationAt` had selected the final state, so the changes tab and
-    // the timeline disagreed and neither pointed at the violation.
-    //
-    // For a well-formed finding this lands where `openTraceAnimationAt` already did: the backend truncates
-    // the finding's path at the violation (`FuzzEngine` keeps `states.subList(0, violationStep + 1)`), and
-    // both the write path (`FuzzServiceImpl.validateEngineResult`) and the read path
-    // (`FuzzMapper`, "stored trace is not truncated at the first violation") reject a finding where
-    // `firstViolationStep != states.size() - 1`. `docs/api/fuzzing.md` documents it as always
-    // `states.length - 1`. This used to claim the opposite — that an exploration path "can continue past
-    // the violation" — which would make the two calls disagree by design. Kept as an explicit seek anyway,
-    // because the step is the finding's own authoritative field and this surface should honour it rather
-    // than re-derive it from the array length.
-    if (typeof finding.firstViolationStep === 'number') {
-      goToState(finding.firstViolationStep)
+    startPlayback({ kind: 'fuzzing', trace, finding }, finding.firstViolationStep)
+  },
+  failureLog: 'Failed to load fuzzing finding:',
+  failedKey: 'app.failedToLoadFuzzingFinding',
+  markUnavailable: error => {
+    const persistedFindingId = persistedHistoryInvalidRecordId(error, 'FuzzFinding')
+    if (persistedFindingId !== null) {
+      markFuzzingFindingUnavailable(persistedFindingId)
+      return 'app.historyFindingUnavailableDetail'
     }
-  } catch (e: any) {
-    if (!historyDetailRequests.isCurrent(requestToken) || boardLifecycleDisposed) return
-    console.error('Failed to load fuzzing finding:', e)
-    if (runId && isPersistedHistoryDataInvalid(e)) {
-      const persistedFindingId = persistedHistoryInvalidRecordId(e, 'FuzzFinding')
-      if (persistedFindingId !== null) {
-        markFuzzingFindingUnavailable(persistedFindingId)
-      } else {
-        markFuzzingRunUnavailable(runId)
-      }
-      if (shouldClearUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-        reportUnusableDeepLink(deepLinkLoad)
-      }
-      notifyBlocked(t(persistedFindingId !== null
-        ? 'app.historyFindingUnavailableDetail'
-        : 'app.historyItemUnavailableDetail'))
-      return
-    }
-    if (shouldReportUnusableHistoryDeepLink(isCurrentDeepLinkLoad(deepLinkLoad), e)) {
-      reportUnusableDeepLink(deepLinkLoad)
-    } else {
-      notifyError(t('app.failedToLoadFuzzingFinding'))
-    }
-  } finally {
-    historyDetailRequests.finish(requestToken)
+    markFuzzingRunUnavailable(runId)
+    return 'app.historyItemUnavailableDetail'
   }
-}
+})
 
 const fuzzVerificationHandoff = computed(() => {
   const panel = activeWorkflowPanel.value
@@ -11362,7 +10344,7 @@ const closeVerificationPanel = () => closeWorkflowPanel('verification')
 
 // The logo returns to the canvas without interrupting running tasks.
 const resetWorkspace = () => {
-  closePlaybackForNavigation()
+  closePlayback()
   closeResultSurfaces()
   pendingHistoryRunTarget = null
   retireHistoryPanelIntent(false)
@@ -11422,14 +10404,16 @@ const synchronousSimulationRunning = computed(() =>
   isSimulating.value && !asyncSimulationActive.value)
 const simulationCancelRequested = ref(false)
 
+const cancellationTaskLabel = (kind: RunPanelKind, taskId: number) =>
+  `${t(kind === 'verification'
+    ? 'app.verificationTaskName'
+    : kind === 'fuzzing' ? 'app.fuzzTaskName' : 'app.simulationTaskName')} #${taskId}`
+
 const notifyTaskCancellationResult = (
   kind: RunPanelKind,
-  result: TaskCancellationResult
+  result: Pick<TaskCancellationResult, 'taskId' | 'cancellationOutcome'> & { executionMayStillBeStopping?: boolean }
 ) => {
-  const taskLabel = t(kind === 'verification'
-    ? 'app.verificationTaskName'
-    : kind === 'fuzzing' ? 'app.fuzzTaskName' : 'app.simulationTaskName')
-  const task = `${taskLabel} #${result.taskId}`
+  const task = cancellationTaskLabel(kind, result.taskId)
   const statusVisible = () => (tracksRun(kind) && watchedTaskId(kind) === result.taskId)
     || hasVisibleCancelledTaskRow(kind, result.taskId)
   switch (result.cancellationOutcome) {
@@ -11447,10 +10431,10 @@ const notifyTaskCancellationResult = (
       if (kind === 'verification' && showResultDialog.value
         && verificationResult.value?.historyPersistence.status === 'SAVED'
         && verificationResult.value.historyPersistence.runId === result.taskId) return
-      if (kind === 'simulation' && simulationAnimationState.value.visible
-        && lastSimulationResult.value?.historyPersistence.status === 'SAVED'
+      if (kind === 'simulation' && simulationPlaybackResult.value?.historyPersistence.status === 'SAVED'
         && simulationTasks.value.some(task => task.id === result.taskId
-          && task.simulationTraceId === lastSimulationResult.value?.historyPersistence.runId)) return
+          && task.simulationTraceId === simulationPlaybackResult.value?.historyPersistence.runId)) return
+      if (kind === 'fuzzing' && showFuzzingResultDialog.value && fuzzingResult.value?.id === result.taskId) return
       notifyBlocked(t('app.taskAlreadyCompleted', { task }))
       break
     case 'ALREADY_FAILED':
@@ -11512,32 +10496,29 @@ const openFixDialog = (traceId: number, violatedSpecId: string, name: string) =>
   showFixDialog.value = true
 }
 
-const rejectedVerificationRepairTraceIds = ref(new Set<number>())
-const verificationResultHasRejectedTrace = computed(() => verificationResult.value?.traces.some(trace =>
-  trace.id != null && rejectedVerificationRepairTraceIds.value.has(trace.id)) === true)
+const verificationRepairBlocks = ref(new Map<number, VerificationRepairBlock>())
+const verificationRunRepairBlock = computed(() => getVerificationRepairRunBlock(
+  verificationBoardComparison.value, loadingCurrentBoardModelFingerprints.value, verificationResultStale.value
+))
+const verificationRunNeedsReverify = computed(() => verificationRunRepairBlock.value === 'app.verificationResultStaleReverify'
+  || verificationRunRepairBlock.value === 'app.runBoardSemanticsChanged')
+const verificationTraceRepairBlock = (trace: Trace | TraceSummary) =>
+  getVerificationRepairTraceBlock(trace, verificationRepairBlocks.value)
 
-const verificationFixBlockedReason = computed(() => {
-  if (verificationResultHasRejectedTrace.value || verificationBoardComparison.value === 'SEMANTICS_CHANGED') {
-    return t('app.runBoardSemanticsChanged')
-  }
-  if (verificationResultStale.value || verificationBoardComparison.value === 'CHANGED') {
-    return t('app.verificationResultStaleReverify')
-  }
-  if (verificationBoardComparison.value === 'UNCHANGED') return null
-  if (verificationBoardComparison.value === 'UNAVAILABLE') {
-    return t(loadingCurrentBoardModelFingerprints.value
-      ? 'app.runBoardComparisonLoading' : 'app.runBoardComparisonUnavailable')
-  }
-  return t('app.runBoardNotCompared')
-})
+// Keep the recovery action for a blocked trace without withdrawing its siblings' actions.
+const verificationNeedsReverify = computed(() => verificationRunNeedsReverify.value
+  || verificationResult.value?.traces.some(trace => trace.id != null && verificationRepairBlocks.value.has(trace.id)))
 
-const verificationNeedsReverify = computed(() =>
-  verificationResultHasRejectedTrace.value || verificationResultStale.value
-  || verificationBoardComparison.value === 'SEMANTICS_CHANGED')
+const verificationResultTraceRepairBlock = (trace: Trace) => {
+  if (!hasPersistedVerificationTrace(verificationResult.value, trace)) {
+    return verificationResult.value?.historyPersistence.status === 'OUTCOME_UNKNOWN'
+      ? 'app.verificationTracePersistenceUnknownFixUnavailable' : 'app.verificationTraceNotPersistedFixUnavailable'
+  }
+  return verificationTraceRepairBlock(trace)
+}
 
 const canFixVerificationResultTrace = (trace: Trace): trace is PersistedTrace => (
-  verificationFixBlockedReason.value === null
-  && hasPersistedVerificationTrace(verificationResult.value, trace)
+  verificationRunRepairBlock.value === null && verificationResultTraceRepairBlock(trace) === null
 )
 
 const openFixForVerificationResultTrace = (trace: Trace) => {
@@ -11549,11 +10530,12 @@ const handleFixModelSemanticsChanged = (traceId: number) => {
   if (boardLifecycleDisposed || currentAuthUserId.value !== boardOwnerUserId
     || !showFixDialog.value || fixTraceId.value !== traceId) return
   // The API rejected this saved trace. A later Board comparison cannot restore its repair eligibility.
-  rejectedVerificationRepairTraceIds.value.add(traceId)
+  verificationRepairBlocks.value.set(traceId, 'app.runBoardSemanticsChanged')
   void refreshCurrentBoardModelFingerprints()
 }
 
-const presentTaskCancellationFailure = async (error: unknown, title: string, selected: boolean) => {
+const presentUnconfirmedTaskCancellation = async (error: unknown, selected: boolean) => {
+  const title = t('app.taskCancellationUnconfirmed')
   const suggestion = t('app.cancelFailureNextStep')
   if (automaticRunPresentation(selected) === 'foreground') {
     await acknowledgeFailure({ title, message: localizedErrorMessage(error, title, locale.value),
@@ -11561,121 +10543,125 @@ const presentTaskCancellationFailure = async (error: unknown, title: string, sel
     return
   }
   console.error(title, error)
-  notifyError(`${title} — ${suggestion}`)
+  notifyBlocked(`${title} — ${suggestion}`)
 }
 
-const cancelTaskFromProgress = (kind: RunPanelKind, cancel: (taskId: number) => Promise<void>) => {
+const presentCompletedTaskAfterCancellation = async (
+  kind: RunPanelKind, taskId: number, status: SimulationTask | FuzzingTask | VerificationTask | null,
+  historyIntent: number | null
+) => {
+  const runId = kind === 'simulation' ? (status && 'simulationTraceId' in status ? status.simulationTraceId : undefined)
+    : (status && 'runId' in status ? status.runId : undefined) ?? taskId
+  if (!runId || historyIntent === null || !isCurrentHistoryPanelIntent(historyIntent, 'tasks')
+    || openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) {
+    notifyTaskCancellationResult(kind, { taskId, cancellationOutcome: 'ALREADY_COMPLETED' })
+    return
+  }
+  await openRunTarget({ kind: kind === 'fuzzing' ? 'exploration' : kind, runId }, true)
+}
+
+const cancelBoardTask = (kind: RunPanelKind, taskId: number) => withTaskActionLock(
+  taskActionKey('cancel', kind, taskId), async () => {
+    const ownsBoard = captureBoardRunOwner()
+    const wasWatched = watchedTaskId(kind) === taskId
+    const wasInProgress = wasWatched && tracksRun(kind)
+    const inTaskInbox = () => showHistoryPanel.value && activeHistoryLayer.value === 'tasks'
+    const historyIntent = inTaskInbox() ? historyPanelIntentEpoch : null
+    const canPresent = () => ownsBoard() && !isTaskCancellationKnown(kind, taskId)
+      && (!wasWatched || watchedTaskId(kind) === undefined || watchedTaskId(kind) === taskId)
+    if (!canPresent()) return
+
+    const api = kind === 'verification' ? boardApi : kind === 'simulation' ? simulationApi : fuzzingApi
+    let receipt: TaskCancellationResult | undefined
+    let error: unknown
+    try {
+      receipt = await api.cancelTask(taskId)
+    } catch (cause) {
+      error = cause
+    }
+    if (!canPresent()) return
+
+    // Completed jobs are omitted from inbox reads and the watcher may have excluded this row.
+    const task = !receipt || (receipt.taskStatus === 'COMPLETED' && !wasWatched && kind === 'simulation')
+      ? await api.getTask(taskId).catch(() => null) : null
+    if (!canPresent()) return
+    const status = receipt?.taskStatus ?? task?.status
+    const isWatched = watchedTaskId(kind) === taskId
+    if (status && !isActiveTaskStatus(status)) applyTaskCancellationStatus(kind, taskId, status)
+
+    // A watched terminal task already refreshes the inbox when its poll settles.
+    const refresh = wasWatched && isWatched && (status === 'CANCELLED' || status === 'COMPLETED')
+      ? null : loadTaskInbox({ showLoading: false })
+    try {
+      if (status === 'COMPLETED') {
+        if (!wasWatched && !isWatched) await presentCompletedTaskAfterCancellation(kind, taskId, task, historyIntent)
+      } else if (receipt) {
+        notifyTaskCancellationResult(kind, receipt)
+      } else if (status === 'CANCELLED' || status === 'FAILED') {
+        notifyTaskCancellationResult(kind, { taskId, cancellationOutcome: status === 'CANCELLED' ? 'ALREADY_CANCELLED' : 'ALREADY_FAILED' })
+      } else {
+        await presentUnconfirmedTaskCancellation(error,
+          (wasInProgress && isWatched && tracksRun(kind))
+          || (historyIntent !== null && isCurrentHistoryPanelIntent(historyIntent, 'tasks')))
+      }
+    } finally {
+      await refresh
+    }
+  }
+)
+
+const cancelTaskFromProgress = (kind: RunPanelKind) => {
   const taskId = watchedTaskId(kind)
-  if (taskId === undefined) return
-  return withTaskActionLock(taskActionKey('cancel', kind, taskId), () => cancel(taskId))
+  if (taskId !== undefined) return cancelBoardTask(kind, taskId)
 }
 
-const cancelAsyncVerification = () => cancelTaskFromProgress('verification', cancelWatchedVerification)
-const cancelAsyncSimulation = () => cancelTaskFromProgress('simulation', cancelWatchedSimulation)
-const cancelAsyncFuzzing = () => cancelTaskFromProgress('fuzzing', cancelWatchedFuzzing)
+const cancelAsyncVerification = () => cancelTaskFromProgress('verification')
+const cancelAsyncSimulation = () => cancelTaskFromProgress('simulation')
+const cancelAsyncFuzzing = () => cancelTaskFromProgress('fuzzing')
 
-const cancelWatchedVerification = async (taskId: number) => {
-  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncVerificationTask.value.taskId === taskId
-    && !isWatchedTaskCancelled('verification', taskId)
-  if (!ownsUnconfirmedCancellation()) return
-  const initiatedInProgress = verificationPanelTracksRun.value
-  try {
-    const result = await boardApi.cancelTask(taskId)
-    if (!ownsUnconfirmedCancellation()) return
-    applyTaskCancellationReceipt('verification', result)
-    notifyTaskCancellationResult('verification', result)
-  } catch (error) {
-    if (!ownsUnconfirmedCancellation()) return
-    await presentTaskCancellationFailure(error, t('app.failedToCancelVerificationTask'),
-      initiatedInProgress && verificationPanelTracksRun.value)
-  }
-}
-
-const cancelWatchedSimulation = async (taskId: number) => {
-  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncSimulationTask.value.taskId === taskId
-    && !isWatchedTaskCancelled('simulation', taskId)
-  if (!ownsUnconfirmedCancellation()) return
-  const initiatedInProgress = simulationPanelTracksRun.value
-  try {
-    const result = await simulationApi.cancelTask(taskId)
-    if (!ownsUnconfirmedCancellation()) return
-    applyTaskCancellationReceipt('simulation', result)
-    notifyTaskCancellationResult('simulation', result)
-  } catch (error) {
-    if (!ownsUnconfirmedCancellation()) return
-    await presentTaskCancellationFailure(error, t('app.failedToCancelSimulationTask'),
-      initiatedInProgress && simulationPanelTracksRun.value)
-  }
-}
-
-const cancelWatchedFuzzing = async (taskId: number) => {
-  const ownsUnconfirmedCancellation = () => !boardLifecycleDisposed && asyncFuzzingTask.value.taskId === taskId
-    && !isWatchedTaskCancelled('fuzzing', taskId)
-  if (!ownsUnconfirmedCancellation()) return
-  const initiatedInProgress = fuzzingPanelTracksRun.value
-  try {
-    const result = await fuzzingApi.cancelTask(taskId)
-    if (!ownsUnconfirmedCancellation()) return
-    applyTaskCancellationReceipt('fuzzing', result)
-    notifyTaskCancellationResult('fuzzing', result)
-  } catch (error) {
-    if (!ownsUnconfirmedCancellation()) return
-    await presentTaskCancellationFailure(error, t('app.failedToCancelFuzzingTask'),
-      initiatedInProgress && fuzzingPanelTracksRun.value)
-  }
-}
-
-let pendingFixRefreshPromise: Promise<boolean> | null = null
-
-const applyFixOnBoard = (write: () => Promise<FixApplyResult | null>) => {
+const applyFixOnBoard = async (
+  traceId: number, write: () => Promise<FixApplyResult | null>
+): Promise<FixBoardApplyOutcome> => {
   const ownsRun = captureBoardRunOwner()
   const token = getToken()
   const ownsBoard = () => ownsRun() && isCurrentSessionToken(token)
-  // Keep the write and its rule snapshot in one slot so refresh cannot adopt a newer board first.
-  return enqueueBoardMutation(async () => {
-    if (!ownsBoard()) return null
-    const result = await write()
-    if (!ownsBoard()) return null
-    if (result) commitSemanticScene({ rules: result.rules, availability: result })
-    return result
+  const outcome = await enqueueBoardMutation(async () => {
+    if (!ownsBoard() || verificationRepairBlocks.value.has(traceId)) return null
+    try {
+      const result = await write()
+      if (!ownsBoard()) return null
+      if (result) commitSemanticScene({ rules: result.rules, availability: result })
+      return result
+    } catch (error: unknown) {
+      if (!ownsBoard()) return null
+      const response = (error as { response?: {
+        status?: number; data?: { data?: { reasonCode?: string } }
+      } } | null)?.response
+      if (isDefinitiveMutationRejection(error) || (response?.status === 503
+        && response.data?.data?.reasonCode === 'FIX_APPLY_PREFLIGHT_UNAVAILABLE')) throw error
+
+      console.error('Automatic fix apply response could not be confirmed:', error)
+      verificationRepairBlocks.value.set(traceId, 'app.fixApplyUnconfirmedReverify')
+      // Keep recovery in the write's queue slot so a waiting refresh or edit cannot overtake it.
+      return { snapshotRefreshed: await refreshBoardSnapshot() }
+    }
   }).catch(error => {
-    if (!ownsBoard()) return null
+    if (!ownsBoard() || isPollingAbortedError(error)) return null
     throw error
   })
+  if (!ownsBoard()) return null
+  if (outcome && 'snapshotRefreshed' in outcome) {
+    notifyBlocked(outcome.snapshotRefreshed
+      ? t('app.fixApplyOutcomeUnconfirmedAfterRefresh')
+      : t('app.fixApplyOutcomeUnknownRefreshFailed'))
+    return 'unconfirmed'
+  }
+  return outcome
 }
 
 const handleFixApplied = (traceId: number) => {
   if (verificationResult.value?.traces.some(trace => trace.id === traceId)) verificationFixApplied.value = true
   else notifySuccess(t('app.fixAppliedWithSignedEvidence'))
-}
-
-const handleFixOutcomeUncertain = async () => {
-  const ownsRun = captureBoardRunOwner()
-  const token = getToken()
-  const ownsBoard = () => ownsRun() && isCurrentSessionToken(token)
-  const refreshPromise = enqueueBoardMutation(() => refreshRules(token))
-  pendingFixRefreshPromise = refreshPromise
-  try {
-    const refreshed = await refreshPromise
-    if (!ownsBoard()) return
-    await reloadUndoAvailability('outside-queue')
-    if (!ownsBoard()) return
-    notifyBlocked(refreshed
-      ? t('app.fixApplyOutcomeUnconfirmedAfterRefresh')
-      : t('app.fixApplyOutcomeUnknownRefreshFailed'))
-  } catch (error) {
-    if (ownsBoard()) throw error
-  } finally {
-    if (pendingFixRefreshPromise === refreshPromise) {
-      pendingFixRefreshPromise = null
-    }
-  }
-}
-
-const waitForPendingFixRefresh = async () => {
-  if (pendingFixRefreshPromise) {
-    await pendingFixRefreshPromise
-  }
 }
 
 const canOpenWorkflowPanel = (kind: BoardWorkflowPanel['kind']) => {
@@ -11746,173 +10732,50 @@ const openHistoryFromActionDock = () => {
   void openHistoryPanel(workInFlight ? 'tasks' : 'results')
 }
 
-// 模拟时间轴动画状态
-const simulationAnimationState = ref({
-  visible: false
-})
-
-/**
- * Open the adopted run's playback at its first state, so the timeline and canvas rewind together.
- */
-const openSimulationAnimationFromSavedStates = () => {
-  const scene = lastSimulationResult.value?.playbackScene
-  if (!scene) {
+const openSimulationAnimationFromSavedStates = (adoptRunAddress = true) => {
+  const result = lastSimulationResult.value
+  if (!result) {
     notifyError(t('app.playbackSnapshotUnavailable'))
     return
   }
-  void refreshCurrentBoardModelFingerprints()
-  activatePlaybackScene(scene)
-  playbackPanelOpen.value = true
-  simulationAnimationState.value = { visible: true }
-  highlightedTrace.value = {
-    states: savedSimulationStates.value,
-    selectedStateIndex: 0
-  }
-  // The same reasoning as counterexample replay: this is a watch-the-canvas mode, so the two authoring panels
-  // give the animation its room back. Applied here as a sibling rather than left for the next reader to notice —
-  // a focus rule that holds for one playback surface and not the other is worse than none.
-  focusCanvasForReplay()
-  const persistence = lastSimulationResult.value?.historyPersistence
-  if (persistence?.status === 'SAVED') {
+  if (!startPlayback({ kind: 'simulation', result }, 0) || !adoptRunAddress) return
+  const persistence = result.historyPersistence
+  if (persistence.status === 'SAVED') {
     staleDeepLink.value = false
     void navigateToRunTarget({ kind: 'simulation', runId: persistence.runId }, 'push')
   } else clearRunDeepLink()
 }
 
-// Replay states and context belong to the same adopted run, including while its surface is hidden.
-const savedSimulationStates = computed(() => lastSimulationResult.value?.states ?? [])
-
-// 反例路径高亮状态
-type HighlightedPlayback = {
-  states: TraceState[]
-  selectedStateIndex: number
-  violatedSpec?: Trace['violatedSpec']
-}
-const highlightedTrace = ref<HighlightedPlayback | null>(null)
-
-// 反例路径动画控制状态
-const traceAnimationState = ref({
-  visible: false,
-  selectedTraceIndex: 0,
-  selectedStateIndex: 0,
-  isPlaying: false
-})
-
-/**
- * Open the counterexample playback surface on one trace, paused at the step that violates the
- * property.
- *
- * Every entry point (verification result dialog, history panel, fuzz finding) starts playback the
- * same way and differs only in which trace index it selects, so the landing step is expressed once
- * -- a caller cannot forget to set `selectedStateIndex` or leave `isPlaying` set.
- *
- * It used to open at index 0. That is the initial state: by definition nothing has changed yet and
- * there is no previous step to compare, so the surface opened on the one step that cannot explain
- * the failure. On a real 27-state counterexample, reviewing both ends of the trace was unambiguous:
- * the final step shows "Temperature 25 -> 26" in red with the changed value flagged, while step 1
- * "would only show an unchanged initial state and require navigating through 26 steps".
- *
- * A counterexample is evidence for a specific claim -- this property can be violated -- so it opens
- * where that claim is demonstrated. The full path stays one click away on the step timeline, which
- * is how a user works backwards from the violation to its cause.
- */
-const openTraceAnimationAt = (selectedTraceIndex: number) => {
-  const trace = savedTraces.value[selectedTraceIndex]
-  const scene = trace?.playbackScene
+const startPlayback = (source: BoardPlaybackSource, initialStateIndex: number): boolean => {
+  const scene = source.kind === 'simulation' ? source.result.playbackScene : source.trace.playbackScene
   if (!scene) {
     notifyError(t('app.playbackSnapshotUnavailable'))
-    return
+    return false
   }
   void refreshCurrentBoardModelFingerprints()
-  activatePlaybackScene(scene)
+  resetPlaybackViewport()
+  playbackTerminalTab.value = 'changes'
   playbackPanelOpen.value = true
-  // Opens on the last state, which is where the evidence is under either shape: for a safety template
-  // NuSMV emits the violating state last (`LAST_STATE_VIOLATION_TEMPLATES`), and for a liveness template
-  // the last state is the one that closes the cycle, so the panel's loop explanation is the first thing
-  // the user reads. Guard the empty case: a malformed trace with no states must not produce a negative
-  // index.
-  const lastStateIndex = Math.max(0, (trace.states?.length ?? 1) - 1)
-  traceAnimationState.value = {
-    visible: true,
-    selectedTraceIndex,
-    selectedStateIndex: lastStateIndex,
-    isPlaying: false
-  }
-  // `highlightedTrace` must move with it: it feeds the changes panel, and this entry point left it at its
-  // previous position — so the changes panel read "State 1 / 27" while the timeline read 27/27, and it described
-  // the changes of a step the user was not looking at. Two independent reviews caught the contradiction and
-  // could not tell which panel to believe; neither could a user.
-  //
-  // `goToState` already writes both, so it is the single owner of "which step is selected" rather than a
-  // second place that has to remember. It runs after the state above is installed, since it clamps to
-  // `totalStates`.
-  goToState(lastStateIndex)
-  focusCanvasForReplay()
-}
-
-/** Collapse authoring panels so the frozen scene owns the canvas during replay. */
-const focusCanvasForReplay = () => {
   boardPanels.control.collapsed = true
   boardPanels.inspector.collapsed = true
-
-  // Then settle the model into the space it was just given, or the view looks evacuated rather than composed.
-  //
-  // Collapsing alone left the model pressed to one side — measured gaps of 181px left against 347px right, in a
-  // stage that had just grown by 528px. The eye reads that as a layout that lost its panels, not as a focused
-  // view. `getVisibleCanvasFrame` already subtracts the rails, the action dock and the timeline, so fitting
-  // *after* the collapse centres the model in the true stage rather than in the raw canvas rectangle.
-  //
-  // Deferred to the next frame because the collapse is reactive: the CSS custom properties driving the rail
-  // widths have not been applied yet in this tick, so fitting now would centre against the pre-collapse frame.
-  //
-  // Inlined rather than calling `fitToContent`, for one reason: that function reports "no devices on canvas" when
-  // the board is empty. Correct for a button the user pressed, wrong for an automatic adjustment — a replay of a
-  // scene whose devices were since deleted would open with an error toast blaming the user for nothing.
-  void nextTick(() => {
-    const viewport = fittedViewportForNodes(renderedCanvasNodes.value)
-    if (!viewport) return
-    if (activePlaybackScene.value) {
-      playbackViewportFollowsFit = true
-      playbackCanvasFrame = getVisibleCanvasFrame()
-      playbackCanvasZoom.value = viewport.zoom
-      playbackCanvasPan.value = viewport.pan
-      return
-    }
-    canvasZoom.value = viewport.zoom
-    canvasPan.value = viewport.pan
-  })
+  activePlayback.value = { ...source, scene: deepClone(scene) }
+  goToState(initialStateIndex)
+  return true
 }
 
-// 独立保存的 traces 数据（用于对话框关闭后）
-const savedTraces = ref<Trace[]>([])
+const closePlayback = () => {
+  if (!activePlayback.value) return false
+  stopPlayback()
+  activePlayback.value = null
+  resetPlaybackViewport()
+  return true
+}
 
-// Playback is a read-only view over a persisted runtime snapshot. Derive the lock from
-// the visible playback surfaces so no entry point can forget to acquire or release it.
-const isAnimationLocked = computed(() =>
-  traceAnimationState.value.visible || simulationAnimationState.value.visible
-)
-
-/**
- * The run manifest the simulation replay bar requires, for the window in which that bar is mounted.
- *
- * The bar's `modelSemantics` prop is non-optional because an absent manifest is not a reachable state:
- * `SimulationResult.modelSemantics` is required, `requireAttackContext` rejects a response whose manifest
- * disagrees with its run context, and `openSimulationAnimationFromSavedStates` refuses to open without a
- * loaded result. `lastSimulationResult` is a nullable ref for the periods when no run has been opened, and
- * a `v-if` on a sibling flag cannot narrow it, so the assertion goes here rather than being spread across
- * the template as `?.`.
- *
- * The cast narrows an invariant the checker cannot see; it deliberately does *not* substitute a fallback
- * manifest. A synthesized one would let the bar describe attack and privacy semantics no run declared —
- * the failure mode the required prop exists to prevent, reintroduced one layer down. Should the invariant
- * ever break, the component reads the prop null-safely and `isModelSemanticsConsistent` returns false for
- * an absent manifest, so it degrades to its "semantics unavailable" warning instead of asserting anything.
- * That warning is the failsafe for this narrowing, which is why it stays despite being unreachable today.
- */
-const simulationPlaybackSemantics = computed(
-  () => lastSimulationResult.value?.modelSemantics as ModelSemantics
-)
-const isModelPlaybackActive = isAnimationLocked
+// Navigation owns its incoming address. Only dismissal clears the replay's link.
+const dismissPlayback = () => {
+  if (closePlayback()) clearRunDeepLink()
+}
+onBeforeUnmount(closePlayback)
 
 // An arriving result cannot take ownership of a replay or a focus-trapping surface.
 const automaticRunPresentationBlock = () => foregroundRunBlock(isModelPlaybackActive.value, openModalDepth.value > 0)
@@ -11960,7 +10823,11 @@ const isBoardUndoBlocked = () => isModelPlaybackActive.value
   || openModalDepth.value > 0
   || activeNodeLayoutInteractions.size > 0
 
-let offerClearUnusableUndoHistory: () => Promise<void> = async () => undefined
+const captureBoardHistoryOwner = () => {
+  const ownsBoard = captureBoardRunOwner()
+  const token = getToken()
+  return () => ownsBoard() && isCurrentSessionToken(token)
+}
 
 const {
   canUndo: canUndoBoardEdit,
@@ -11978,37 +10845,27 @@ const {
     environmentVariables: result.environmentVariables,
     rules: result.rules,
     specs: result.specs,
-    semanticChanged: hasRecommendationSceneChanged({
-      nodes: nodes.value, environmentVariables: environmentVariables.value, rules: rules.value,
-      specifications: specifications.value, deviceTemplates: deviceTemplates.value
-    }, {
-      nodes: result.nodes, environmentVariables: result.environmentVariables, rules: result.rules,
-      specifications: result.specs, deviceTemplates: deviceTemplates.value
-    })
+    semanticChanged: false
   }),
   // Serializes with every other board mutation, and re-checks admission when the slot is reached:
   // `isBlocked()` is evaluated once before queueing, so without this a undo queued behind a slow
   // delete could land after playback started.
   submit: work => enqueueBoardMutation(work, {
-    admissionGuard: () => !isBoardUndoBlocked(),
-    trackSemanticChange: false
+    admissionGuard: () => !isBoardUndoBlocked()
   }),
-  // A rejected response does not prove the mutation failed before commit. Reconcile in the same
-  // queue so no later board mutation can race the authoritative refresh.
-  reconcile: () => enqueueBoardMutation(refreshBoardSnapshot),
-  // An undo *is* a semantic scene change, so it owes recommendation invalidation too.
-  // `commitSemanticScene` owns staleness but not this — the mutation queue's own
-  // `onSemanticChange` is skipped by `trackSemanticChange: false`.
-  onApplied: result => {
-    invalidateRecommendationsForSceneChange({ notify: true })
-    announceAppliedBoardUndo(result)
-  },
+  captureOwner: captureBoardHistoryOwner,
+  reconcile: refreshBoardSnapshot,
+  onApplied: result => announceAppliedBoardUndo(result),
   isIgnorableError: error => isPollingAbortedError(error)
     || error instanceof BoardMutationAdmissionCancelledError,
   isBlocked: isBoardUndoBlocked,
   report: (reasonCode, direction, error, reconciled) => {
     if (reasonCode === 'blocked') {
       notifyBlocked(t('app.boardUndoBlocked'))
+      return
+    }
+    if (reasonCode === 'replay-blocked') {
+      notifyBlocked(t('app.boardUndoReplayUnconfirmed'))
       return
     }
     if (reasonCode === 'nothing') {
@@ -12029,7 +10886,10 @@ const {
       void offerClearUnusableUndoHistory()
       return
     }
-    console.error('Board edit undo failed:', error)
+    if (reasonCode === 'failed') {
+      notifyError(localizedErrorMessage(error, t('app.boardUndoFailed'), locale.value))
+      return
+    }
     notifyBlocked(t(reconciled
       ? 'app.boardUndoOutcomeRefreshed'
       : 'app.boardUndoOutcomeUnknownRefreshFailed'))
@@ -12069,20 +10929,33 @@ const announceAppliedBoardUndo = (result: BoardUndoResult) => {
 }
 
 let clearUndoHistoryConfirmationPending = false
-offerClearUnusableUndoHistory = async () => {
+const offerClearUnusableUndoHistory = async () => {
   if (clearUndoHistoryConfirmationPending) return
+  const isCurrent = captureBoardHistoryOwner()
+  const admissionGuard = () => isCurrent() && !isBoardUndoBlocked()
+  const isConflict = (error: unknown) => (error as { response?: { status?: number } })?.response?.status === 409
   clearUndoHistoryConfirmationPending = true
   try {
     const preview = await enqueueBoardMutation(
       () => boardApi.previewBoardEditHistoryClear(),
-      {
-        admissionGuard: () => !isBoardUndoBlocked(),
-        trackSemanticChange: false
-      }
+      { admissionGuard, trackSemanticChange: false }
     )
+    if (!isCurrent()) return
     if (preview.entryCount === 0) {
-      syncBoardUndoAvailability(preview)
+      // The preview has no revision and cannot pair empty history with the visible scene.
+      if (canUndoBoardEdit.value || canRedoBoardEdit.value) {
+        const refreshed = await enqueueBoardMutation(() => refreshBoardSnapshot(), { admissionGuard })
+        if (!isCurrent()) return
+        if (!refreshed || canUndoBoardEdit.value || canRedoBoardEdit.value) {
+          notifyBlocked(t(refreshed ? 'app.boardUndoHistoryChanged' : 'app.boardUndoConflictRefreshFailed'))
+          return
+        }
+      }
       notifyInfo(t('app.boardUndoHistoryAlreadyEmpty'))
+      return
+    }
+    if (unconfirmedUndoHistoryClearTokens.has(preview.impactToken)) {
+      notifyBlocked(t('app.boardUndoClearHistoryPreviewUnconfirmed'))
       return
     }
     if (!await confirmDestructive({
@@ -12090,52 +10963,63 @@ offerClearUnusableUndoHistory = async () => {
       message: t('app.boardUndoClearHistoryMessage', { count: preview.entryCount }),
       confirmText: t('app.boardUndoClearHistoryAction')
     })) return
-    const availability = await enqueueBoardMutation(
-      () => boardApi.clearBoardEditHistory(preview.impactToken),
-      {
-        admissionGuard: () => !isBoardUndoBlocked(),
-        trackSemanticChange: false
+    await enqueueBoardMutation(async () => {
+      const receipt = await readBoardWriteReceipt(() => boardApi.clearBoardEditHistory(preview.impactToken), isCurrent, {
+        refreshOnRejection: isConflict
+      })
+      if (!receipt) return
+      if (receipt.status === 'confirmed') {
+        syncBoardUndoAvailability(receipt.mutation)
+        notifyInfo(t('app.boardUndoHistoryCleared'))
+      } else if (receipt.status === 'unconfirmed') {
+        unconfirmedUndoHistoryClearTokens.add(preview.impactToken)
+        const message = !receipt.snapshotRefreshed ? 'app.boardUndoClearHistoryOutcomeUnknown'
+          : canUndoBoardEdit.value || canRedoBoardEdit.value ? 'app.boardUndoClearHistoryOutcomeRefreshed'
+            : 'app.boardUndoClearHistoryOutcomeEmpty'
+        notifyBlocked(t(message))
+      } else if (isConflict(receipt.error)) {
+        notifyBlocked(t(receipt.snapshotRefreshed ? 'app.boardUndoClearHistoryStale' : 'app.boardUndoClearHistoryStaleRefreshFailed'))
+      } else {
+        notifyError(extractApiErrorMessage(receipt.error, t('app.boardUndoClearHistoryFailed')))
       }
-    )
-    syncBoardUndoAvailability(availability)
-    notifyInfo(t('app.boardUndoHistoryCleared'))
+    }, { admissionGuard })
   } catch (error) {
-    if (isPollingAbortedError(error)
+    if (!isCurrent() || isPollingAbortedError(error)
       || error instanceof BoardMutationAdmissionCancelledError) return
-    await reloadUndoAvailability('outside-queue')
-    if ((error as { response?: { status?: number } })?.response?.status === 409) {
-      notifyBlocked(t('app.boardUndoClearHistoryStale'))
-      return
-    }
     notifyError(extractApiErrorMessage(error, t('app.boardUndoClearHistoryFailed')))
   } finally {
     clearUndoHistoryConfirmationPending = false
   }
 }
 
-// Bind the late reference the assistant refresh helpers above call, now that it exists.
-reloadUndoAvailability = async placement => {
-  if (!await hasBoardUndoHistoryChanged()) return
-  if (placement === 'outside-queue') await requestBoardSnapshotRefresh({ force: true })
-  else await refreshBoardSnapshot()
+async function refreshBoardIfEditHistoryChanged() {
+  if (await hasBoardUndoHistoryChanged()) await requestBoardSnapshotRefresh({ force: true })
 }
 
-// Register this after playback refs exist. A watcher evaluates its computed source
-// immediately while collecting dependencies, so registering it earlier would hit the
-// temporal-dead-zone of the playback state during setup.
-watch(isCanvasInteractionLocked, locked => {
-  if (!locked) return
+// A playback transition changes the viewport receiving pointer input.
+watch([isCanvasNavigationLocked, isModelPlaybackActive], ([locked, playback], [, previousPlayback]) => {
+  if (!locked && playback === previousPlayback) return
   finishCanvasPan()
   finishCanvasMapDrag()
 })
 
 
-const activePlaybackKind = computed<'simulation' | 'counterexample' | 'fuzzing' | null>(() => {
-  if (simulationAnimationState.value.visible) return 'simulation'
-  if (traceAnimationState.value.visible && activeFuzzingFinding.value) return 'fuzzing'
-  if (traceAnimationState.value.visible) return 'counterexample'
-  return null
-})
+const activePlaybackStates = computed<TraceState[]>(() =>
+  simulationPlaybackResult.value?.states ?? currentTrace.value?.states ?? []
+)
+const totalStates = computed(() => activePlaybackStates.value.length)
+const {
+  selectedStateIndex: activePlaybackStateIndex,
+  isPlaying: isPlaybackPlaying,
+  seek: goToState,
+  stop: stopPlayback,
+  toggle: togglePlayback
+} = usePlaybackCursor(totalStates)
+const activePlaybackState = computed(() => activePlaybackStates.value[activePlaybackStateIndex.value])
+const highlightedTrace = computed(() => activePlaybackState.value ? {
+  states: activePlaybackStates.value,
+  selectedStateIndex: activePlaybackStateIndex.value
+} : null)
 
 let playbackFocusFallbackId = 'open-verification-panel'
 watch(activePlaybackKind, kind => {
@@ -12149,76 +11033,36 @@ const {
   handleModalKeydown: handlePlaybackKeydown
 } = useModalAccessibility(
   isModelPlaybackActive,
-  () => traceAnimationState.value.visible ? closeTraceAnimation() : closeSimulationTimeline(),
+  dismissPlayback,
   opener => document.querySelector<HTMLElement>(opener?.closest('[data-testid="trace-history-panel"]')
     ? '[data-testid="open-history-panel"]' : `[data-testid="${playbackFocusFallbackId}"]`),
   { trapFocus: false, shouldRestoreFocus: () => !isModelPlaybackActive.value
     && !isResultSurfaceVisible.value && !isWorkflowPanelOpen.value }
 )
 
-/**
- * Wrapped trace passed to the canvas, with violation information gated by playback kind.
- *
- * Prevents counterexample violation emphasis from leaking into simulation replay:
- * `savedTraces` has three writers and no reset, and `currentTrace` prefers it
- * unconditionally — so a counterexample opened earlier stays selected while a
- * simulation replays through the same `highlightedTrace`, and the canvas would
- * outline that counterexample's devices on a run that violated nothing.
- */
 const canvasHighlightedTrace = computed(() => {
-  if (!highlightedTrace.value) return null
+  const trace = highlightedTrace.value
+  if (!trace) return null
 
-  const isViolationPlayback =
-    activePlaybackKind.value === 'counterexample' ||
-    activePlaybackKind.value === 'fuzzing'
-
-  // Derived from the violated specification's own conditions. It previously read
-  // `violatedSpec.boundDeviceIds`, a field `Specification` does not have, so this was always `[]` and
-  // the canvas fell back to emphasising *every* device in the state — the scoping this computed exists
-  // to provide never took effect. `devices` is the accumulated per-spec reference list when present;
-  // the conditions are the authority behind it, so both are read and de-duplicated.
-  const violationDeviceIds = isViolationPlayback
-    ? [...new Set([
-        ...(currentTrace.value?.violatedSpec?.devices || []).map(device => device.deviceId),
-        ...[
-          currentTrace.value?.violatedSpec?.aConditions,
-          currentTrace.value?.violatedSpec?.ifConditions,
-          currentTrace.value?.violatedSpec?.thenConditions
-        ].flatMap(conditions => (conditions || []).map(condition => condition.deviceId))
-      ].filter((deviceId): deviceId is string => !!deviceId))]
-    : []
+  // The active playback source owns all violation evidence.
+  const violatedSpec = currentTrace.value?.violatedSpec
+  const violationDeviceIds = [...new Set([
+    ...(violatedSpec?.devices || []).map(device => device.deviceId),
+    ...[violatedSpec?.aConditions, violatedSpec?.ifConditions, violatedSpec?.thenConditions]
+      .flatMap(conditions => (conditions || []).map(condition => condition.deviceId))
+  ].filter((deviceId): deviceId is string => !!deviceId))]
 
   return {
-    ...highlightedTrace.value,
-    violationStateIndex: isViolationPlayback
-      ? counterexampleViolationStep.value
-      : undefined,
-    violationStateIndexes: isViolationPlayback
-      ? counterexampleViolationSteps.value
-      : [],
+    ...trace,
+    violationStateIndex: counterexampleViolationStep.value,
+    violationStateIndexes: counterexampleViolationSteps.value,
     violationDeviceIds
   }
 })
 
-type ActivePlaybackState = {
-  devices?: TraceDevice[]
-  envVariables?: TraceVariable[]
-  triggeredRules?: TraceTriggeredRule[]
-  compromisedAutomationLinks?: TraceTriggeredRule[]
-  loopStart?: boolean
-  loopBack?: boolean
-}
-
-const activePlaybackStates = computed<ActivePlaybackState[]>(() => {
-  if (!isModelPlaybackActive.value || !highlightedTrace.value?.states) return []
-  return highlightedTrace.value.states
-})
-
-const activePlaybackDevices = computed(() =>
-  activePlaybackStates.value[activePlaybackStateIndex.value]?.devices || [])
-
-const activePlaybackEnvironmentVariables = computed(() =>
-  activePlaybackStates.value[activePlaybackStateIndex.value]?.envVariables || [])
+const activePlaybackDevices = computed(() => activePlaybackState.value?.devices || [])
+const activePlaybackEnvironmentVariables = computed(() => activePlaybackState.value?.envVariables || [])
+const activePlaybackCompromisedAutomationLinks = computed(() => activePlaybackState.value?.compromisedAutomationLinks || [])
 
 const bundledPlaybackDeviceIds = computed(() => activePlaybackDevices.value
   .filter(hasFrozenBundledTokenSource)
@@ -12232,12 +11076,6 @@ const formatPlaybackEnvironmentModelToken = (name: string, value: unknown): stri
   bundledPlaybackEnvironmentNames.value.includes(name)
     ? formatBundledModelToken(value)
     : String(value ?? '')
-
-const activePlaybackStateIndex = computed(() => {
-  const selected = Number(highlightedTrace.value?.selectedStateIndex ?? 0)
-  const lastIndex = Math.max(activePlaybackStates.value.length - 1, 0)
-  return Math.min(Math.max(Number.isFinite(selected) ? Math.trunc(selected) : 0, 0), lastIndex)
-})
 
 const activePlaybackChanges = computed<PlaybackDeviceChange[]>(() => {
   if (!activePlaybackKind.value || activePlaybackStateIndex.value <= 0) return []
@@ -12263,7 +11101,7 @@ const activePlaybackEnvironmentChanges = computed<PlaybackEnvironmentChange[]>((
 })
 
 const activePlaybackTriggeredRules = computed<TraceTriggeredRule[]>(() =>
-  activePlaybackStates.value[activePlaybackStateIndex.value]?.triggeredRules || [])
+  activePlaybackState.value?.triggeredRules || [])
 
 const activeFuzzingStepInputEvents = computed<Array<FuzzingInputEvent & { targetLabel?: string }>>(() => {
   const finding = activeFuzzingFinding.value
@@ -12312,62 +11150,15 @@ const LIVENESS_TEMPLATES = new Set(['2', '5', '6'])
  * the fault is a single state and the loop is incidental.
  */
 const activePlaybackIsLivenessViolation = computed(() => {
-  const trace = highlightedTrace.value
-  if (!trace?.violatedSpec?.templateId) return false
-  return LIVENESS_TEMPLATES.has(String(trace.violatedSpec.templateId))
+  if (!isTracePlaybackActive.value) return false
+  return LIVENESS_TEMPLATES.has(String(currentTrace.value?.violatedSpec?.templateId))
 })
 
-/**
- * 1-based state numbers of the repeating cycle [start, end], or null if no loop.
- *
- * NuSMV marks lasso counterexamples with "-- Loop starts here" before the loop-entry state, then
- * terminates by re-printing that state. The backend parser sets `loopStart: true` on the entry and
- * `loopBack: true` on the final repeat. Whether that repeat *looks* like a repeat depends on the cycle
- * length — a one-state cycle carries no variable lines and freezes, a longer one carries the deltas back
- * to the entry and looks like an ordinary step — so the range is what lets the panel name the cycle
- * either way; see `TraceStateDto#loopBack`.
- *
- * Shown in the PlaybackChangesPanel on the loop-back step, where the shipped wording names this range
- * and says the cycle is the violation (`app.traceLoopExplanation`).
- */
-const activePlaybackLoopRange = computed<{ start: number; end: number } | null>(() => {
-  const states = activePlaybackStates.value
-  if (states.length === 0) return null
-
-  /*
-   * The LAST marked state, not the first, because NuSMV can print `-- Loop starts here` more than once
-   * in one counterexample and the parser resolves that by keeping the last one: `SmvTraceParser`
-   * overwrites `loopStartState` on every marker, and `loopBack` is paired with whatever it holds at the
-   * end. `SmvTraceParserTest.parseCounterexample_usesTheLastMarkerWhenNuSmvPrintsSeveral` pins a
-   * five-state trace where states 3 and 4 both carry `loopStart` and state 5 carries `loopBack`.
-   *
-   * `findIndex` disagreed with that: it named states 3–5 where the cycle is 4–5, so the changes panel said
-   * "State 5 loops back to state 3" — a wrong statement about formal evidence, in the one place a reader
-   * goes to find out why the final step shows nothing moving.
-   *
-   * A reverse scan rather than `findLastIndex`, which needs `lib: ES2023`; this app targets ES2020, and
-   * raising the whole lib for one call is a build-config change out of proportion to it.
-   */
-  let loopStartIndex = -1
-  for (let i = states.length - 1; i >= 0; i--) {
-    if (states[i]?.loopStart === true) { loopStartIndex = i; break }
-  }
-  if (loopStartIndex === -1) return null
-
-  /*
-   * `findIndex` is correct here, unlike above: `SmvTraceParser.markLoopBackState` sets `loopBack` on the
-   * last state only, and on at most one state per trace, so there is no last-vs-first ambiguity to
-   * resolve. Verified against that method rather than assumed from the marker's symmetry with
-   * `loopStart`, which *can* appear several times.
-   */
-  const loopBackIndex = states.findIndex(s => s.loopBack === true)
-  if (loopBackIndex === -1) return null
-
-  // Convert to 1-based state numbers for display
-  return {
-    start: loopStartIndex + 1,
-    end: loopBackIndex + 1
-  }
+const playbackLoopRange = computed(() => findPlaybackLoopRange(activePlaybackStates.value))
+const activePlaybackLoopRange = computed(() => {
+  const range = playbackLoopRange.value
+  // The explanation uses state numbers. The canvas and rail use indices.
+  return range && { start: range.start + 1, end: range.end + 1 }
 })
 
 /**
@@ -12378,16 +11169,7 @@ const activePlaybackLoopRange = computed<{ start: number; end: number } | null>(
  * absence of changes *is* the state's meaning; on a longer cycle the step carries real changes and the
  * explanation is what stops it from reading as the path continuing.
  */
-const activePlaybackIsLoopBackState = computed(() => {
-  const currentState = activePlaybackStates.value[activePlaybackStateIndex.value]
-  return currentState?.loopBack === true
-})
-
-const resetPlaybackTerminal = () => {
-  playbackTerminalTab.value = 'changes'
-}
-
-watch(activePlaybackKind, resetPlaybackTerminal)
+const activePlaybackIsLoopBackState = computed(() => activePlaybackState.value?.loopBack === true)
 
 const isLiveBoardEditorVisible = computed(() =>
   templateInstanceDialogVisible.value ||
@@ -12420,25 +11202,15 @@ const notifyAutomaticPlaybackDeferred = (
     }
     return
   }
-  const ownerAuthScopeEpoch = boardAuthScopeEpoch
-  const ownerUserId = currentAuthUserId.value
-  let close!: () => void
-  close = notifyAvailableResult({
+  offerDeferredRunNotice({
     title: t('app.simulationTemporaryResultTitle'),
     message: t('app.simulationTemporaryResultMessage'),
     actionLabel: t('app.simulationTemporaryResultOpen'),
-    discardLabel: t('app.discardLocalResult'),
-    onAction: () => {
-      if (!isCurrentBoardAuthScope(ownerAuthScopeEpoch) || currentAuthUserId.value !== ownerUserId) return true
-      if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
-      closeOtherWorkflowSurfaces()
-      adoptSimulationRunResult(result, submissionSceneChanges)
-      openSimulationAnimationFromSavedStates()
-      return true
-    },
-    onClose: () => unsavedRunNotifications.delete(close)
+    discardLabel: t('app.discardLocalResult')
+  }, () => {
+    adoptSimulationRunResult(result, submissionSceneChanges)
+    openSimulationAnimationFromSavedStates()
   })
-  unsavedRunNotifications.add(close)
 }
 
 const deliverSimulationRunResult = (result: SimulationResultView, submissionSceneChanges: number) => {
@@ -12461,8 +11233,6 @@ const ensurePlaybackClosedForMutation = (): boolean => {
   notifyBlocked(t('app.playbackReadOnlyCloseFirst'))
   return false
 }
-
-let playInterval: ReturnType<typeof setInterval> | null = null
 
 /**
  * Which surfaces claim the space the map viewport occupies.
@@ -12487,34 +11257,12 @@ const isWorkflowPanelOpen = computed(() => activeWorkflowPanel.value !== null)
  * this rule rather than for the rule itself.
  */
 
-// 当前选中的 trace
-const currentTrace = computed(() => {
-  // 优先使用 savedTraces
-  if (savedTraces.value.length > 0) {
-    return savedTraces.value[traceAnimationState.value.selectedTraceIndex] || null
-  }
-  return verificationResult.value?.traces?.[traceAnimationState.value.selectedTraceIndex] || null
-})
-
-// 所有状态数量
-const totalStates = computed(() => {
-  return currentTrace.value?.states?.length || 0
-})
-
 // Verification context of the trace currently being viewed, derived from the trace's own snapshot
 // (backend TraceDto) rather than the live verification form.
 const activeTraceContext = computed(() => {
   return deriveTraceContext(currentTrace.value)
 })
 
-const currentTraceState = computed(() => {
-  const trace = currentTrace.value
-  if (!trace?.states) return null
-  return trace.states[traceAnimationState.value.selectedStateIndex] || null
-})
-
-
-const currentTraceCompromisedAutomationLinks = computed(() => currentTraceState.value?.compromisedAutomationLinks || [])
 const currentBoardRuleIds = computed(() => rules.value
   .map(rule => rule.id)
   .filter((id): id is string => !!id)
@@ -12530,7 +11278,7 @@ const currentBoardDeviceIds = computed(() => nodes.value.map(node => normalizePl
 // 选择并播放指定索引的反例路径动画
 const selectAndPlayTrace = (traceIndex: number) => {
   // 互斥检查：如果模拟动画正在显示，则不允许打开反例路径动画
-  if (simulationAnimationState.value.visible) {
+  if (isSimulationPlaybackActive.value) {
     notifyBlocked(t('app.closeCurrentSimulationFirst'))
     return
   }
@@ -12547,35 +11295,9 @@ const selectAndPlayTrace = (traceIndex: number) => {
       void openRunTarget({ kind: 'verification', runId: trace.verificationTaskId, traceId: trace.id })
       return
     }
-    resetPlaybackTerminal()
-    activeFuzzingFinding.value = null
-    // 保存 traces 数据到独立变量
-    savedTraces.value = [...traces]
-    
-    // 关闭验证结果对话框
     closeResultDialog()
-    
-    // `openTraceAnimationAt` selects the violating state and writes both selection refs through
-    // `goToState`. A second write to `highlightedTrace` here used to force it back to state 0 — the
-    // stale intent of an older design where a trace opened at its beginning — which is what made the
-    // changes panel describe step 1 while the timeline sat on step 27.
-    openTraceAnimationAt(traceIndex)
+    startPlayback({ kind: 'counterexample', trace }, trace.states.length - 1)
   }
-}
-
-// 关闭反例路径动画
-/**
- * User dismissal clears the replay address. Navigation teardown preserves the incoming address
- * so Back/Forward can load the selected result without a competing URL rewrite.
- */
-const closeTraceAnimation = (clearDeepLink = true) => {
-  stopTraceAnimation()
-  traceAnimationState.value.visible = false
-  highlightedTrace.value = null
-  activeFuzzingFinding.value = null
-  deactivatePlaybackScene()
-  resetPlaybackTerminal()
-  if (clearDeepLink) clearRunDeepLink()
 }
 
 const recheckAddressedHistory = async (): Promise<boolean> => {
@@ -12590,7 +11312,7 @@ const recheckAddressedHistory = async (): Promise<boolean> => {
   const ownsTarget = () => ownsRun() && (foregroundExploration
     ? !appliedDeepLinkTarget && !deepLinkTarget.value && showFuzzingResultDialog.value
       && fuzzingResult.value === foregroundExploration
-    : isSameBoardRunTarget(appliedDeepLinkTarget, target) && isSameBoardRunTarget(deepLinkTarget.value, target))
+    : appliedDeepLinkTarget === target && isSameBoardRunTarget(deepLinkTarget.value, target))
   if (!ownsTarget()) return true
   try {
     // History lists can be paginated, and a counterexample can be deleted independently of its run.
@@ -12605,13 +11327,8 @@ const recheckAddressedHistory = async (): Promise<boolean> => {
           const savedIds = new Set(run.counterexamples.map(trace => trace.id))
           result.traces = result.traces.filter(trace => trace.id === undefined || savedIds.has(trace.id))
         } else if (!result && historyDetailRequests.hasPendingReplace()) {
-          // An earlier evidence response can still contain the deleted trace even though its run exists.
-          if (pendingHistoryRunTarget === target) {
-            // Give the replacement its own history intent so the first load cannot retire it.
-            await openRunTarget({ ...target }, true)
-          } else {
-            await applyDeepLinkTarget(target)
-          }
+          // The older evidence read may still include a deleted trace. Reuse the checked run.
+          await applyDeepLinkTarget(target, run)
         }
       }
     } else if (target.kind === 'simulation') {
@@ -12622,7 +11339,7 @@ const recheckAddressedHistory = async (): Promise<boolean> => {
     return true
   } catch (error) {
     if (!ownsTarget()) return true
-    if ((error as { response?: { status?: number } } | null)?.response?.status !== 404) return false
+    if (!isRecordMissing(error)) return false
 
     if (foregroundExploration) {
       closeFuzzingResult()
@@ -12631,7 +11348,6 @@ const recheckAddressedHistory = async (): Promise<boolean> => {
     }
     const playback = activePlaybackKind.value
     void applyDeepLinkTarget(null)
-    if (playback === 'counterexample' || playback === 'fuzzing') savedTraces.value = []
     if (target.kind === 'simulation' && lastSimulationResult.value?.historyPersistence.runId === target.runId) {
       lastSimulationResult.value = null
       simulationResultStale.value = false
@@ -12652,47 +11368,26 @@ const recheckAddressedHistory = async (): Promise<boolean> => {
   }
 }
 
-/**
- * Tear down every surface still showing a verification run the user has just deleted.
- *
- * Deleting a run removed it from the history list and nothing else, so a result dialog or a
- * counterexample replay opened from it kept rendering evidence for a record that no longer existed.
- * Measured: with the dialog open, the download button stayed enabled and answered "SMV model not
- * available (may be a record saved before model persistence was enabled)" — a historical-data excuse for
- * a deletion one click old.
- *
- * Matched on the run id rather than by closing unconditionally: deleting run 7 must not shut a dialog
- * showing run 9. The trace surfaces are matched through `verificationTaskId`, which is the run every
- * persisted counterexample carries.
- */
-const dismissRunSurfacesForDeletedVerificationRun = (runId: number) => {
-  const openRunId = verificationResult.value?.historyPersistence?.runId
-  if (activePlaybackKind.value === 'counterexample' && currentTrace.value?.verificationTaskId === runId) {
-    // Closes the replay and clears the deep link, so a reload cannot reopen the deleted run.
-    closeTraceAnimation()
-    savedTraces.value = []
-  }
+const dismissDeletedRunSurfaces = ({ kind, runId }: BoardRunTarget) => {
+  const matchesRun = (target: BoardRunTarget | null) => target?.kind === kind && target.runId === runId
+  // A navigation can claim a new target before its URL has been committed.
+  const ownsLink = matchesRun(deepLinkTarget.value) && (!appliedDeepLinkTarget || matchesRun(appliedDeepLinkTarget))
+  if (matchesRun(pendingHistoryRunTarget)) pendingHistoryRunTarget = null
 
-  if (openRunId === runId) {
-    // `dismissResultDialog`, not `closeResultDialog`: this is a user-visible close, so the `?run=` deep
-    // link has to go with it — otherwise the URL sync would reopen the run and fail to load it.
-    dismissResultDialog()
-  }
-}
-
-// 选择违规规约
-// 跳转到指定状态
-const goToState = (index: number) => {
-  stopTraceAnimation()
-  const lastIndex = Math.max(totalStates.value - 1, 0)
-  traceAnimationState.value.selectedStateIndex = Math.min(Math.max(index, 0), lastIndex)
-  const trace = currentTrace.value
-  if (trace) {
-    highlightedTrace.value = {
-      ...trace,
-      selectedStateIndex: traceAnimationState.value.selectedStateIndex
+  if (kind === 'verification') {
+    if (activePlaybackKind.value === 'counterexample' && currentTrace.value?.verificationTaskId === runId) closePlayback()
+    if (verificationResult.value?.historyPersistence.runId === runId) closeResultDialog()
+  } else if (kind === 'simulation') {
+    if (simulationPlaybackResult.value?.historyPersistence.runId === runId) closePlayback()
+    if (lastSimulationResult.value?.historyPersistence.runId === runId) {
+      lastSimulationResult.value = null
+      simulationResultStale.value = false
     }
+  } else {
+    if (activeFuzzingFinding.value?.fuzzTaskId === runId) closePlayback()
+    if (fuzzingResult.value?.id === runId || (ownsLink && fuzzingResultLoading.value)) closeFuzzingResult()
   }
+  if (ownsLink) clearRunDeepLink()
 }
 
 /**
@@ -12738,37 +11433,6 @@ const goToState = (index: number) => {
 const LAST_STATE_VIOLATION_TEMPLATES = new Set(['1', '3', '4', '7'])
 
 /**
- * Loop range [start, end] for the current counterexample trace, or null if no loop.
- *
- * Indices are **0-based** here, unlike `activePlaybackLoopRange`, because these feed
- * `counterexampleViolationSteps` — array positions for canvas emphasis and the rail's cycle rings —
- * rather than the state numbers a sentence shows the user. Both resolve the entry from the *last*
- * `loopStart` marker, matching `SmvTraceParser`, which overwrites `loopStartState` on every marker it
- * sees; a trace can carry several. Reading the first would emphasise a state the cycle does not contain.
- */
-const counterexampleLoopRange = computed<{ start: number; end: number } | null>(() => {
-  const trace = currentTrace.value
-  if (!trace?.states) return null
-
-  // Reverse scan rather than `findLastIndex`, which needs `lib: ES2023`; this app targets ES2020.
-  let start = -1
-  for (let index = trace.states.length - 1; index >= 0; index--) {
-    const state = trace.states[index]
-    if (state?.loopStart === true) {
-      start = index
-      break
-    }
-  }
-  if (start === -1) return null
-
-  // Find the loop-back state
-  const end = trace.states.findIndex(state => state?.loopBack === true)
-  if (end === -1) return null
-
-  return { start, end }
-})
-
-/**
  * Single violation step index for safety counterexamples, or undefined for liveness.
  * Used to mark one step on the rail and emphasize devices on the canvas.
  */
@@ -12801,28 +11465,27 @@ const counterexampleViolationStep = computed<number | undefined>(() => {
   return undefined
 })
 
-/**
- * The same answer as a 1-based state number, for the playback panel's badge.
- *
- * That badge previously read `activeFuzzingFinding` directly, so it appeared for an exploration finding and
- * never for a verification counterexample — while the rail marker directly beneath the panel said
- * "Violation" on that very state. Stepping through a safety counterexample, the one panel whose job is to
- * explain what happens *at this state* was the only surface silent about it.
- *
- * Reading the computed above rather than the finding keeps one owner for the question. `undefined` for a
- * liveness cycle is correct here too: there the cycle is the violation, and `loopBackSentence` says so
- * instead of a badge naming a single state.
- *
- * Gated on the playback kind for the same reason `canvasHighlightedTrace` is: this changes panel is shared with
- * simulation replay, and neither `savedTraces` nor `activeFuzzingFinding` is cleared when one starts, so an
- * ungated read would badge a state of a run that violated nothing. The component's old
- * `kind === 'fuzzing'` test was doing this incidentally; making the badge kind-agnostic there means the gate
- * has to be stated here, where the playback kind is known.
- */
-const activeViolationStateNumber = computed(() => {
+const playbackChangeProps = computed(() => {
   const kind = activePlaybackKind.value
-  if (kind !== 'counterexample' && kind !== 'fuzzing') return undefined
-  return counterexampleViolationStep.value === undefined ? undefined : counterexampleViolationStep.value + 1
+  if (!kind) return null
+  const violationStep = counterexampleViolationStep.value
+  return {
+    kind,
+    changes: activePlaybackChanges.value,
+    environmentChanges: activePlaybackEnvironmentChanges.value,
+    triggeredRules: activePlaybackTriggeredRules.value,
+    currentRuleIds: currentBoardRuleIds.value,
+    animatedEdgeCount: activePlaybackAnimatedEdgeCount.value,
+    stateNumber: activePlaybackStateIndex.value + 1,
+    totalStates: activePlaybackStates.value.length,
+    inputEvents: activeFuzzingStepInputEvents.value,
+    bundledDeviceIds: bundledPlaybackDeviceIds.value,
+    bundledEnvironmentNames: bundledPlaybackEnvironmentNames.value,
+    violationStateNumber: violationStep === undefined ? undefined : violationStep + 1,
+    isLoopBackState: activePlaybackIsLoopBackState.value,
+    loopRange: activePlaybackLoopRange.value,
+    isLivenessViolation: activePlaybackIsLivenessViolation.value
+  }
 })
 
 /**
@@ -12842,7 +11505,7 @@ const counterexampleViolationSteps = computed<number[]>(() => {
 
   // Liveness templates: mark every step in the cycle
   if (LIVENESS_TEMPLATES.has(String(templateId))) {
-    const range = counterexampleLoopRange.value
+    const range = playbackLoopRange.value
     if (!range) return []
 
     // Return all indices from start to end (inclusive)
@@ -12895,87 +11558,6 @@ const getTraceStateAriaLabel = (index: number) => {
   return label ? `${base}, ${label}` : base
 }
 
-// 播放/停止动画
-const toggleTraceAnimation = () => {
-  if (traceAnimationState.value.isPlaying) {
-    stopTraceAnimation()
-  } else {
-    startTraceAnimation()
-  }
-}
-
-const startTraceAnimation = () => {
-  if (traceAnimationState.value.isPlaying) return
-  if (totalStates.value <= 1) return
-
-  const trace = currentTrace.value
-  if (!trace) return
-
-  if (traceAnimationState.value.selectedStateIndex >= totalStates.value - 1) {
-    goToState(0)
-  }
-  
-  traceAnimationState.value.isPlaying = true
-  playInterval = setInterval(() => {
-    const activeTrace = currentTrace.value
-    if (!activeTrace) {
-      stopTraceAnimation()
-      return
-    }
-    if (traceAnimationState.value.selectedStateIndex < totalStates.value - 1) {
-      traceAnimationState.value.selectedStateIndex++
-      highlightedTrace.value = {
-        ...activeTrace,
-        selectedStateIndex: traceAnimationState.value.selectedStateIndex
-      }
-      if (traceAnimationState.value.selectedStateIndex >= totalStates.value - 1) {
-        stopTraceAnimation()
-      }
-    } else {
-      // 到达最后一个状态时停止播放，不循环
-      stopTraceAnimation()
-    }
-  }, 1500)
-}
-
-const stopTraceAnimation = () => {
-  traceAnimationState.value.isPlaying = false
-  if (playInterval) {
-    clearInterval(playInterval)
-    playInterval = null
-  }
-}
-
-
-// `formattedSpec` lived here to feed the deleted "Violated Specification" card. The header states the
-// specification via `getTraceSpecDisplayTitle`, which reads the same trace snapshot, so this second
-// formatter had no remaining reader — `vue-tsc` said so, which is the check earning its place.
-
-// 高亮反例路径
-const handleHighlightTrace = (trace: HighlightedPlayback | null) => {
-  if (trace && trace.states) {
-    highlightedTrace.value = {
-      states: trace.states,
-      selectedStateIndex: trace.selectedStateIndex
-    }
-  }
-}
-
-// 清除高亮
-// ==== Simulation Timeline Animation Logic ====
-
-// 关闭模拟时间轴动画
-const closeSimulationTimeline = (clearDeepLink = true) => {
-  simulationAnimationState.value.visible = false
-  highlightedTrace.value = null
-  deactivatePlaybackScene()
-  resetPlaybackTerminal()
-  // For `run=simulation:<id>` the timeline *is* the addressed surface, so the URL must stop naming
-  // it. Otherwise a refresh or a shared link reopens the playback the user deliberately closed, and
-  // the board re-enters read-only playback mode.
-  if (clearDeepLink) clearRunDeepLink()
-}
-
 const deliverVerificationRunResult = (result: VerificationResult, submissionSceneChanges: number): RunPresentation => {
   const presentation = completeRunPresentation('verification')
   const historyStatus = result.historyPersistence.status
@@ -12991,23 +11573,12 @@ const deliverVerificationRunResult = (result: VerificationResult, submissionScen
   }
   notifyVerificationOutcome(result)
   if (unconfirmedSave) {
-    const ownsRun = captureBoardRunOwner()
-    let close!: () => void
-    close = notifyAvailableResult({
+    offerDeferredRunNotice({
       title: t('app.verificationTemporaryResultTitle'),
       message: t('app.verificationTemporaryResultMessage'),
       actionLabel: t('app.openResult'),
-      discardLabel: t('app.discardLocalResult'),
-      onAction: () => {
-        if (!ownsRun()) return true
-        if (openModalDepth.value > 0 || !ensureHistoricalPlaybackUiAdmission()) return false
-        closeOtherWorkflowSurfaces()
-        adoptVerificationRunResult(result, submissionSceneChanges)
-        return true
-      },
-      onClose: () => unsavedRunNotifications.delete(close)
-    })
-    unsavedRunNotifications.add(close)
+      discardLabel: t('app.discardLocalResult')
+    }, () => adoptVerificationRunResult(result, submissionSceneChanges))
   } else if (presentation !== 'background') {
     notifyInfo(t(presentation === 'playback'
       ? 'app.verificationResultDeferredForPlayback' : 'app.verificationResultDeferredForModal'))
@@ -13015,10 +11586,52 @@ const deliverVerificationRunResult = (result: VerificationResult, submissionScen
   return presentation
 }
 
-const handleVerify = async (): Promise<boolean> => {
-  if (isVerifying.value) return false
-  const isAsync = verificationForm.isAsync
-  if (!isAsync && synchronousSimulationRunning.value) {
+const submitBackgroundTask = async <T extends { id: number },>(
+  kind: RunPanelKind, submit: () => Promise<T>, ownsRun: () => boolean
+): Promise<{ taskId: number; task: T | null } | null> => {
+  try {
+    const task = await submit()
+    return ownsRun() ? { taskId: task.id, task } : null
+  } catch (error: unknown) {
+    if (!ownsRun()) return null
+    const failure = error as {
+      code?: unknown
+      response?: { status?: number; data?: { data?: { reasonCode?: unknown; taskId?: unknown; taskKind?: unknown } } }
+    } | null
+    const details = failure?.response?.data?.data
+    const unknownDispatch = failure?.response?.status === 503 && details?.reasonCode === 'TASK_DISPATCH_OUTCOME_UNKNOWN'
+    if (unknownDispatch) {
+      const { taskId, taskKind } = details
+      if (taskKind === (kind === 'fuzzing' ? 'fuzz' : kind)
+        && typeof taskId === 'number' && Number.isSafeInteger(taskId) && taskId > 0) {
+        // The ID can be checked by the normal poller. Only a task read can supply a task row.
+        return { taskId, task: null }
+      }
+    }
+    if (unknownDispatch || (isAxiosError(error) && !error.response)
+      || failure?.code === RUN_RESPONSE_INCOMPLETE_CODE || failure?.code === FUZZ_RESPONSE_INCOMPLETE_CODE) {
+      notifyBlocked(t('app.taskSubmissionUnconfirmed'))
+      return null
+    }
+    throw error
+  }
+}
+
+const taskProgressFromSubmission = ({ taskId, task }: {
+  taskId: number
+  task: Pick<VerificationTask, 'progress' | 'progressStage' | 'status'> | null
+}) => ({
+  taskId,
+  progress: normalizeTaskProgress(task?.progress),
+  statusKey: task ? taskProgressStatusKey(task.progressStage, task.status) : 'app.taskDispatchChecking'
+})
+
+const submitFormalRun = async (
+  kind: FormalRunKind, isAsync: boolean, run: (ownsRun: () => boolean) => Promise<boolean>
+): Promise<boolean> => {
+  const state = formalRunState(kind)
+  if (state.running.value) return false
+  if (!isAsync && (kind === 'verification' ? synchronousSimulationRunning : synchronousVerificationRunning).value) {
     notifyBlocked(t('app.formalOperationBusy'))
     return false
   }
@@ -13026,16 +11639,28 @@ const handleVerify = async (): Promise<boolean> => {
     notifyBlocked(t('app.sceneReplacementInProgress'))
     return false
   }
-  // Claim the same slot that Watch uses before the board queue can suspend submission.
+
+  // Watch and submit share a slot. Claim it before waiting for any Board writes.
   const ownsRun = captureBoardRunOwner()
-  setRunPanelView('verification', 'run')
-  isVerifying.value = true
-  asyncVerificationActive.value = isAsync
-  verificationCancelRequested.value = false
-  if (isAsync) asyncVerificationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
+  state.running.value = true
+  setRunPanelView(kind, 'run')
+  state.asyncActive.value = isAsync
+  state.cancelRequested.value = false
+  if (isAsync) state.watchedTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
 
   try {
-    await waitForPendingFixRefresh()
+    return await run(ownsRun)
+  } catch (error) {
+    if (ownsRun()) showFormalRunFailure(kind, state, error, state.watchedTask.value.taskId, true)
+    return false
+  } finally {
+    if (ownsRun()) finishFormalRun(kind, state)
+  }
+}
+
+const handleVerify = (): Promise<boolean> => {
+  const isAsync = verificationForm.isAsync
+  return submitFormalRun('verification', isAsync, async ownsRun => {
     await waitForPendingBoardMutations()
     if (!ownsRun() || !ensureBoardDataReady()) return false
     if (nodes.value.length === 0) {
@@ -13065,16 +11690,11 @@ const handleVerify = async (): Promise<boolean> => {
 
     // Handle async or sync verification
     if (isAsync) {
-      const submittedTask = await boardApi.verifyAsync(req)
-      if (!ownsRun()) return false
-      const taskId = submittedTask.id
-      asyncVerificationTask.value.taskId = taskId
-      asyncVerificationTask.value.progress = submittedTask.progress ?? 0
-      asyncVerificationTask.value.statusKey = taskProgressStatusKey(
-        submittedTask.progressStage, submittedTask.status)
-      upsertVerificationTaskSummary(submittedTask)
-
-      await pollAsyncVerification(taskId)
+      const submission = await submitBackgroundTask('verification', () => boardApi.verifyAsync(req), ownsRun)
+      if (!submission || !ownsRun()) return false
+      asyncVerificationTask.value = taskProgressFromSubmission(submission)
+      if (submission.task) upsertVerificationTaskSummary(submission.task)
+      await pollAsyncVerification(submission.taskId, verifySubmissionSceneChanges)
       return ownsRun()
     }
 
@@ -13086,29 +11706,7 @@ const handleVerify = async (): Promise<boolean> => {
     }
     return true
 
-  } catch (error: any) {
-    if (!ownsRun()) return false
-    if (isPollingAbortedError(error)) {
-      return false
-    }
-    if (error?.code === 'TASK_STATUS_GONE') {
-      notifyInfo(t('app.taskNoLongerAvailable'))
-    } else if (isAsyncTaskCancelledError(error)) {
-      verificationError.value = null
-      notifyObservedTaskCancellation('verification', asyncVerificationTask.value.taskId, verificationCancelRequested.value)
-    } else {
-      console.error('Verification failed:', error)
-      presentRunFailure('verification', 'app.verificationFailed', error, verificationPanelTracksRun.value)
-    }
-    return false
-  } finally {
-    if (ownsRun()) {
-      setRunPanelView('verification', 'settings')
-      isVerifying.value = false
-      asyncVerificationActive.value = false
-      verificationCancelRequested.value = false
-    }
-  }
+  })
 }
 
 const runFuzzing = async (): Promise<boolean> => {
@@ -13128,7 +11726,6 @@ const runFuzzing = async (): Promise<boolean> => {
   let submittedTaskInitiator: RunInitiator = 'USER'
 
   try {
-    await waitForPendingFixRefresh()
     await waitForPendingBoardMutations()
     if (!ownsRun() || !ensureBoardDataReady(['templates', 'nodes', 'environment', 'rules', 'specs'])) return false
     if (nodes.value.length === 0) {
@@ -13185,22 +11782,21 @@ const runFuzzing = async (): Promise<boolean> => {
 
     fuzzingError.value = null
     fuzzingSettingsNotice.value = null
-    const submittedTask = await fuzzingApi.startAsync(request)
-    if (!ownsRun()) return false
-    submittedTaskId = submittedTask.id
-    submittedTaskInitiator = submittedTask.initiator
-    trackFuzzTask(submittedTask.id)
-    asyncFuzzingTask.value = {
-      taskId: submittedTask.id,
-      progress: normalizeTaskProgress(submittedTask.progress),
-      statusKey: taskProgressStatusKey(submittedTask.progressStage, submittedTask.status)
+    const requestToSubmit = request
+    const submission = await submitBackgroundTask('fuzzing', () => fuzzingApi.startAsync(requestToSubmit), ownsRun)
+    if (!submission || !ownsRun()) return false
+    submittedTaskId = submission.taskId
+    trackFuzzTask(submittedTaskId)
+    asyncFuzzingTask.value = taskProgressFromSubmission(submission)
+    if (submission.task) {
+      submittedTaskInitiator = submission.task.initiator
+      upsertFuzzingTaskSummary(submission.task)
+      fuzzingWatchedTask.value = submission.task
     }
-    upsertFuzzingTaskSummary(submittedTask)
-    fuzzingWatchedTask.value = submittedTask
 
-    const run = await pollAsyncFuzzing(submittedTask.id)
+    const run = await pollAsyncFuzzing(submittedTaskId)
     if (!ownsRun()) return false
-    deliverCompletedFuzzingRun(submittedTask.id, run)
+    deliverCompletedFuzzingRun(submittedTaskId, run)
     return true
   } catch (error: any) {
     if (!ownsRun() || isPollingAbortedError(error)) return false
@@ -13235,7 +11831,7 @@ const runFuzzing = async (): Promise<boolean> => {
         && hasApiValidationError(error, 'paperDomainFingerprint')
       if (stalePaperDomain) {
         paperDomainStaleRecoveryActive.value = true
-        const boardRefreshed = await refreshSceneForReconciliation()
+        const boardRefreshed = await enqueueBoardMutation(refreshBoardSnapshot).catch(() => false)
         if (!ownsRun()) return false
         if (boardRefreshed) markVerificationResultStale()
         invalidatePaperDomainPreview()
@@ -13276,42 +11872,9 @@ const runFuzzing = async (): Promise<boolean> => {
   }
 }
 
-// Run simulation with proper panel handling
-const runSimulation = async () => {
-  await handleSimulate({ ...simulationForm })
-}
-
-const handleSimulate = async (simConfig: {
-  steps: number
-  isAttack: boolean
-  attackMode: AttackScenarioMode
-  attackBudget: number
-  selectedAttackPointKeys: string[]
-  enablePrivacy: boolean
-  isAsync: boolean
-  saveToHistory?: boolean
-}): Promise<boolean> => {
-  if (isSimulating.value) return false
-  const normalizedSimConfig = { ...simConfig }
-  if (!normalizedSimConfig.isAsync && synchronousVerificationRunning.value) {
-    notifyBlocked(t('app.formalOperationBusy'))
-    return false
-  }
-  if (isSceneReplacementInProgress.value) {
-    notifyBlocked(t('app.sceneReplacementInProgress'))
-    return false
-  }
-  const ownsRun = captureBoardRunOwner()
-  isSimulating.value = true
-  setRunPanelView('simulation', 'run')
-  asyncSimulationActive.value = normalizedSimConfig.isAsync
-  simulationCancelRequested.value = false
-  if (normalizedSimConfig.isAsync) {
-    asyncSimulationTask.value = { taskId: null, progress: 0, statusKey: 'app.taskInitializing' }
-  }
-
-  try {
-    await waitForPendingFixRefresh()
+const runSimulation = (): Promise<boolean> => {
+  const normalizedSimConfig = { ...simulationForm }
+  return submitFormalRun('simulation', normalizedSimConfig.isAsync, async ownsRun => {
     await waitForPendingBoardMutations()
     if (!ownsRun() || !ensureBoardDataReady(['templates', 'nodes', 'environment', 'rules'])) return false
     if (nodes.value.length === 0) {
@@ -13344,18 +11907,11 @@ const handleSimulate = async (simConfig: {
     let result: SimulationResult | SavedSimulationResult
 
     if (normalizedSimConfig.isAsync) {
-      // 异步模拟：创建任务并轮询进度
-      const submittedTask = await simulationApi.simulateAsync(req)
-      if (!ownsRun()) return false
-      const taskId = submittedTask.id
-      asyncSimulationTask.value.taskId = taskId
-      asyncSimulationTask.value.progress = submittedTask.progress ?? 0
-      asyncSimulationTask.value.statusKey = taskProgressStatusKey(
-        submittedTask.progressStage, submittedTask.status)
-      upsertSimulationTaskSummary(submittedTask)
-
-      // 轮询任务进度
-      result = await pollAsyncSimulation(taskId)
+      const submission = await submitBackgroundTask('simulation', () => simulationApi.simulateAsync(req), ownsRun)
+      if (!submission || !ownsRun()) return false
+      asyncSimulationTask.value = taskProgressFromSubmission(submission)
+      if (submission.task) upsertSimulationTaskSummary(submission.task)
+      result = await pollAsyncSimulation(submission.taskId)
     } else {
       // 同步模拟
       if (normalizedSimConfig.saveToHistory) {
@@ -13374,8 +11930,6 @@ const handleSimulate = async (simConfig: {
       void loadSimulationRuns(false)
     }
     
-    // Keep the full result so its logs / NuSMV diagnostics remain reachable from the timeline via
-    // openSimulationLogs(); the success path opens the timeline (below), not the result dialog.
     const summary = 'createdAt' in result ? summarizeSimulationResult(result) : null
     if (summary) {
       simulationHistoryRequests.invalidate()
@@ -13385,39 +11939,18 @@ const handleSimulate = async (simConfig: {
     deliverSimulationRunResult(result, simulationSubmissionSceneChanges)
     return true
 
-  } catch (error: any) {
-    if (!ownsRun()) return false
-    if (isPollingAbortedError(error)) {
-      return false
-    }
-    if (error?.code === 'TASK_STATUS_GONE') {
-      notifyInfo(t('app.taskNoLongerAvailable'))
-    } else if (isAsyncTaskCancelledError(error)) {
-      simulationError.value = null
-      notifyObservedTaskCancellation('simulation', asyncSimulationTask.value.taskId, simulationCancelRequested.value)
-    } else {
-      console.error('Simulation failed:', error)
-      presentRunFailure('simulation', 'app.simulationFailed', error, simulationPanelTracksRun.value)
-    }
-    return false
-  } finally {
-    if (ownsRun()) {
-      setRunPanelView('simulation', 'settings')
-      isSimulating.value = false
-      asyncSimulationActive.value = false
-      simulationCancelRequested.value = false
-    }
-  }
+  })
 }
 
 // A status/progress fetch error is "permanent" (fail fast, don't retry to timeout) when
 // it is an auth/not-found/client error — retrying will never succeed. Network blips and
 // 5xx are treated as transient.
-const isPermanentPollError = (error: any): boolean => {
-  if (error?.code === 'TASK_STATUS_GONE'
-    || error?.code === RUN_RESPONSE_INCOMPLETE_CODE
-    || error?.code === FUZZ_RESPONSE_INCOMPLETE_CODE) return true
-  const status = error?.response?.status
+const isPermanentPollError = (error: unknown): boolean => {
+  const failure = error as { code?: unknown; response?: { status?: unknown } } | null
+  if (failure?.code === 'TASK_STATUS_GONE'
+    || failure?.code === RUN_RESPONSE_INCOMPLETE_CODE
+    || failure?.code === FUZZ_RESPONSE_INCOMPLETE_CODE) return true
+  const status = failure?.response?.status
   return typeof status === 'number'
     && status >= 400
     && status < 500
@@ -13437,9 +11970,9 @@ const readWatchedTaskStatus = async <T,>(
   ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
   try {
     return await read()
-  } catch (error: any) {
+  } catch (error: unknown) {
     ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
-    if (error?.response?.status !== 404) throw error
+    if ((error as { response?: { status?: unknown } } | null)?.response?.status !== 404) throw error
 
     invalidateTaskInboxRequests()
     if (kind === 'verification') {
@@ -13452,6 +11985,55 @@ const readWatchedTaskStatus = async <T,>(
     }
     throw Object.assign(new Error(t('app.taskNoLongerAvailable')), { code: 'TASK_STATUS_GONE' })
   }
+}
+
+type WatchedTaskStatus = Pick<VerificationTask, 'status' | 'progress' | 'progressStage' | 'errorMessage'>
+type WatchedTaskCompletion<T> = { result: T } | { retryAfterMs: number }
+
+const pollWatchedTask = async <T extends WatchedTaskStatus, R,>({
+  kind, taskId, read, progress, upsert, failureKey, cancelledMessage, complete, timeoutError
+}: {
+  kind: RunPanelKind
+  taskId: number
+  read: () => Promise<T>
+  progress: Ref<{ progress: number; statusKey: string }>
+  upsert: (task: T) => void
+  failureKey: string
+  cancelledMessage: (task: T) => string
+  complete: (task: T, expectedEpoch: number) => Promise<WatchedTaskCompletion<R>>
+  timeoutError: () => Error
+}): Promise<R> => {
+  const expectedEpoch = pollingEpoch
+  for (let count = 0; count < ASYNC_TASK_MAX_POLLS; count++) {
+    let task: T
+    try {
+      task = await readWatchedTaskStatus(kind, taskId, expectedEpoch, read)
+    } catch (error) {
+      if (isPollingAbortedError(error) || isAsyncTaskCancelledError(error)) throw error
+      // A cancellation receipt can arrive between the status read and its caller.
+      ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
+      if (isPermanentPollError(error)) throw error
+      await waitForNextPoll(expectedEpoch)
+      continue
+    }
+
+    ensureActiveWatchedTaskPoll(kind, taskId, expectedEpoch)
+    progress.value.progress = normalizeTaskProgress(task.progress)
+    progress.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
+    upsert(task)
+
+    if (task.status === 'FAILED') throw new Error(task.errorMessage || t(failureKey))
+    if (task.status === 'CANCELLED') throw new AsyncTaskCancelledError(cancelledMessage(task))
+    if (task.status === 'COMPLETED') {
+      progress.value.progress = 100
+      const completion = await complete(task, expectedEpoch)
+      if ('result' in completion) return completion.result
+      await waitForPollingDelay(completion.retryAfterMs, expectedEpoch)
+      continue
+    }
+    await waitForNextPoll(expectedEpoch)
+  }
+  throw timeoutError()
 }
 
 const completedTaskResultError = (
@@ -13473,224 +12055,109 @@ const loadCompletedTaskResult = async <T,>(
     maxAttempts: FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES
   })
 
-// 轮询异步验证任务：await 到终态/超时/永久错误为止，供 handleVerify await。
-// 用 while + await sleep（而非 setInterval + async 回调）：串行执行，天然无重入——
-// 若某次状态查询超过 1s 也不会并发发起下一轮、不会重复 toast 或旧响应覆盖新进度。
-const pollAsyncVerification = async (taskId: number): Promise<void> => {
-  let pollCount = 0
-  const expectedPollingEpoch = pollingEpoch
-  /*
-   * The board can be edited while this run is in flight, and the arriving verdict describes the model
-   * that was frozen at submission — not the canvas the user is now looking at.
-   *
-   * The staleness hook in the mutation queue cannot cover this: it flags `verificationResult`, which is
-   * null for the whole duration of an async run (`handleVerify` clears it before submitting), so a
-   * mid-run edit marks nothing and the completion path then sets `verificationResultStale = false`
-   * unconditionally. The result presented itself as describing the current board while the Fix action it
-   * offered was computed against a scene that no longer exists.
-   *
-   * `semanticSceneChangeCount` is incremented by the same staleness hook, so "what counts as a change"
-   * cannot drift between the two. Comparing it across the run is what a `verificationResult` watcher
-   * structurally cannot do.
-   */
-  const submissionSceneChanges = semanticSceneChangeCount
-
-  while (pollCount < ASYNC_TASK_MAX_POLLS) {
-    throwIfPollingAborted(expectedPollingEpoch)
-    let task: VerificationTask
-    try {
-      task = await readWatchedTaskStatus(
-        'verification', taskId, expectedPollingEpoch, () => boardApi.getTask(taskId)
-      )
-      // Check at publication, after the status read's final asynchronous boundary.
-      ensureActiveWatchedTaskPoll('verification', taskId, expectedPollingEpoch)
-      asyncVerificationTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncVerificationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
-      upsertVerificationTaskSummary(task)
-    } catch (e: any) {
-      if (isPollingAbortedError(e) || isAsyncTaskCancelledError(e)) {
-        throw e
-      }
-      // Permanent errors (401/403/404/…) fail fast; transient errors retry.
-      if (isPermanentPollError(e)) {
-        throw e
-      }
-      await waitForNextPoll(expectedPollingEpoch)
-      pollCount++
-      continue
-    }
-
-    // Terminal-state handling outside the try so its logic isn't swallowed by the catch.
-    if (task.status === 'COMPLETED') {
-      asyncVerificationTask.value.progress = 100
-      let traces: Trace[] = []
+const pollAsyncVerification = (taskId: number, submissionSceneChanges = semanticSceneChangeCount): Promise<void> => {
+  // A watcher starts from the current scene. A new submission carries its earlier scene revision.
+  return pollWatchedTask<VerificationTask, void>({
+    kind: 'verification',
+    taskId,
+    read: () => boardApi.getTask(taskId),
+    progress: asyncVerificationTask,
+    upsert: upsertVerificationTaskSummary,
+    failureKey: 'app.verificationFailed',
+    cancelledMessage: task => task.errorMessage || t('app.verificationCancelled'),
+    timeoutError: () => Object.assign(new Error('Verification task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' }),
+    complete: async (task, expectedEpoch) => {
+      let traces: Trace[]
       try {
         traces = task.outcome === 'SATISFIED'
           ? []
-          : await loadCompletedTaskResult(
-            () => boardApi.getTaskTraces(taskId),
-            expectedPollingEpoch
-          )
+          : await loadCompletedTaskResult(() => boardApi.getTaskTraces(taskId), expectedEpoch)
       } catch (error) {
         if (isPollingAbortedError(error)) throw error
         upsertVerificationTaskSummary({ ...task, progress: 100 })
         await loadVerificationRuns(false)
-        throwIfPollingAborted(expectedPollingEpoch)
+        throwIfPollingAborted(expectedEpoch)
         throw completedTaskResultError('verification', error)
       }
-      throwIfPollingAborted(expectedPollingEpoch)
+      throwIfPollingAborted(expectedEpoch)
       const result = buildVerificationResultFromTask(task, traces)
       upsertVerificationTaskSummary({ ...task, progress: 100 })
       deliverVerificationRunResult(result, submissionSceneChanges)
       await loadVerificationRuns()
-      return
-    } else if (task.status === 'FAILED') {
-      throw new Error(task.errorMessage || t('app.verificationFailed'))
-    } else if (task.status === 'CANCELLED') {
-      throw new AsyncTaskCancelledError(task.errorMessage || t('app.verificationCancelled'))
+      return { result: undefined }
     }
-
-    // 仍在 PENDING/RUNNING，等待后继续
-    await waitForNextPoll(expectedPollingEpoch)
-    pollCount++
-  }
-
-  throw Object.assign(new Error('Verification task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' })
+  })
 }
 
-// 轮询异步模拟任务
-const pollAsyncSimulation = async (taskId: number): Promise<SavedSimulationResult> => {
-  let pollCount = 0
-  const expectedPollingEpoch = pollingEpoch
-
-  while (pollCount < ASYNC_TASK_MAX_POLLS) {
-    throwIfPollingAborted(expectedPollingEpoch)
-    let task: SimulationTask
-    try {
-      // 获取任务进度 + 状态（瞬时网络错误容忍：进入 catch 后继续轮询）
-      task = await readWatchedTaskStatus(
-        'simulation', taskId, expectedPollingEpoch, () => simulationApi.getTask(taskId)
-      )
-      ensureActiveWatchedTaskPoll('simulation', taskId, expectedPollingEpoch)
-      asyncSimulationTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncSimulationTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
-      upsertSimulationTaskSummary(task)
-    } catch (error: any) {
-      if (isPollingAbortedError(error) || isAsyncTaskCancelledError(error)) {
-        throw error
-      }
-      // Permanent errors (401/403/404/task-not-found) fail fast; only transient
-      // errors (network blips, 5xx) retry until the poll ceiling.
-      if (isPermanentPollError(error)) {
-        throw error
-      }
-      console.error('Poll error (transient, will retry):', error)
-      await waitForNextPoll(expectedPollingEpoch)
-      pollCount++
-      continue
-    }
-
-    // 终态处理放在 try 之外：FAILED/CANCELLED 必须立即抛出并中止轮询，
-    // 不能被上面的瞬时错误 catch 吞掉（否则会一直轮询到超时才报通用错误）。
-    if (task.status === 'COMPLETED') {
-      asyncSimulationTask.value.progress = 100
-      if (task.simulationTraceId) {
-        let trace: Awaited<ReturnType<typeof simulationApi.getSimulation>>
-        try {
-          trace = await loadCompletedTaskResult(
-            () => simulationApi.getSimulation(task.simulationTraceId as number),
-            expectedPollingEpoch
-          )
-        } catch (error) {
-          if (isPollingAbortedError(error)) throw error
-          upsertSimulationTaskSummary({ ...task, progress: 100 })
-          await loadSimulationRuns(false)
-          throwIfPollingAborted(expectedPollingEpoch)
-          throw completedTaskResultError('simulation', error)
-        }
-        throwIfPollingAborted(expectedPollingEpoch)
-        upsertSimulationTaskSummary({ ...task, progress: 100 })
-        await loadSimulationRuns()
-        throwIfPollingAborted(expectedPollingEpoch)
-        return simulationResultFromTrace(trace)
-      }
+const pollAsyncSimulation = (taskId: number): Promise<SavedSimulationResult> => pollWatchedTask<SimulationTask, SavedSimulationResult>({
+  kind: 'simulation',
+  taskId,
+  read: () => simulationApi.getTask(taskId),
+  progress: asyncSimulationTask,
+  upsert: upsertSimulationTaskSummary,
+  failureKey: 'app.asyncSimulationFailed',
+  cancelledMessage: () => t('app.simulationTaskCancelledByServer'),
+  timeoutError: () => Object.assign(new Error('Simulation task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' }),
+  complete: async (task, expectedEpoch) => {
+    const traceId = task.simulationTraceId
+    if (!traceId) {
       upsertSimulationTaskSummary({ ...task, progress: 100 })
       throw new Error(t('app.taskCompletedNoTraceFound'))
-    } else if (task.status === 'FAILED') {
-      throw new Error(task.errorMessage || t('app.asyncSimulationFailed'))
-    } else if (task.status === 'CANCELLED') {
-      throw new AsyncTaskCancelledError(t('app.simulationTaskCancelledByServer'))
     }
-
-    // 仍在 PENDING/RUNNING，等待后继续
-    await waitForNextPoll(expectedPollingEpoch)
-    pollCount++
-  }
-
-  // 超出最大轮询次数
-  throw Object.assign(new Error('Simulation task status polling timed out'), { code: 'TASK_POLL_TIMEOUT' })
-}
-
-const pollAsyncFuzzing = async (taskId: number): Promise<FuzzingRun> => {
-  let pollCount = 0
-  let completedResultFailures = 0
-  const expectedPollingEpoch = pollingEpoch
-
-  while (pollCount < ASYNC_TASK_MAX_POLLS) {
-    throwIfPollingAborted(expectedPollingEpoch)
-    let task: FuzzingTask
+    let trace: Awaited<ReturnType<typeof simulationApi.getSimulation>>
     try {
-      task = await readWatchedTaskStatus(
-        'fuzzing', taskId, expectedPollingEpoch, () => fuzzingApi.getTask(taskId)
-      )
-      ensureActiveWatchedTaskPoll('fuzzing', taskId, expectedPollingEpoch)
-      asyncFuzzingTask.value.progress = normalizeTaskProgress(task.progress)
-      asyncFuzzingTask.value.statusKey = taskProgressStatusKey(task.progressStage, task.status)
-      upsertFuzzingTaskSummary(task)
-    } catch (error: any) {
-      if (isPollingAbortedError(error) || isAsyncTaskCancelledError(error)) throw error
-      if (isPermanentPollError(error)) throw error
-      await waitForNextPoll(expectedPollingEpoch)
-      pollCount++
-      continue
+      trace = await loadCompletedTaskResult(() => simulationApi.getSimulation(traceId), expectedEpoch)
+    } catch (error) {
+      if (isPollingAbortedError(error)) throw error
+      upsertSimulationTaskSummary({ ...task, progress: 100 })
+      await loadSimulationRuns(false)
+      throwIfPollingAborted(expectedEpoch)
+      throw completedTaskResultError('simulation', error)
     }
+    throwIfPollingAborted(expectedEpoch)
+    upsertSimulationTaskSummary({ ...task, progress: 100 })
+    await loadSimulationRuns()
+    throwIfPollingAborted(expectedEpoch)
+    return { result: simulationResultFromTrace(trace) }
+  }
+})
 
-    if (task.status === 'COMPLETED') {
-      asyncFuzzingTask.value.progress = 100
+const pollAsyncFuzzing = (taskId: number): Promise<FuzzingRun> => {
+  let completedResultFailures = 0
+  return pollWatchedTask<FuzzingTask, FuzzingRun>({
+    kind: 'fuzzing',
+    taskId,
+    read: () => fuzzingApi.getTask(taskId),
+    progress: asyncFuzzingTask,
+    upsert: task => {
+      fuzzingWatchedTask.value = task
+      upsertFuzzingTaskSummary(task)
+    },
+    failureKey: 'app.fuzzSearchFailed',
+    cancelledMessage: task => task.errorMessage || t('app.fuzzSearchCancelled'),
+    timeoutError: () => new FuzzTaskRecoveryPendingError(),
+    complete: async (task, expectedEpoch) => {
       try {
         const run = await loadFuzzRunSingleFlight(taskId, task.runId ?? task.id)
-        throwIfPollingAborted(expectedPollingEpoch)
+        throwIfPollingAborted(expectedEpoch)
         clearFuzzRunRecoveryState(taskId)
         upsertFuzzingRunSummary(summarizeFuzzingRun(run))
-        return run
-      } catch (error: any) {
-        throwIfPollingAborted(expectedPollingEpoch)
+        return { result: run }
+      } catch (error) {
+        throwIfPollingAborted(expectedEpoch)
         if (classifyTrackedFuzzRunError(error) !== 'RETRY') {
           throw new FuzzCompletedResultUnavailableError(error)
         }
         asyncFuzzingTask.value.statusKey = 'app.fuzzResultRecoveryPending'
-        const retryDelay = scheduleFuzzRunRecovery(taskId)
+        const retryAfterMs = scheduleFuzzRunRecovery(taskId)
         completedResultFailures++
         if (completedResultFailures >= FUZZ_INLINE_RESULT_RECOVERY_MAX_FAILURES) {
           throw new FuzzTaskRecoveryPendingError()
         }
-        await waitForPollingDelay(retryDelay, expectedPollingEpoch)
-        pollCount++
-        continue
+        return { retryAfterMs }
       }
     }
-    if (task.status === 'FAILED') {
-      throw new Error(task.errorMessage || t('app.fuzzSearchFailed'))
-    }
-    if (task.status === 'CANCELLED') {
-      throw new AsyncTaskCancelledError(task.errorMessage || t('app.fuzzSearchCancelled'))
-    }
-
-    await waitForNextPoll(expectedPollingEpoch)
-    pollCount++
-  }
-
-  throw new FuzzTaskRecoveryPendingError()
+  })
 }
 
 // ==== Results Dialog ====
@@ -13770,14 +12237,10 @@ const openOwningVerificationRun = (runId: number) => {
 const deepLinkTarget = computed(() => parseBoardRunTarget(route.query))
 const staleDeepLink = ref(false)
 
-/** The target currently reflected on screen, so the watcher can skip redundant loads. */
+// Identity denotes a visit, even when Back or Forward returns to the same address.
 let appliedDeepLinkTarget: BoardRunTarget | null = null
 // Only a History selection can be cancelled by closing or changing the list.
 let pendingHistoryRunTarget: BoardRunTarget | null = null
-const deepLinkLoadRequests = createLatestBoardRequestGuard()
-type DeepLinkLoadContext = { requestEpoch: number }
-const isCurrentDeepLinkLoad = (context: DeepLinkLoadContext | undefined): boolean =>
-  context !== undefined && deepLinkLoadRequests.isCurrent(context.requestEpoch)
 
 /**
  * Navigation we initiate ourselves must not be re-applied by the target watcher (a redundant
@@ -13788,7 +12251,7 @@ const isCurrentDeepLinkLoad = (context: DeepLinkLoadContext | undefined): boolea
  */
 const navigateToRunTarget = async (target: BoardRunTarget | null, mode: 'push' | 'replace') => {
   appliedDeepLinkTarget = target
-  if (isSameBoardRunTarget(target, deepLinkTarget.value)) return
+  if (isSameBoardRunTarget(target, deepLinkTarget.value) && !hasUnusableBoardRunParams(route.query)) return
   const query = applyBoardRunTarget(route.query, target)
   await (mode === 'push' ? router.push({ query }) : router.replace({ query }))
 }
@@ -13798,12 +12261,15 @@ const navigateToRunTarget = async (target: BoardRunTarget | null, mode: 'push' |
  * dismissing a surface does not leave a dead history entry the user must step over.
  */
 const openRunTarget = async (target: BoardRunTarget, fromHistory = false) => {
+  if (isSameBoardRunTarget(pendingHistoryRunTarget, target)
+    || (historyDetailRequests.hasPendingReplace() && isSameBoardRunTarget(appliedDeepLinkTarget, target))) return
+  const ownsBoard = captureBoardRunOwner()
   pendingHistoryRunTarget = fromHistory ? target : null
   historyDetailRequests.invalidate()
   staleDeepLink.value = false
   try {
     await navigateToRunTarget(target, 'push')
-    if (boardLifecycleDisposed || appliedDeepLinkTarget !== target
+    if (!ownsBoard() || appliedDeepLinkTarget !== target
       || !isSameBoardRunTarget(deepLinkTarget.value, target)) return
     if (fromHistory && pendingHistoryRunTarget !== target) {
       // History can be closed before the navigation commits its address.
@@ -13812,11 +12278,9 @@ const openRunTarget = async (target: BoardRunTarget, fromHistory = false) => {
     }
     await applyDeepLinkTarget(target)
   } finally {
-    if (pendingHistoryRunTarget === target) pendingHistoryRunTarget = null
+    if (pendingHistoryRunTarget === target && !historyDetailRequests.hasPendingReplace()) pendingHistoryRunTarget = null
   }
 }
-
-const clearRunTarget = () => navigateToRunTarget(null, 'replace')
 
 /**
  * Marks "no run is open" immediately, then clears the URL. The synchronous part matters: a
@@ -13825,8 +12289,8 @@ const clearRunTarget = () => navigateToRunTarget(null, 'replace')
  * just left.
  */
 clearRunDeepLink = () => {
-  appliedDeepLinkTarget = null
-  void clearRunTarget()
+  historyDetailRequests.invalidate()
+  void navigateToRunTarget(null, 'replace')
 }
 
 
@@ -13835,53 +12299,43 @@ const isResultSurfaceVisible = computed(() =>
   || showFuzzingResultDialog.value
 )
 
-// The incoming URL already owns navigation; ending the old replay must not rewrite it.
-const closePlaybackForNavigation = () => {
-  if (traceAnimationState.value.visible) closeTraceAnimation(false)
-  if (simulationAnimationState.value.visible) closeSimulationTimeline(false)
-}
-
-/**
- * Applies the URL target to the board. Loaders already guard against races and stale
- * responses, so this only decides *what* to open and reports an unusable link once.
- */
-const applyDeepLinkTarget = async (target: BoardRunTarget | null) => {
+const applyDeepLinkTarget = async (target: BoardRunTarget | null, checkedRun?: VerificationRun) => {
   if (pendingHistoryRunTarget !== target) pendingHistoryRunTarget = null
-  const deepLinkLoad: DeepLinkLoadContext = { requestEpoch: deepLinkLoadRequests.begin() }
   appliedDeepLinkTarget = target
-  closePlaybackForNavigation()
+  closePlayback()
   // The URL is changing authority. Leaving A visible while B is loading makes a temporary B
   // failure look like A succeeded, and lets its child id be checked against the wrong parent.
   closeResultSurfaces()
-  if (!target) {
-    return
-  }
+  if (!target) return
 
-  await loadDeepLinkTarget(target, deepLinkLoad)
+  const ownsBoard = captureBoardRunOwner()
+  const request = historyDetailRequests.beginReplace()
+  const isCurrent = () => ownsBoard() && historyDetailRequests.isCurrent(request)
+    && appliedDeepLinkTarget === target && isSameBoardRunTarget(deepLinkTarget.value, target)
+  try {
+    await loadDeepLinkTarget(target, isCurrent, checkedRun)
+  } finally {
+    historyDetailRequests.finish(request)
+    // A recheck can replace the detail request within the same History selection.
+    if (pendingHistoryRunTarget === target && !historyDetailRequests.hasPendingReplace()) pendingHistoryRunTarget = null
+  }
 }
 
 const loadDeepLinkTarget = async (
   target: BoardRunTarget,
-  deepLinkLoad: DeepLinkLoadContext
+  isCurrent: () => boolean,
+  checkedRun?: VerificationRun
 ) => {
   if (target.kind === 'verification') {
-    if (target.traceId !== undefined) {
-      await selectAndPlayVerificationTrace(target.traceId, deepLinkLoad, target.runId)
-      return
-    }
-    const loaded = await openVerificationRun(target.runId, deepLinkLoad)
-    if (!loaded || !isCurrentDeepLinkLoad(deepLinkLoad)) return
-    return
+    if (target.traceId !== undefined) await selectAndPlayVerificationTrace(target.traceId, target.runId, isCurrent)
+    else await openVerificationRun(target.runId, isCurrent, checkedRun)
+  } else if (target.kind === 'simulation') {
+    await selectAndPlaySimulationTrace(target.runId, isCurrent)
+  } else if (target.findingId !== undefined) {
+    await selectAndPlayFuzzingFinding(target.findingId, target.runId, isCurrent)
+  } else {
+    await openFuzzingRun(target.runId, isCurrent)
   }
-  if (target.kind === 'simulation') {
-    await selectAndPlaySimulationTrace(target.runId, deepLinkLoad)
-    return
-  }
-  if (target.findingId !== undefined) {
-    await selectAndPlayFuzzingFinding(target.findingId, target.runId, deepLinkLoad)
-    return
-  }
-  await openFuzzingRun(target.runId, deepLinkLoad)
 }
 
 /**
@@ -13898,14 +12352,8 @@ const syncBoardToDeepLink = async () => {
   // syntactically dead link needs no explanation beyond a clean board — only a well-formed
   // link to a run we cannot load warrants the banner.
   if (hasUnusableBoardRunParams(route.query)) {
-    deepLinkLoadRequests.invalidate()
-    pendingHistoryRunTarget = null
-    appliedDeepLinkTarget = null
-    closePlaybackForNavigation()
-    closeResultSurfaces()
-    // Stripped directly: `navigateToRunTarget(null)` would see an already-`null` target and
-    // decide there is nothing to do, leaving the dead params in the URL.
-    void router.replace({ query: applyBoardRunTarget(route.query, null) })
+    void applyDeepLinkTarget(null)
+    void navigateToRunTarget(null, 'replace')
     return
   }
 
@@ -13917,21 +12365,15 @@ const syncBoardToDeepLink = async () => {
 
 watch([() => route.query, isBoardDataReady], syncBoardToDeepLink, { immediate: true })
 
-/**
- * A link can be malformed, or name a run that was deleted or belongs to another account.
- * Both degrade to the plain board with one persistent, dismissible explanation — never a
- * fabricated empty result — and the dead params are stripped so a refresh stays clean.
- */
-const reportUnusableDeepLink = (deepLinkLoad?: DeepLinkLoadContext) => {
-  if (deepLinkLoad && !isCurrentDeepLinkLoad(deepLinkLoad)) return
+const reportUnusableDeepLink = () => {
   staleDeepLink.value = true
-  deepLinkLoadRequests.invalidate()
-  appliedDeepLinkTarget = null
-  closePlaybackForNavigation()
-  closeResultSurfaces()
-  // Strip directly rather than via `navigateToRunTarget`, which no-ops when the parsed
-  // target is already `null` (a well-formed link whose run failed to load, or dead params).
-  void router.replace({ query: applyBoardRunTarget(route.query, null) })
+  void applyDeepLinkTarget(null)
+  void navigateToRunTarget(null, 'replace')
+}
+
+const reportHistoryDetailFailure = (error: unknown, messageKey: string) => {
+  if (shouldReportUnusableHistoryDeepLink(error)) reportUnusableDeepLink()
+  else notifyError(t(messageKey))
 }
 
 const dismissStaleDeepLink = () => { staleDeepLink.value = false }
@@ -13982,8 +12424,8 @@ const verificationRunSmvAvailable = computed(() =>
 
 /** The same two conditions for a simulation trajectory; see `verificationRunSmvAvailable`. */
 const simulationRunSmvAvailable = computed(() =>
-  lastSimulationResult.value?.hasSmvModel === true
-  && typeof lastSimulationResult.value?.historyPersistence?.runId === 'number')
+  simulationPlaybackResult.value?.hasSmvModel === true
+  && typeof simulationPlaybackResult.value?.historyPersistence.runId === 'number')
 
 // The mapping lives in `board/smvUnavailableReason.ts` (a pure rule, unit-tested there); these only
 // bind it to the two result refs.
@@ -13991,7 +12433,7 @@ const verificationSmvUnavailableReason = computed(() =>
   smvUnavailableReasonKey(verificationResult.value?.historyPersistence))
 
 const simulationSmvUnavailableReason = computed(() =>
-  smvUnavailableReasonKey(lastSimulationResult.value?.historyPersistence))
+  smvUnavailableReasonKey(simulationPlaybackResult.value?.historyPersistence))
 
 /*
  * The two artifact buttons read their id here rather than asserting it non-null in the template.
@@ -14008,7 +12450,7 @@ const downloadCurrentVerificationRunSmv = () => {
 }
 
 const downloadCurrentSimulationRunSmv = () => {
-  const runId = lastSimulationResult.value?.historyPersistence?.runId
+  const runId = simulationPlaybackResult.value?.historyPersistence.runId
   if (typeof runId !== 'number') return
   void downloadSimulationTraceSmv(runId)
 }
@@ -14144,7 +12586,7 @@ const verificationResultStatus = computed(() => {
     }
   }
 
-  if (outcome === 'SATISFIED' && !isVerificationModelComplete(verificationResult.value, outcome)) {
+  if (outcome === 'SATISFIED' && !isRunModelComplete(verificationResult.value)) {
     return {
       ...verificationVerdictTone('warning'),
       icon: 'report',
@@ -14179,14 +12621,9 @@ const verificationResultStatus = computed(() => {
   }
 })
 
-const verificationModelSemanticsConsistent = computed(() => isModelSemanticsConsistent(
-  verificationResult.value?.modelSemantics,
-  {
-    isAttack: verificationResult.value?.isAttack,
-    attackBudget: verificationResult.value?.attackBudget,
-    enablePrivacy: verificationResult.value?.enablePrivacy
-  }
-))
+const verificationModelSemanticsConsistent = computed(() =>
+  isRunModelSemanticsConsistent(verificationResult.value)
+)
 
 const verificationBoardComparison = computed<RunBoardComparison>(() =>
   compareRunToCurrentBoard(verificationResult.value, 'verification')
@@ -14464,7 +12901,7 @@ const attackSelectionSummary = (
       data-toast-anchor
     >
       <div
-        v-if="!isBoardDataReady && failedBoardDataKeys.length === 0"
+        v-if="isInitialBoardLoading"
         class="board-surface-info board-text-info flex h-9 w-full items-center justify-center gap-2 border-x-0 border-t-0 text-xs font-semibold"
         role="status"
         aria-live="polite"
@@ -14616,114 +13053,20 @@ const attackSelectionSummary = (
             {{ t('app.initialValuesHint') }}
           </p>
 
-          <div v-if="templateInstanceHasModes" class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <label class="min-w-0">
-              <span class="mb-1 board-form-label block">{{ t('app.initialState') }}</span>
-              <FieldSelect
-                v-model="templateInstanceRuntime.state"
-                data-testid="template-instance-state"
-              >
-                <option v-for="state in templateInstanceWorkingStates" :key="state.Name" :value="state.Name">{{ formatTemplateModelToken(templateInstanceDialogData.template, state.Name) }}</option>
-              </FieldSelect>
-            </label>
-
-            <label class="min-w-0">
-              <span class="mb-1 board-form-label block">{{ t('app.stateTrust') }}</span>
-              <FieldSelect
-                v-model="templateInstanceRuntime.currentStateTrust"
-                data-testid="template-instance-state-trust"
-              >
-                <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStateTrust(templateInstanceDialogData.template, templateInstanceRuntime.state) || 'trusted'}`) }) }}</option>
-                <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-              </FieldSelect>
-            </label>
-
-            <label class="min-w-0">
-              <span class="mb-1 board-form-label block">{{ t('app.statePrivacy') }}</span>
-              <FieldSelect
-                v-model="templateInstanceRuntime.currentStatePrivacy"
-                data-testid="template-instance-state-privacy"
-              >
-                <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStatePrivacy(templateInstanceDialogData.template, templateInstanceRuntime.state) || 'public'}`) }) }}</option>
-                <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-              </FieldSelect>
-            </label>
-          </div>
-
-          <div v-if="templateInstanceInternalVariables.length > 0" class="mt-3 space-y-2">
-            <div
-              v-for="variable in templateInstanceInternalVariables"
-              :key="variable.Name"
-              class="rounded-lg border board-border-subtle board-bg-elevated p-2"
-            >
-              <div class="mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                <span class="max-w-full break-words text-sm font-semibold board-text-strong" :title="formatTemplateModelToken(templateInstanceDialogData.template, variable.Name)">{{ formatTemplateModelToken(templateInstanceDialogData.template, variable.Name) }}</span>
-                <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-[length:var(--iot-font-min)] font-semibold board-text-muted">
-                  {{ templateVariableInputPlaceholder(variable) }}
-                </span>
-              </div>
-
-              <div class="grid grid-cols-[minmax(0,1fr)_5.8rem_5.8rem] gap-2 max-[520px]:grid-cols-1">
-                <label class="min-w-0">
-                  <span class="mb-1 board-form-label block">{{ t('app.variableValue') }}</span>
-                  <!-- The state's consequence, not an instance choice: see
-                       `templateVariableIsStateDerived`. -->
-                  <div
-                    v-if="templateVariableIsStateDerived(templateInstanceDialogData.template, variable.Name)"
-                    :data-testid="`template-instance-variable-derived-${variable.Name}`"
-                    class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-2 py-1.5"
-                  >
-                    <span class="min-w-0 break-words text-xs font-medium board-text-strong">
-                      {{ formatTemplateModelToken(templateInstanceDialogData.template, templateInstanceRuntime.variables[variable.Name]) }}
-                    </span>
-                    <span class="shrink-0 text-[length:var(--iot-font-min)] board-text-muted">{{ t('app.variableFollowsState') }}</span>
-                  </div>
-                  <FieldSelect
-                    v-else-if="templateVariableHasEnumValues(variable)"
-                    v-model="templateInstanceRuntime.variables[variable.Name]"
-                    :data-testid="`template-instance-variable-${variable.Name}`"
-                  >
-                    <option value="">{{ t('app.useTemplateDefaultWithValue', { value: formatTemplateModelToken(templateInstanceDialogData.template, getTemplateVariableDefaultValue(variable, templateInstanceDialogData.template, templateInstanceRuntime.state)) }) }}</option>
-                    <option v-for="value in variable.Values" :key="value" :value="String(value)">{{ formatTemplateModelToken(templateInstanceDialogData.template, value) }}</option>
-                  </FieldSelect>
-                  <input
-                    v-else
-                    v-model="templateInstanceRuntime.variables[variable.Name]"
-                    :data-testid="`template-instance-variable-${variable.Name}`"
-                    class="board-field"
-                    :placeholder="templateVariableInputPlaceholder(variable)"
-                    type="text"
-                  />
-                </label>
-
-                <label class="min-w-0">
-                  <span class="mb-1 board-form-label block">{{ t('app.variableTrust') }}</span>
-                  <FieldSelect
-                    v-model="templateInstanceRuntime.variableTrusts[variable.Name]"
-                    :data-testid="`template-instance-variable-trust-${variable.Name}`"
-                  >
-                    <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Trust || 'trusted'}`) }) }}</option>
-                    <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                  </FieldSelect>
-                </label>
-
-                <label class="min-w-0">
-                  <span class="mb-1 board-form-label block">{{ t('app.privacy') }}</span>
-                  <FieldSelect
-                    v-model="templateInstanceRuntime.privacies[variable.Name]"
-                    :data-testid="`template-instance-privacy-${variable.Name}`"
-                  >
-                    <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Privacy || 'public'}`) }) }}</option>
-                    <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                  </FieldSelect>
-                </label>
-              </div>
-            </div>
-          </div>
+          <TemplateRuntimeFields
+            variant="template-instance"
+            :template="templateInstanceDialogData.template"
+            :draft="templateInstanceRuntime"
+            :working-states="templateInstanceHasModes ? templateInstanceWorkingStates : []"
+            :variables="templateInstanceInternalVariables"
+            :format-token="formatTemplateModelToken"
+          />
         </details>
 
         </div>
 
+        <p v-if="templateInstanceUnconfirmed" id="template-instance-create-unconfirmed" data-testid="template-instance-create-unconfirmed"
+          role="status" class="board-text-warning text-sm px-4">{{ templateInstanceUnconfirmed }}</p>
         <div class="iot-dialog__footer">
           <button
             type="button"
@@ -14737,7 +13080,8 @@ const attackSelectionSummary = (
             type="button"
             data-testid="template-instance-confirm"
             class="iot-dialog-btn iot-dialog-btn--primary"
-            :disabled="templateInstanceSaving"
+            :disabled="templateInstanceSaving || !!templateInstanceUnconfirmed"
+            :aria-describedby="templateInstanceUnconfirmed ? 'template-instance-create-unconfirmed' : undefined"
             @click="confirmTemplateInstanceCreate"
           >
             <span v-if="templateInstanceSaving" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
@@ -14782,53 +13126,17 @@ const attackSelectionSummary = (
     >
       <template #device-recommendations>
         <div data-testid="device-recommendation-panel" class="min-w-0 space-y-3 break-words">
-          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-            <div class="flex items-center justify-between gap-3 pr-3">
-              <label for="device-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="device-recommendation-help" />
-            </div>
-            <textarea
-              id="device-recommendation-requirement"
-              v-model.trim="deviceRecommendationFilters.userRequirement"
-              :disabled="isRecommendingDevices || recommendationBatch?.running"
-              rows="3"
-              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-              :placeholder="t('app.deviceRecommendationPlaceholder')"
-              class="board-field mt-1 resize-none leading-relaxed"
-            ></textarea>
-          </div>
-
-          <button
-            type="button"
-            data-testid="generate-device-recommendations"
-            @click="fetchDeviceRecommendations"
-            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('device')"
-            :class="[
-              'board-panel-submit board-action-disarmed',
-              isRecommendingDevices ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-            ]"
-          >
-            <span class="material-symbols-outlined text-base">
-              {{ isRecommendingDevices ? 'stop' : 'auto_awesome' }}
-            </span>
-            {{ isRecommendingDevices ? t('app.stopDeviceRecommendations') : t('app.generateRecommendations') }}
-          </button>
-
-          <RecommendationProgressStatus
-            v-if="isRecommendingDevices"
-            :elapsed-seconds="recommendationProgressElapsed"
-            :stage="recommendationProgressStage"
-            :template-count="deviceTemplates.length"
-            :device-count="nodes.length"
-            :rule-count="rules.length"
-            :spec-count="specifications.length"
+          <RecommendationRequestControls
+            kind="device"
+            v-model:requirement="deviceRecommendationFilters.userRequirement"
+            :input-disabled="isRecommendingDevices || recommendationBatch?.running"
+            :action-disabled="recommendationBatch?.running || isSceneReplacementInProgress || hasPendingRecommendationInAnotherPanel('device')"
+            :request-pending="Boolean(deviceRecommendationPanel.requestId.value)"
+            :action-label="recommendationActionLabel(deviceRecommendationPanel, 'app.stopDeviceRecommendations')"
+            :progress="isRecommendingDevices ? recommendationProgress : undefined"
+            :failure="recommendationFailures.device"
+            @action="fetchDeviceRecommendations"
           />
-
-          <div v-if="recommendationFailures.device" data-testid="device-recommendation-error"
-            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-            <p class="font-semibold">{{ recommendationFailures.device.message }}</p>
-            <FailureDetails v-bind="recommendationFailures.device" />
-          </div>
           <p v-if="deviceRecommendationMessage && !isRecommendingDevices && deviceRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
             {{ deviceRecommendationMessage }}
           </p>
@@ -15032,53 +13340,17 @@ const attackSelectionSummary = (
       </template>
       <template #rule-recommendations>
         <div data-testid="rule-recommendation-panel" class="min-w-0 space-y-3 break-words">
-          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-            <div class="flex items-center justify-between gap-3 pr-3">
-              <label for="rule-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="rule-recommendation-help" />
-            </div>
-            <textarea
-              id="rule-recommendation-requirement"
-              v-model.trim="ruleRecommendationFilters.userRequirement"
-              :disabled="isRecommendingRules || recommendationBatch?.running"
-              rows="3"
-              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-              :placeholder="t('app.ruleRecommendationPlaceholder')"
-              class="board-field mt-1 resize-none leading-relaxed"
-            ></textarea>
-          </div>
-
-          <button
-            type="button"
-            data-testid="generate-rule-recommendations"
-            @click="fetchRuleRecommendations"
-            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('rule')"
-            :class="[
-              'board-panel-submit board-action-disarmed',
-              isRecommendingRules ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-            ]"
-          >
-            <span class="material-symbols-outlined text-base">
-              {{ isRecommendingRules ? 'stop' : 'auto_awesome' }}
-            </span>
-            {{ isRecommendingRules ? t('app.stopRuleRecommendations') : t('app.generateRecommendations') }}
-          </button>
-
-          <RecommendationProgressStatus
-            v-if="isRecommendingRules"
-            :elapsed-seconds="recommendationProgressElapsed"
-            :stage="recommendationProgressStage"
-            :template-count="deviceTemplates.length"
-            :device-count="nodes.length"
-            :rule-count="rules.length"
-            :spec-count="specifications.length"
+          <RecommendationRequestControls
+            kind="rule"
+            v-model:requirement="ruleRecommendationFilters.userRequirement"
+            :input-disabled="isRecommendingRules || recommendationBatch?.running"
+            :action-disabled="recommendationBatch?.running || isSceneReplacementInProgress || hasPendingRecommendationInAnotherPanel('rule')"
+            :request-pending="Boolean(ruleRecommendationPanel.requestId.value)"
+            :action-label="recommendationActionLabel(ruleRecommendationPanel, 'app.stopRuleRecommendations')"
+            :progress="isRecommendingRules ? recommendationProgress : undefined"
+            :failure="recommendationFailures.rule"
+            @action="fetchRuleRecommendations"
           />
-
-          <div v-if="recommendationFailures.rule" data-testid="rule-recommendation-error"
-            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-            <p class="font-semibold">{{ recommendationFailures.rule.message }}</p>
-            <FailureDetails v-bind="recommendationFailures.rule" />
-          </div>
           <p v-if="ruleRecommendationMessage && !isRecommendingRules && ruleRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
             {{ ruleRecommendationMessage }}
           </p>
@@ -15280,53 +13552,17 @@ const attackSelectionSummary = (
       </template>
       <template #spec-recommendations>
         <div data-testid="spec-recommendation-panel" class="min-w-0 space-y-3 break-words">
-          <div class="board-form-label rounded-lg border board-border-subtle board-bg-elevated p-2 block">
-            <div class="flex items-center justify-between gap-3 pr-3">
-              <label for="spec-recommendation-requirement" class="board-form-label">{{ t('app.recommendationScenario') }}</label>
-              <InfoTooltip :text="t('app.recommendationBasisHint')" :label="t('app.showHelpFor', { topic: t('app.recommendationScenario') })" test-id="spec-recommendation-help" />
-            </div>
-            <textarea
-              id="spec-recommendation-requirement"
-              v-model.trim="specRecommendationFilters.userRequirement"
-              :disabled="isRecommendingSpecs || recommendationBatch?.running"
-              rows="3"
-              :maxlength="AI_RECOMMENDATION_REQUIREMENT_MAX_LENGTH"
-              :placeholder="t('app.specRecommendationPlaceholder')"
-              class="board-field mt-1 resize-none leading-relaxed"
-            ></textarea>
-          </div>
-
-          <button
-            type="button"
-            data-testid="generate-spec-recommendations"
-            @click="fetchSpecRecommendations"
-            :disabled="recommendationBatch?.running || isSceneReplacementInProgress || isRecommendationRunningForAnother('spec')"
-            :class="[
-              'board-panel-submit board-action-disarmed',
-              isRecommendingSpecs ? 'bg-[color:var(--danger-fill)] hover:bg-[color:var(--danger-fill-hover)]' : 'bg-[color:var(--accent-fill)] hover:bg-[color:var(--accent-fill-hover)]'
-            ]"
-          >
-            <span class="material-symbols-outlined text-base">
-              {{ isRecommendingSpecs ? 'stop' : 'auto_awesome' }}
-            </span>
-            {{ isRecommendingSpecs ? t('app.stopSpecificationRecommendations') : t('app.generateRecommendations') }}
-          </button>
-
-          <RecommendationProgressStatus
-            v-if="isRecommendingSpecs"
-            :elapsed-seconds="recommendationProgressElapsed"
-            :stage="recommendationProgressStage"
-            :template-count="deviceTemplates.length"
-            :device-count="nodes.length"
-            :rule-count="rules.length"
-            :spec-count="specifications.length"
+          <RecommendationRequestControls
+            kind="spec"
+            v-model:requirement="specRecommendationFilters.userRequirement"
+            :input-disabled="isRecommendingSpecs || recommendationBatch?.running"
+            :action-disabled="recommendationBatch?.running || isSceneReplacementInProgress || hasPendingRecommendationInAnotherPanel('spec')"
+            :request-pending="Boolean(specRecommendationPanel.requestId.value)"
+            :action-label="recommendationActionLabel(specRecommendationPanel, 'app.stopSpecificationRecommendations')"
+            :progress="isRecommendingSpecs ? recommendationProgress : undefined"
+            :failure="recommendationFailures.spec"
+            @action="fetchSpecRecommendations"
           />
-
-          <div v-if="recommendationFailures.spec" data-testid="spec-recommendation-error"
-            role="alert" class="rounded-lg board-surface-danger px-3 py-2 text-xs leading-5 board-text-danger">
-            <p class="font-semibold">{{ recommendationFailures.spec.message }}</p>
-            <FailureDetails v-bind="recommendationFailures.spec" />
-          </div>
           <p v-if="specRecommendationMessage && !isRecommendingSpecs && specRecommendationIsAppliedConfirmation" class="text-xs board-text-muted">
             {{ specRecommendationMessage }}
           </p>
@@ -15563,6 +13799,8 @@ const attackSelectionSummary = (
       :read-only="isModelPlaybackActive || isSceneReplacementInProgress"
       :read-only-message="isSceneReplacementInProgress ? t('app.sceneReplacementInProgress') : t('app.playbackReadOnlyCloseFirst')"
       :rules-reordering="rulesReordering"
+      :rule-order-blocked-reason="ruleOrderBlockedReason"
+      :deletion-warning="boardItemDeletionWarning"
       :class="{ 'board-panel--interaction-read-only': isModelPlaybackActive || isSceneReplacementInProgress }"
       @delete-device="deleteNodeFromStatus"
       @delete-rule="deleteRule"
@@ -15655,6 +13893,7 @@ const attackSelectionSummary = (
               :viewBox="canvasMapViewBox"
               preserveAspectRatio="none"
             >
+              <g v-memo="[canvasMapLines, canvasMapDots]">
               <line
                 v-for="line in canvasMapLines"
                 :key="line.id"
@@ -15677,6 +13916,7 @@ const attackSelectionSummary = (
                 stroke="var(--surface-elevated)"
                 stroke-width="1"
               />
+              </g>
               <rect
                 v-if="canvasMapViewportRect"
                 data-testid="canvas-map-viewport-rect"
@@ -15757,7 +13997,7 @@ const attackSelectionSummary = (
             class="board-playback-bar__toggle"
             data-testid="playback-panel-toggle"
             :aria-expanded="playbackPanelOpen"
-            :aria-controls="traceAnimationState.visible ? 'trace-playback-panel' : 'simulation-playback-panel'"
+            :aria-controls="isTracePlaybackActive ? 'trace-playback-panel' : 'simulation-playback-panel'"
             :aria-label="t('app.showPlaybackPanel')"
             @click="togglePlaybackPanel"
           >
@@ -15768,9 +14008,9 @@ const attackSelectionSummary = (
           <button
             type="button"
             class="board-playback-bar__exit"
-            :data-testid="traceAnimationState.visible ? 'trace-timeline-close' : 'simulation-timeline-close'"
+            :data-testid="isTracePlaybackActive ? 'trace-timeline-close' : 'simulation-timeline-close'"
             :aria-label="t('app.exitPlayback')"
-            @click="traceAnimationState.visible ? closeTraceAnimation() : closeSimulationTimeline()"
+            @click="dismissPlayback"
           >
             <span class="material-symbols-outlined" aria-hidden="true">stop_circle</span>
             <span>{{ t('app.exitPlayback') }}</span>
@@ -15926,7 +14166,7 @@ const attackSelectionSummary = (
 
         <div class="board-tool-wrapper group">
           <div
-            v-if="simulationAnimationState.visible"
+            v-if="isSimulationPlaybackActive"
             class="board-tool-status"
           ></div>
           <HintTooltip :content="simulationTooltipContent">
@@ -15934,9 +14174,9 @@ const attackSelectionSummary = (
               type="button"
               @click="togglePanel('simulation')"
               data-testid="open-simulation-panel"
-              :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
+              :disabled="isModelPlaybackActive || isAnyRecommendationRunning()"
               :aria-label="isSimulating ? t('app.simulationRunning') : t('app.openSimulationSettings')"
-              :aria-pressed="showSimulationPanel || simulationAnimationState.visible"
+              :aria-pressed="showSimulationPanel || isSimulationPlaybackActive"
               class="board-tool-button transition-colors"
             >
               <span v-if="isSimulating" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
@@ -15953,7 +14193,7 @@ const attackSelectionSummary = (
               type="button"
               @click="togglePanel('fuzzing')"
               data-testid="open-fuzzing-panel"
-              :disabled="isSceneReplacementInProgress || traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
+              :disabled="isSceneReplacementInProgress || isModelPlaybackActive || isAnyRecommendationRunning()"
               :aria-label="isSceneReplacementInProgress
                 ? t('app.sceneReplacementInProgress')
                 : isFuzzing ? t('app.fuzzRunning') : t('app.openFuzzSettings')"
@@ -15971,7 +14211,7 @@ const attackSelectionSummary = (
 
         <div class="board-tool-wrapper group">
           <div
-            v-if="traceAnimationState.visible"
+            v-if="isTracePlaybackActive"
             class="board-tool-status"
           ></div>
           <HintTooltip :content="verificationTooltipContent">
@@ -15980,9 +14220,9 @@ const attackSelectionSummary = (
               type="button"
               @click="togglePanel('verification')"
               data-testid="open-verification-panel"
-              :disabled="traceAnimationState.visible || simulationAnimationState.visible || isAnimationLocked || isAnyRecommendationRunning()"
+              :disabled="isModelPlaybackActive || isAnyRecommendationRunning()"
               :aria-label="isVerifying ? t('app.verifying') : t('app.openVerificationSettings')"
-              :aria-pressed="showVerificationPanel || traceAnimationState.visible"
+              :aria-pressed="showVerificationPanel || isTracePlaybackActive"
               class="board-tool-button transition-colors"
             >
               <span v-if="isVerifying" class="material-symbols-outlined animate-spin" aria-hidden="true">sync</span>
@@ -16051,7 +14291,7 @@ const attackSelectionSummary = (
         :action-locked="historyActionLocked"
         :current-model-fingerprints="currentBoardModelFingerprints"
         :model-comparison-loading="loadingCurrentBoardModelFingerprints"
-        :rejected-verification-repair-trace-ids="rejectedVerificationRepairTraceIds"
+        :verification-repair-blocks="verificationRepairBlocks"
         @update:active-layer="setHistoryLayer"
         @update:result-filter="setHistoryResultFilter"
         @close="closeHistoryPanel"
@@ -16061,13 +14301,13 @@ const attackSelectionSummary = (
         @watch-verification-task="watchVerificationTask"
         @watch-fuzzing-task="watchFuzzingTask"
         @watch-simulation-task="watchSimulationTask"
-        @cancel-verification-task="cancelVerificationTaskFromInbox"
-        @cancel-fuzzing-task="cancelFuzzingTaskFromInbox"
-        @cancel-simulation-task="cancelSimulationTaskFromInbox"
+        @cancel-verification-task="cancelBoardTask('verification', $event)"
+        @cancel-fuzzing-task="cancelBoardTask('fuzzing', $event)"
+        @cancel-simulation-task="cancelBoardTask('simulation', $event)"
         @reopen-task-settings="reopenTaskSettings"
-        @dismiss-verification-task="dismissVerificationTask"
-        @dismiss-fuzzing-task="dismissFuzzingTask"
-        @dismiss-simulation-task="dismissSimulationTask"
+        @dismiss-verification-task="dismissBoardTask('verification', $event)"
+        @dismiss-fuzzing-task="dismissBoardTask('fuzzing', $event)"
+        @dismiss-simulation-task="dismissBoardTask('simulation', $event)"
         @open-verification-run="openVerificationRunFromHistory"
         @delete-verification-run="deleteVerificationRun"
         @download-verification-run-smv="downloadVerificationRunSmv"
@@ -16128,7 +14368,7 @@ const attackSelectionSummary = (
                 class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md board-text-muted hover:board-chip-danger hover:board-text-danger"
                 :aria-label="miniTaskCancelLabel(task.kind)"
                 :disabled="pendingTaskActionKeys.has(taskActionKey('cancel', task.kind, task.id)) || isWatchedTaskCancelled(task.kind, task.id)"
-                @click="cancelMiniTask(task.kind, task.id)"
+                @click="cancelBoardTask(task.kind, task.id)"
               >
                 <span class="material-symbols-outlined text-sm" aria-hidden="true">cancel</span>
               </button>
@@ -16395,75 +14635,13 @@ const attackSelectionSummary = (
           </p>
         </div>
 
-        <!-- Privacy Analysis -->
-        <div class="board-card p-3 rounded-xl">
-          <div class="flex items-center justify-between gap-3">
-            <div class="flex min-w-0 items-center gap-3">
-            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
-              <span class="material-symbols-outlined board-text-info text-lg">security</span>
-            </div>
-            <label class="board-form-label">
-              {{ t('app.privacyAnalysis') }}
-            </label>
-            <InfoTooltip
-              :text="hasPrivacySpecification ? t('app.privacyModelRequiredHint') : t('app.privacyModelHint')"
-              :label="t('app.showHelpFor', { topic: t('app.privacyAnalysis') })"
-              placement="left"
-              tone="sensitivity"
-              test-id="verification-privacy-help"
-            />
-            </div>
-            <ToggleSwitch
-              :checked="verificationForm.enablePrivacy"
-              :label="t('app.privacyAnalysis')"
-              tone="sensitivity"
-              test-id="verification-privacy-toggle"
-              :disabled="isVerifying || hasPrivacySpecification"
-              :describedby-id="hasPrivacySpecification ? 'verification-privacy-required' : undefined"
-              @change="value => verificationForm.enablePrivacy = value"
-            />
-          </div>
-          <p v-if="hasPrivacySpecification" id="verification-privacy-required" class="mt-2 text-xs font-semibold leading-4 board-text-info" data-testid="verification-privacy-required">
-            {{ t('app.privacyModelRequiredStatus') }}
-          </p>
-        </div>
-
-        <!-- Run Mode -->
-        <div class="board-card p-3 rounded-xl">
-          <div class="flex items-center gap-3 mb-2">
-            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
-              <span class="material-symbols-outlined board-text-info text-lg">schedule</span>
-            </div>
-            <label class="board-form-label">
-              {{ t('app.runMode') }}
-            </label>
-          </div>
-          <div class="grid grid-cols-2 gap-1 rounded-lg board-bg-control p-1">
-            <button
-              type="button"
-              :disabled="isVerifying"
-              @click="verificationForm.isAsync = false"
-              data-testid="verification-mode-sync"
-              :aria-pressed="!verificationForm.isAsync"
-              class="board-run-mode"
-            >
-              {{ t('app.waitForResult') }}
-            </button>
-            <button
-              type="button"
-              :disabled="isVerifying"
-              @click="verificationForm.isAsync = true"
-              data-testid="verification-mode-async"
-              :aria-pressed="verificationForm.isAsync"
-              class="board-run-mode"
-            >
-              {{ t('app.backgroundTask') }}
-            </button>
-          </div>
-          <p v-if="verificationForm.isAsync" class="mt-2 text-xs leading-5 board-text-muted">
-            {{ t('app.asyncVerificationModeHint') }}
-          </p>
-        </div>
+        <FormalRunSettings
+          kind="verification"
+          v-model:privacy="verificationForm.enablePrivacy"
+          v-model:async-mode="verificationForm.isAsync"
+          :disabled="isVerifying"
+          :privacy-required="hasPrivacySpecification"
+        />
 
         </template>
         <!-- Async Progress (visible when async verification is running) -->
@@ -16699,71 +14877,12 @@ const attackSelectionSummary = (
           </p>
         </div>
 
-        <!-- Privacy Analysis -->
-        <div class="board-card p-3 rounded-xl">
-          <div class="flex items-center justify-between gap-3">
-            <div class="flex min-w-0 items-center gap-3">
-              <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
-                <span class="material-symbols-outlined board-text-info text-lg">security</span>
-              </div>
-              <label class="board-form-label">
-                {{ t('app.privacyAnalysis') }}
-              </label>
-              <InfoTooltip
-                :text="t('app.privacyModelHint')"
-                :label="t('app.showHelpFor', { topic: t('app.privacyAnalysis') })"
-                placement="left"
-                tone="sensitivity"
-                test-id="simulation-privacy-help"
-              />
-            </div>
-            <ToggleSwitch
-              :checked="simulationForm.enablePrivacy"
-              :label="t('app.privacyAnalysis')"
-              tone="sensitivity"
-              test-id="simulation-privacy-toggle"
-              :disabled="isSimulating"
-              @change="value => simulationForm.enablePrivacy = value"
-            />
-          </div>
-        </div>
-
-        <!-- Run Mode -->
-        <div class="board-card p-3 rounded-xl">
-          <div class="flex items-center gap-3 mb-2">
-            <div class="w-8 h-8 shrink-0 board-chip-info rounded-lg flex items-center justify-center">
-              <span class="material-symbols-outlined board-text-info text-lg">schedule</span>
-            </div>
-            <label class="board-form-label">
-              {{ t('app.runMode') }}
-            </label>
-          </div>
-          <div class="grid grid-cols-2 gap-1 rounded-lg board-bg-control p-1">
-            <button
-              type="button"
-              :disabled="isSimulating"
-              @click="simulationForm.isAsync = false"
-              data-testid="simulation-mode-sync"
-              :aria-pressed="!simulationForm.isAsync"
-              class="board-run-mode"
-            >
-              {{ t('app.waitForResult') }}
-            </button>
-            <button
-              type="button"
-              :disabled="isSimulating"
-              @click="simulationForm.isAsync = true"
-              data-testid="simulation-mode-async"
-              :aria-pressed="simulationForm.isAsync"
-              class="board-run-mode"
-            >
-              {{ t('app.backgroundTask') }}
-            </button>
-          </div>
-          <p v-if="simulationForm.isAsync" class="mt-2 text-xs leading-5 board-text-muted">
-            {{ t('app.asyncSimulationModeHint') }}
-          </p>
-        </div>
+        <FormalRunSettings
+          kind="simulation"
+          v-model:privacy="simulationForm.enablePrivacy"
+          v-model:async-mode="simulationForm.isAsync"
+          :disabled="isSimulating"
+        />
 
         <!-- Save History -->
         <div v-if="!simulationForm.isAsync" class="board-card p-3 rounded-xl">
@@ -16967,7 +15086,7 @@ const attackSelectionSummary = (
               :placeholder="t('app.enterDeviceName')"
             />
             <p v-if="renameNameBlockedReason" id="rename-device-name-hint" data-testid="rename-device-name-hint"
-              role="status" class="mt-2 text-xs" :class="renameNameConflict ? 'board-text-danger' : 'board-text-muted'">{{ renameNameBlockedReason }}</p>
+              role="status" class="mt-2 text-xs" :class="renameUnconfirmedMessage ? 'board-text-warning' : renameNameConflict ? 'board-text-danger' : 'board-text-muted'">{{ renameNameBlockedReason }}</p>
           </div>
           <div class="iot-dialog__footer">
             <button
@@ -17028,6 +15147,8 @@ const attackSelectionSummary = (
           </div>
 
           <div class="iot-dialog__body iot-scroll-region">
+            <p v-if="deleteUnconfirmedMessage" id="device-delete-unconfirmed" data-testid="device-delete-unconfirmed"
+              role="status" class="mb-3 text-sm board-text-warning">{{ deleteUnconfirmedMessage }}</p>
             <div
               v-if="deletePreviewLoading"
               class="mb-3 flex items-center gap-3 rounded-lg board-surface-info px-4 py-3 text-sm board-text-info"
@@ -17038,22 +15159,22 @@ const attackSelectionSummary = (
               {{ t('app.deviceDeletionPreviewLoading') }}
             </div>
 
-            <div v-if="deleteConfirmDialogData.hasRelations" class="board-surface-warning rounded-lg p-4">
+            <div v-if="hasDeletionConsequences" class="board-surface-warning rounded-lg p-4">
               <div class="flex items-start">
                 <span class="material-symbols-outlined board-text-warning mr-2 mt-0.5" aria-hidden="true">info</span>
                 <div class="min-w-0">
                   <p class="text-sm font-medium board-text-warning mb-1">{{ t('app.deviceDeleteConsequences') }}</p>
                   <div class="text-xs board-text-warning space-y-1">
-                    <div v-if="deleteConfirmDialogData.relationCount.rules > 0">
-                      • {{ t('app.relatedRulesWillBeDeleted', { count: deleteConfirmDialogData.relationCount.rules }) }}
+                    <div v-if="deleteConfirmDialogData.relatedRules.length > 0">
+                      • {{ t('app.relatedRulesWillBeDeleted', { count: deleteConfirmDialogData.relatedRules.length }) }}
                       <ul class="mt-1 ml-4 list-disc break-words">
                         <li v-for="(label, index) in deleteConfirmDialogData.relatedRules" :key="`delete-rule-${index}`">
                           {{ label }}
                         </li>
                       </ul>
                     </div>
-                    <div v-if="deleteConfirmDialogData.relationCount.specs > 0">
-                      • {{ t('app.relatedSpecsWillBeDeleted', { count: deleteConfirmDialogData.relationCount.specs }) }}
+                    <div v-if="deleteConfirmDialogData.relatedSpecs.length > 0">
+                      • {{ t('app.relatedSpecsWillBeDeleted', { count: deleteConfirmDialogData.relatedSpecs.length }) }}
                       <ul class="mt-1 ml-4 list-disc break-words">
                         <li v-for="(label, index) in deleteConfirmDialogData.relatedSpecs" :key="`delete-spec-${index}`">
                           {{ label }}
@@ -17089,7 +15210,8 @@ const attackSelectionSummary = (
             <button
               type="button"
               @click="confirmDelete"
-              :disabled="deletePreviewLoading || deleteConfirmSubmitting || !deleteConfirmDialogData.impactToken"
+              :disabled="deletePreviewLoading || deleteConfirmSubmitting || !deleteConfirmDialogData.impactToken || Boolean(deleteUnconfirmedMessage)"
+              :aria-describedby="deleteUnconfirmedMessage ? 'device-delete-unconfirmed' : undefined"
               :aria-busy="deleteConfirmSubmitting"
               class="iot-dialog-btn iot-dialog-btn--danger"
             >
@@ -17201,7 +15323,7 @@ const attackSelectionSummary = (
         <div v-else-if="verificationResult" class="space-y-4">
           <!-- Stale Warning -->
           <div
-            v-if="verificationNeedsReverify"
+            v-if="verificationRunNeedsReverify"
             data-testid="verification-result-stale-banner"
             role="status"
             class="board-run-notice flex items-start gap-2 board-surface-warning board-text-warning"
@@ -17209,17 +15331,17 @@ const attackSelectionSummary = (
             <span class="material-symbols-outlined text-base" aria-hidden="true">history</span>
             <div class="min-w-0">
               <p v-if="verificationFixApplied" data-testid="verification-fix-applied" class="mb-1 font-semibold">{{ t('app.fixAppliedWithSignedEvidence') }}</p>
-              <p>{{ verificationFixBlockedReason }}</p>
+              <p>{{ verificationRunRepairBlock && t(verificationRunRepairBlock) }}</p>
             </div>
           </div>
           <div
-            v-else-if="verificationFixBlockedReason"
+            v-else-if="verificationRunRepairBlock"
             data-testid="verification-result-comparison-banner"
             role="status"
             class="board-run-notice flex items-start gap-2 board-surface-warning board-text-warning"
           >
             <span class="material-symbols-outlined text-base" aria-hidden="true">info</span>
-            <span>{{ verificationFixBlockedReason }}</span>
+            <span>{{ t(verificationRunRepairBlock) }}</span>
           </div>
 
           <!--
@@ -17286,7 +15408,7 @@ const attackSelectionSummary = (
                         type="button"
                         data-testid="verification-trace-fix"
                         class="iot-dialog-btn iot-dialog-btn--ghost"
-                        :disabled="simulationAnimationState.visible"
+                        :disabled="isSimulationPlaybackActive"
                         @click="openFixForVerificationResultTrace(trace)"
                       >
                         <!-- aria-hidden, or the ligature text joins the accessible name: this button
@@ -17298,27 +15420,23 @@ const attackSelectionSummary = (
                       <button
                         type="button"
                         @click="selectAndPlayTrace(index)"
-                        :disabled="simulationAnimationState.visible"
+                        :disabled="isSimulationPlaybackActive"
                         data-testid="verification-trace-replay"
                         class="iot-dialog-btn iot-dialog-btn--primary"
                       >
                         <span class="material-symbols-outlined text-xs" aria-hidden="true">play_arrow</span>
                         {{ t('app.replay') }}
-                        <span v-if="simulationAnimationState.visible" class="text-xs">({{ t('app.active') }})</span>
+                        <span v-if="isSimulationPlaybackActive" class="text-xs">({{ t('app.active') }})</span>
                       </button>
                     </div>
                   </div>
                   <!-- Why Fix is withheld. Without this the button simply vanished, which reads as a bug. -->
                   <p
-                    v-if="!canFixVerificationResultTrace(trace) && !verificationNeedsReverify"
+                    v-if="!verificationRunNeedsReverify && verificationResultTraceRepairBlock(trace)"
                     data-testid="verification-trace-fix-unavailable"
                     class="board-run-notice mb-2 board-surface-warning board-text-warning"
                   >
-                    {{ !hasPersistedVerificationTrace(verificationResult, trace)
-                      ? t(verificationResult.historyPersistence.status === 'OUTCOME_UNKNOWN'
-                        ? 'app.verificationTracePersistenceUnknownFixUnavailable'
-                        : 'app.verificationTraceNotPersistedFixUnavailable')
-                      : verificationFixBlockedReason }}
+                    {{ t(verificationResultTraceRepairBlock(trace)!) }}
                   </p>
                 </div>
                 <template v-if="group.result">
@@ -17601,13 +15719,13 @@ const attackSelectionSummary = (
   </div>
 
   <PlaybackTerminal
-    v-if="traceAnimationState.visible && currentTrace"
+    v-if="currentTrace"
     v-show="playbackPanelOpen"
     v-model:tab="playbackTerminalTab"
     :kind="activeFuzzingFinding ? 'fuzzing' : 'counterexample'"
-    :selected-state-index="traceAnimationState.selectedStateIndex"
+    :selected-state-index="activePlaybackStateIndex"
     :total-states="totalStates"
-    :playing="traceAnimationState.isPlaying"
+    :playing="isPlaybackPlaying"
     :panel-open="playbackPanelOpen"
     :state-label="getTraceStateAriaLabel"
     :violation-steps="counterexampleViolationSteps"
@@ -17615,8 +15733,8 @@ const attackSelectionSummary = (
     :locate-label="counterexampleViolationStep === undefined ? t('app.traceVisualization.jumpToViolationLoop') : t('app.traceVisualization.jumpToViolation')"
     :style="boardShellStyle"
     @seek="goToState"
-    @toggle-play="toggleTraceAnimation"
-    @scrub-start="stopTraceAnimation"
+    @toggle-play="togglePlayback"
+    @scrub-start="stopPlayback"
     @locate-violation="goToState(counterexampleViolationSteps[0])"
     @hide-panel="hidePlaybackPanel"
     @keydown="handlePlaybackKeydown"
@@ -17635,7 +15753,7 @@ const attackSelectionSummary = (
         <section class="playback-run__section" data-testid="counterexample-evidence">
           <h3>{{ t('app.violatedSpecification') }}</h3>
           <p class="playback-run__requirement" data-testid="trace-timeline-violated-spec">{{ getTraceSpecDisplayTitle(currentTrace) }}</p>
-          <span v-if="traceStateViolationLabel(traceAnimationState.selectedStateIndex)" class="playback-terminal__badge board-chip-danger board-text-danger" data-testid="trace-timeline-violation-chip">{{ traceStateViolationLabel(traceAnimationState.selectedStateIndex) }}</span>
+          <span v-if="traceStateViolationLabel(activePlaybackStateIndex)" class="playback-terminal__badge board-chip-danger board-text-danger" data-testid="trace-timeline-violation-chip">{{ traceStateViolationLabel(activePlaybackStateIndex) }}</span>
           <details v-if="!activeFuzzingFinding" data-testid="counterexample-checked-expression">
             <summary>{{ t('app.checkedExpression') }}</summary>
             <pre>{{ currentTrace.checkedExpression || t('app.notAvailable') }}</pre>
@@ -17666,7 +15784,7 @@ const attackSelectionSummary = (
       <PlaybackStateDetails
         :devices="activePlaybackDevices"
         :environment-variables="activePlaybackEnvironmentVariables"
-        :compromised-automation-links="currentTraceCompromisedAutomationLinks"
+        :compromised-automation-links="activePlaybackCompromisedAutomationLinks"
         :current-device-ids="nodes.map(node => node.id)"
         :current-rule-ids="rules.map(rule => String(rule.id))"
         :format-device-token="formatPlaybackDeviceModelToken"
@@ -17674,50 +15792,25 @@ const attackSelectionSummary = (
       />
     </template>
     <template #changes>
-      <PlaybackChangesPanel
-        v-if="activePlaybackKind"
-        :changes="activePlaybackChanges"
-        :environment-changes="activePlaybackEnvironmentChanges"
-        :triggered-rules="activePlaybackTriggeredRules"
-        :current-rule-ids="currentBoardRuleIds"
-        :animated-edge-count="activePlaybackAnimatedEdgeCount"
-        :state-number="activePlaybackStateIndex + 1"
-        :total-states="activePlaybackStates.length"
-        :kind="activePlaybackKind"
-        :input-events="activeFuzzingStepInputEvents"
-        :bundled-device-ids="bundledPlaybackDeviceIds"
-        :bundled-environment-names="bundledPlaybackEnvironmentNames"
-        :violation-state-number="activeViolationStateNumber"
-        :is-loop-back-state="activePlaybackIsLoopBackState"
-        :loop-range="activePlaybackLoopRange"
-        :is-liveness-violation="activePlaybackIsLivenessViolation"
-      />
+      <PlaybackChangesPanel v-if="playbackChangeProps" v-bind="playbackChangeProps" />
     </template>
   </PlaybackTerminal>
 
-  <!-- Simulation Timeline 组件
-
-       `v-if` stays on `simulationAnimationState.visible` alone. That flag is the single authority for "the
-       simulation replay is active" — 33 sites read it, including the board edit lock (`isAnimationLocked`),
-       the playback-kind resolution behind `run=`, the keyboard handlers and the panel disabling — so adding
-       `&& lastSimulationResult` here would make the *rendered* surface a second, subtly different notion of
-       the same thing: the lock could be held with nothing on screen to explain why.
-
-       The required `modelSemantics` is narrowed at the prop instead, by `simulationPlaybackSemantics`. -->
   <SimulationTimeline
-    v-if="simulationAnimationState.visible"
+    v-if="simulationPlaybackResult"
     v-show="playbackPanelOpen"
-    :visible="simulationAnimationState.visible"
     :panel-open="playbackPanelOpen"
-    :states="savedSimulationStates"
-    :actual-steps="lastSimulationResult?.steps"
-    :requested-steps="lastSimulationResult?.requestedSteps"
-    :model-complete="lastSimulationResult?.modelComplete"
-    :disabled-rule-count="lastSimulationResult?.disabledRuleCount"
-    :is-attack="lastSimulationResult?.isAttack"
-    :attack-budget="lastSimulationResult?.attackBudget"
-    :enable-privacy="lastSimulationResult?.enablePrivacy"
-    :model-semantics="simulationPlaybackSemantics"
+    :states="activePlaybackStates"
+    :selected-state-index="activePlaybackStateIndex"
+    :playing="isPlaybackPlaying"
+    :actual-steps="simulationPlaybackResult.steps"
+    :requested-steps="simulationPlaybackResult.requestedSteps"
+    :model-complete="simulationPlaybackResult.modelComplete"
+    :disabled-rule-count="simulationPlaybackResult.disabledRuleCount"
+    :is-attack="simulationPlaybackResult.isAttack"
+    :attack-budget="simulationPlaybackResult.attackBudget"
+    :enable-privacy="simulationPlaybackResult.enablePrivacy"
+    :model-semantics="simulationPlaybackResult.modelSemantics"
     :board-comparison="simulationBoardComparison"
     :current-rule-ids="currentBoardRuleIds"
     :current-device-ids="currentBoardDeviceIds"
@@ -17725,28 +15818,30 @@ const attackSelectionSummary = (
     :format-environment-model-token="formatPlaybackEnvironmentModelToken"
     v-model:tab="playbackTerminalTab"
     :style="boardShellStyle"
-    @highlight-state="handleHighlightTrace"
+    @seek="goToState"
+    @toggle-play="togglePlayback"
+    @scrub-start="stopPlayback"
     @hide-panel="hidePlaybackPanel"
     @keydown="handlePlaybackKeydown"
   >
     <template #run>
-      <div v-if="lastSimulationResult" class="playback-run" data-testid="simulation-run-info">
+      <div v-if="simulationPlaybackResult" class="playback-run" data-testid="simulation-run-info">
         <section class="playback-run__section">
           <h3>{{ t('app.runSummary') }}</h3>
           <dl class="playback-run__facts">
-            <div><dt>{{ t('app.actualSimulationSteps') }}</dt><dd>{{ getSimulationActualStepCount(lastSimulationResult) }} / {{ getSimulationRequestedStepCount(lastSimulationResult) }} {{ t('app.requestedSimulationSteps') }}</dd></div>
-            <div><dt>{{ t('app.modelCoverage') }}</dt><dd>{{ isSimulationModelComplete(lastSimulationResult) ? t('app.completeModel') : t('app.incompleteModel') }}</dd></div>
-            <div><dt>{{ t('app.traceVisualization.attackScenario') }}</dt><dd>{{ !isSimulationModelSemanticsConsistent(lastSimulationResult) ? t('app.modelSemanticsUnavailable') : lastSimulationResult.isAttack ? attackSelectionSummary(lastSimulationResult.modelSemantics, lastSimulationResult.attackBudget, 'simulation') : t('app.traceVisualization.noAttackModelShort') }}</dd></div>
-            <div><dt>{{ t('app.privacy') }}</dt><dd>{{ !isSimulationModelSemanticsConsistent(lastSimulationResult) ? t('app.modelSemanticsUnavailable') : lastSimulationResult.enablePrivacy ? t('app.traceVisualization.privacyPropagationEnabled') : t('app.traceVisualization.privacyPropagationNotModeled') }}</dd></div>
+            <div><dt>{{ t('app.actualSimulationSteps') }}</dt><dd>{{ simulationPlaybackResult.steps }} / {{ simulationPlaybackResult.requestedSteps }} {{ t('app.requestedSimulationSteps') }}</dd></div>
+            <div><dt>{{ t('app.modelCoverage') }}</dt><dd>{{ isRunModelComplete(simulationPlaybackResult) ? t('app.completeModel') : t('app.incompleteModel') }}</dd></div>
+            <div><dt>{{ t('app.traceVisualization.attackScenario') }}</dt><dd>{{ !simulationPlaybackSemanticsConsistent ? t('app.modelSemanticsUnavailable') : simulationPlaybackResult.isAttack ? attackSelectionSummary(simulationPlaybackResult.modelSemantics, simulationPlaybackResult.attackBudget, 'simulation') : t('app.traceVisualization.noAttackModelShort') }}</dd></div>
+            <div><dt>{{ t('app.privacy') }}</dt><dd>{{ !simulationPlaybackSemanticsConsistent ? t('app.modelSemanticsUnavailable') : simulationPlaybackResult.enablePrivacy ? t('app.traceVisualization.privacyPropagationEnabled') : t('app.traceVisualization.privacyPropagationNotModeled') }}</dd></div>
           </dl>
-          <ul v-if="getGenerationIssues(lastSimulationResult).length" class="playback-run__issues board-text-warning" data-testid="simulation-generation-issues">
-            <li v-for="(issue, idx) in getGenerationIssues(lastSimulationResult)" :key="`${issue.issueType}-${idx}`"><strong>{{ issue.itemLabel }}</strong><span>{{ t(generationIssueReasonKey(issue)) }}</span></li>
+          <ul v-if="getGenerationIssues(simulationPlaybackResult).length" class="playback-run__issues board-text-warning" data-testid="simulation-generation-issues">
+            <li v-for="(issue, idx) in getGenerationIssues(simulationPlaybackResult)" :key="`${issue.issueType}-${idx}`"><strong>{{ issue.itemLabel }}</strong><span>{{ t(generationIssueReasonKey(issue)) }}</span></li>
           </ul>
-          <p v-else-if="!isSimulationModelComplete(lastSimulationResult)" class="playback-terminal__notice board-surface-warning">{{ t('app.generationIssueDetailsUnavailable') }}</p>
+          <p v-else-if="!isRunModelComplete(simulationPlaybackResult)" class="playback-terminal__notice board-surface-warning">{{ t('app.generationIssueDetailsUnavailable') }}</p>
         </section>
         <section class="playback-run__section" data-testid="simulation-run-artifact">
           <h3>{{ t('app.simulationSmvModelArtifactTitle') }}</h3>
-          <p>{{ t('app.simulationSmvModelArtifactScope', { devices: lastSimulationResult.modelSnapshot.deviceCount, rules: lastSimulationResult.modelSnapshot.ruleCount }) }}</p>
+          <p>{{ t('app.simulationSmvModelArtifactScope', { devices: simulationPlaybackResult.modelSnapshot.deviceCount, rules: simulationPlaybackResult.modelSnapshot.ruleCount }) }}</p>
           <p v-if="!simulationRunSmvAvailable" class="board-text-warning" data-testid="simulation-result-smv-unavailable">{{ t(simulationSmvUnavailableReason) }}</p>
           <div class="playback-terminal__run-actions">
             <button type="button" class="playback-run__download" data-testid="simulation-result-download-smv" :disabled="!simulationRunSmvAvailable" @click="downloadCurrentSimulationRunSmv()">
@@ -17757,34 +15852,17 @@ const attackSelectionSummary = (
         <section class="playback-run__section playback-run__diagnostics">
           <details data-testid="simulation-execution-logs">
             <summary>{{ t('app.executionLogs') }}</summary>
-            <pre>{{ lastSimulationResult.logs.join('\n') || t('app.noLogsAvailableShort') }}</pre>
+            <pre>{{ simulationPlaybackResult.logs.join('\n') || t('app.noLogsAvailableShort') }}</pre>
           </details>
           <details data-testid="simulation-nusmv-output">
             <summary>{{ t('app.showNusmvDiagnosticOutput') }}</summary>
-            <pre>{{ lastSimulationResult.nusmvOutput || t('app.noLogsAvailableShort') }}</pre>
+            <pre>{{ simulationPlaybackResult.nusmvOutput || t('app.noLogsAvailableShort') }}</pre>
           </details>
         </section>
       </div>
     </template>
     <template #changes>
-      <PlaybackChangesPanel
-        v-if="activePlaybackKind"
-        :changes="activePlaybackChanges"
-        :environment-changes="activePlaybackEnvironmentChanges"
-        :triggered-rules="activePlaybackTriggeredRules"
-        :current-rule-ids="currentBoardRuleIds"
-        :animated-edge-count="activePlaybackAnimatedEdgeCount"
-        :state-number="activePlaybackStateIndex + 1"
-        :total-states="activePlaybackStates.length"
-        :kind="activePlaybackKind"
-        :input-events="activeFuzzingStepInputEvents"
-        :bundled-device-ids="bundledPlaybackDeviceIds"
-        :bundled-environment-names="bundledPlaybackEnvironmentNames"
-        :violation-state-number="activeViolationStateNumber"
-        :is-loop-back-state="activePlaybackIsLoopBackState"
-        :loop-range="activePlaybackLoopRange"
-        :is-liveness-violation="activePlaybackIsLivenessViolation"
-      />
+      <PlaybackChangesPanel v-if="playbackChangeProps" v-bind="playbackChangeProps" />
     </template>
   </SimulationTimeline>
 
@@ -17800,6 +15878,5 @@ const attackSelectionSummary = (
     @applied="handleFixApplied"
     @reverify="showFixDialog = false; reopenVerificationSettingsFromResult()"
     @model-semantics-changed="handleFixModelSemanticsChanged"
-    @outcome-uncertain="handleFixOutcomeUncertain"
   />
 </template>

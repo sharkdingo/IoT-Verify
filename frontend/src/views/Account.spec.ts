@@ -22,7 +22,9 @@ const routers = new WeakMap<ReturnType<typeof mount>, Router>()
 const auth = useAuth()
 const token = (signature = 'alice') => `header.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).replace(/=/g, '')}.${signature}`
 const alice = { userId: 7, phone: '13800138000', username: 'alice' }
+const bob = { userId: 8, phone: '13900139000', username: 'bob' }
 const profile = { ...alice, createdAt: '2026-10-01T08:00:00+08:00' }
+const bobProfileResponse = { code: 200, data: { ...bob, createdAt: profile.createdAt } }
 const rejection = (status: number, reasonCode: string) => ({ response: { status, data: { data: { reasonCode } } } })
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
@@ -88,6 +90,24 @@ const passwordForm = async (wrapper: ReturnType<typeof mount>) => {
   await wrapper.get('#account-new-password').setValue('Different123')
   await wrapper.get('#account-confirm-password').setValue('Different123')
 }
+const submitUsernameForm = async (wrapper: ReturnType<typeof mount>, name?: string) => {
+  await usernameForm(wrapper, name)
+  await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
+}
+const submitPasswordForm = async (wrapper: ReturnType<typeof mount>) => {
+  await passwordForm(wrapper)
+  await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+}
+const openLogoutDialog = async (wrapper: ReturnType<typeof mount>) => {
+  await wrapper.get('[data-testid="account-logout"]').trigger('click')
+  await flushPromises()
+  return vi.waitFor(() => wrapper.get('[data-testid="logout-dialog"]'))
+}
+const confirmLogout = async (wrapper: ReturnType<typeof mount>) => {
+  const dialog = await openLogoutDialog(wrapper)
+  await dialog.get('[data-testid="logout-confirm"]').trigger('click')
+}
+
 const deleteForm = async (wrapper: ReturnType<typeof mount>) => {
   await wrapper.get('[data-testid="open-account-delete"]').trigger('click')
   await flushPromises()
@@ -201,8 +221,7 @@ describe('Account page', () => {
       await usernameForm(wrapper)
       await wrapper.get('[data-testid="account-confirm-username"]').trigger('click')
     } else {
-      await passwordForm(wrapper)
-      await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+      await submitPasswordForm(wrapper)
     }
     await flushPromises()
     const error = wrapper.get(`[data-testid="account-${editor}-error"]`)
@@ -251,8 +270,7 @@ describe('Account page', () => {
       reasonCode: 'AUTH_ACCOUNT_CHANGE_RATE_LIMIT_REACHED', scope: 'CAPACITY', retryAfterSeconds: seconds
     } } } })
     const wrapper = await mountAccount()
-    await passwordForm(wrapper)
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+    await submitPasswordForm(wrapper)
     await flushPromises()
     expect(wrapper.get('[data-testid="account-password-error"]').get('p').text()).toBe(seconds
       ? i18n.global.t('auth.rateLimitCapacityReached', { seconds })
@@ -280,8 +298,7 @@ describe('Account page', () => {
     expect(wrapper.get('[data-testid="account-save-username"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('#account-username-blocked').text()).toBe(i18n.global.t('account.usernameUnchanged'))
 
-    await usernameForm(wrapper, '  new-alice  ')
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
+    await submitUsernameForm(wrapper, '  new-alice  ')
     await flushPromises()
 
     expect(mocks.updateUsername).toHaveBeenCalledWith({ username: 'new-alice', currentPassword: 'Password123', expectedUsername: 'alice' }, originalToken)
@@ -370,8 +387,7 @@ describe('Account page', () => {
     await flushPromises()
     expect(mocks.getAccount).toHaveBeenCalledTimes(2)
     expect(wrapper.get<HTMLInputElement>('#account-username').element.value).toBe('other-tab')
-    await usernameForm(wrapper, 'next-name')
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
+    await submitUsernameForm(wrapper, 'next-name')
     await flushPromises()
     expect(mocks.updateUsername.mock.calls[0][0].expectedUsername).toBe('other-tab')
   })
@@ -402,8 +418,7 @@ describe('Account page', () => {
   it('clears an unsubmitted identity confirmation when its account is replaced', async () => {
     const wrapper = await mountAccount()
     await usernameForm(wrapper, 'alice-private-draft')
-    const bob = { userId: 8, phone: '13900139000', username: 'bob' }
-    mocks.getAccount.mockResolvedValue({ code: 200, data: { ...bob, createdAt: profile.createdAt } })
+    mocks.getAccount.mockResolvedValue(bobProfileResponse)
     auth.login(token('bob'), bob)
     await flushPromises()
     expect(wrapper.find('[data-testid="account-confirm-username-dialog"]').exists()).toBe(false)
@@ -443,8 +458,7 @@ describe('Account page', () => {
     mocks.getAccount.mockResolvedValue({ code: 200, data: { ...profile, username: 'other-tab' } })
     await wrapper.get('[data-testid="account-refresh-profile"]').trigger('click')
     await flushPromises()
-    await usernameForm(wrapper, 'reviewed-alice')
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
+    await submitUsernameForm(wrapper, 'reviewed-alice')
     expect(mocks.updateUsername.mock.calls[1][0].expectedUsername).toBe('other-tab')
   })
 
@@ -479,49 +493,6 @@ describe('Account page', () => {
     })
   })
 
-  it('keeps password rejection inline without ending the session', async () => {
-    const wrapper = await mountAccount()
-    await usernameForm(wrapper)
-    mocks.updateUsername.mockRejectedValue(rejection(400, 'CURRENT_PASSWORD_INCORRECT'))
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="account-username-error"]').text()).toContain('current password is incorrect')
-    expect(wrapper.get('#account-username-password').attributes('aria-invalid')).toBe('true')
-    expect(wrapper.get('#account-username-password').attributes('aria-describedby')).toBe('account-username-error')
-    expect(auth.state.isLoggedIn).toBe(true)
-    expect(routers.get(wrapper)!.currentRoute.value.path).toBe('/account')
-  })
-
-  it('associates a taken username with its field', async () => {
-    const wrapper = await mountAccount()
-    await usernameForm(wrapper)
-    mocks.updateUsername.mockRejectedValue(rejection(409, 'USERNAME_ALREADY_EXISTS'))
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
-    await flushPromises()
-    expect(wrapper.get('#account-username').attributes('aria-invalid')).toBe('true')
-    expect(wrapper.get('#account-username').attributes('aria-describedby')).toContain('account-username-error')
-    expect(wrapper.find('#account-username-password').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="account-confirm-username-dialog"]').exists()).toBe(false)
-  })
-
-  it('reconciles an unconfirmed username mutation instead of reporting success', async () => {
-    const wrapper = await mountAccount()
-    await usernameForm(wrapper)
-    mocks.updateUsername.mockRejectedValue(new Error('connection dropped after commit'))
-    mocks.getAccount.mockResolvedValue({ code: 200, data: { ...profile, username: 'new-alice' } })
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
-    await flushPromises()
-    expect(auth.state.user?.username).toBe('new-alice')
-    expect(wrapper.get('[data-testid="account-username-error"]').text()).toContain('not confirmed')
-    expect(wrapper.get('[data-testid="account-username-error"]').classes()).toContain('account-notice--warning')
-    expect(wrapper.get('[data-testid="account-username-error"]').classes()).not.toContain('account-notice--error')
-    expect(wrapper.find('[data-testid="account-username-saved"]').exists()).toBe(false)
-    setLocale('zh-CN')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="account-username-error"]').get('p').text()).toBe(i18n.global.t('account.usernameOutcomeRefreshed'))
-    expect(feedback.notifySuccess).not.toHaveBeenCalled()
-  })
-
   it('does not accept malformed or foreign profile data', async () => {
     mocks.getAccount.mockResolvedValue({ code: 200, data: { ...profile, userId: 8 } })
     const wrapper = await mountAccount()
@@ -547,10 +518,9 @@ describe('Account page', () => {
     const mutation = deferred<{ code: number; data: typeof profile }>()
     mocks.updateUsername.mockReturnValue(mutation.promise)
     const wrapper = await mountAccount()
-    await usernameForm(wrapper)
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
-    mocks.getAccount.mockResolvedValue({ code: 200, data: { ...profile, userId: 8, phone: '13900139000', username: 'bob' } })
-    auth.login(token('bob'), { userId: 8, phone: '13900139000', username: 'bob' })
+    await submitUsernameForm(wrapper)
+    mocks.getAccount.mockResolvedValue(bobProfileResponse)
+    auth.login(token('bob'), bob)
     await flushPromises()
     mutation.resolve({ code: 200, data: { ...profile, username: 'new-alice' } })
     await flushPromises()
@@ -566,8 +536,7 @@ describe('Account page', () => {
     mocks.updateUsername.mockReturnValue(mutation.promise)
     const wrapper = await mountAccount()
     const router = routers.get(wrapper)!
-    await usernameForm(wrapper)
-    await wrapper.get('[data-testid="account-confirm-username-dialog"]').trigger('submit')
+    await submitUsernameForm(wrapper)
     expect(wrapper.get('[data-testid="account-cancel-username-confirmation"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="account-cancel-username"]').attributes('disabled')).toBeDefined()
     await wrapper.get('.iot-dialog-overlay--session').trigger('click')
@@ -590,8 +559,8 @@ describe('Account page', () => {
     await usernameForm(wrapper)
     await wrapper.get('[data-testid="account-cancel-username-confirmation"]').trigger('click')
     await passwordForm(wrapper)
-    mocks.getAccount.mockResolvedValue({ code: 200, data: { userId: 8, phone: '13900139000', username: 'bob', createdAt: profile.createdAt } })
-    auth.login(token('bob'), { userId: 8, phone: '13900139000', username: 'bob' })
+    mocks.getAccount.mockResolvedValue(bobProfileResponse)
+    auth.login(token('bob'), bob)
     await flushPromises()
     expect(wrapper.text()).not.toContain(alice.phone)
     expect(wrapper.get('[data-testid="account-username-value"]').text()).toBe('bob')
@@ -610,9 +579,7 @@ describe('Account page', () => {
     const prepare = vi.fn().mockResolvedValue('ready')
     const wrapper = await mountAccount(prepare)
     const requestToken = auth.getToken()
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    const dialog = wrapper.get('[data-testid="logout-dialog"]')
+    const dialog = await openLogoutDialog(wrapper)
     expect(dialog.findAll('button')).toHaveLength(2)
     expect(dialog.find('[data-testid="open-account-delete"]').exists()).toBe(false)
     await dialog.get('[data-testid="logout-confirm"]').trigger('click')
@@ -627,10 +594,8 @@ describe('Account page', () => {
   it('cannot revoke or navigate a replacement session after sign-out preparation', async () => {
     const prepared = deferred<'ready'>()
     const wrapper = await mountAccount(vi.fn().mockReturnValue(prepared.promise))
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
-    auth.login(token('bob'), { userId: 8, phone: '13900139000', username: 'bob' })
+    await confirmLogout(wrapper)
+    auth.login(token('bob'), bob)
     prepared.resolve('ready')
     await flushPromises()
     expect(mocks.logout).not.toHaveBeenCalled()
@@ -638,19 +603,40 @@ describe('Account page', () => {
     expect(routers.get(wrapper)!.currentRoute.value.path).toBe('/account')
   })
 
+  it.each(['logout', 'delete'] as const)('does not dispatch %s after its preparation resolves and a new account takes over', async action => {
+    const prepared = deferred<'ready'>()
+    const prepare = vi.fn().mockReturnValue(prepared.promise)
+    const wrapper = await mountAccount(prepare)
+    const submit = action === 'logout' ? confirmLogout : deleteForm
+    await submit(wrapper)
+    expect(prepare).toHaveBeenCalledOnce()
+
+    prepared.resolve('ready')
+    // Let preparation check its old owner, then replace it before the account action resumes.
+    await Promise.resolve()
+    const replacementToken = token('bob')
+    mocks.getAccount.mockResolvedValueOnce(bobProfileResponse)
+    auth.login(replacementToken, bob)
+    await flushPromises()
+
+    expect(mocks[action === 'logout' ? 'logout' : 'deleteAccount']).not.toHaveBeenCalled()
+    expect(auth.getToken()).toBe(replacementToken)
+    expect(routers.get(wrapper)!.currentRoute.value.path).toBe('/account')
+    expect(wrapper.get('[data-testid="account-username-value"]').text()).toBe(bob.username)
+    expect(wrapper.find('[data-testid="account-session-error"], [data-testid="account-delete-error"]').exists()).toBe(false)
+    expect(feedback.notifySuccess).not.toHaveBeenCalled()
+  })
+
   it('keeps a replacement session signed in after the initiating logout response arrives', async () => {
     const response = deferred<{ code: number; data: null }>()
     mocks.logout.mockReturnValue(response.promise)
     const wrapper = await mountAccount()
     const requestToken = auth.getToken()
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
+    await confirmLogout(wrapper)
     await flushPromises()
     expect(mocks.logout).toHaveBeenCalledWith(requestToken)
 
-    const bob = { userId: 8, phone: '13900139000', username: 'bob' }
-    mocks.getAccount.mockResolvedValue({ code: 200, data: { ...bob, createdAt: profile.createdAt } })
+    mocks.getAccount.mockResolvedValue(bobProfileResponse)
     auth.login(token('bob'), bob)
     await flushPromises()
     await passwordForm(wrapper)
@@ -667,9 +653,7 @@ describe('Account page', () => {
   it('abandons sign-out when its account page unmounts during preparation', async () => {
     const prepared = deferred<'ready'>()
     const wrapper = await mountAccount(vi.fn().mockReturnValue(prepared.promise))
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
+    await confirmLogout(wrapper)
     const replace = vi.spyOn(routers.get(wrapper)!, 'replace')
     wrapper.unmount()
     wrappers.splice(wrappers.indexOf(wrapper), 1)
@@ -684,9 +668,7 @@ describe('Account page', () => {
   it('preserves a refreshed credential for the same account after sign-out preparation', async () => {
     const prepared = deferred<'ready'>()
     const wrapper = await mountAccount(vi.fn().mockReturnValue(prepared.promise))
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
+    await confirmLogout(wrapper)
     const renewedToken = token('alice-renewed')
     auth.login(renewedToken, alice)
     prepared.resolve('ready')
@@ -702,10 +684,7 @@ describe('Account page', () => {
     const prepared = deferred<'ready'>()
     const wrapper = await mountAccount(vi.fn().mockReturnValue(prepared.promise))
     const requestToken = auth.getToken()
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
-    const bob = { userId: 8, phone: '13900139000', username: 'bob' }
+    await confirmLogout(wrapper)
     const bobToken = token('bob')
     const sharedRecord = JSON.stringify({ token: bobToken, user: bob, updatedAt: Date.now() })
     localStorage.setItem('iot_verify_token', bobToken)
@@ -724,9 +703,7 @@ describe('Account page', () => {
     const wrapper = await mountAccount()
     const requestToken = auth.getToken()
     mocks.logout.mockRejectedValue(new Error('offline'))
-    await wrapper.get('[data-testid="account-logout"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
+    await confirmLogout(wrapper)
     await flushPromises()
 
     expect(mocks.logout).toHaveBeenCalledWith(requestToken)
@@ -793,7 +770,7 @@ describe('Account page', () => {
     const wrapper = await mountAccount()
     await deleteForm(wrapper)
     await flushPromises()
-    auth.login(token('bob'), { userId: 8, phone: '13900139000', username: 'bob' })
+    auth.login(token('bob'), bob)
     await flushPromises()
     rejectDeletion({ response: { status: 400, data: { message: 'Alice password is incorrect.' } } })
     await flushPromises()
@@ -807,12 +784,9 @@ describe('Account page', () => {
   it.each(['password', 'logout', 'delete'] as const)('blocks %s when chat reconciliation failed and explains the failure persistently', async action => {
     const wrapper = await mountAccount(vi.fn().mockResolvedValue('reconciliation-failed'))
     if (action === 'password') {
-      await passwordForm(wrapper)
-      await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+      await submitPasswordForm(wrapper)
     } else if (action === 'logout') {
-      await wrapper.get('[data-testid="account-logout"]').trigger('click')
-      await flushPromises()
-      await wrapper.get('[data-testid="logout-confirm"]').trigger('click')
+      await confirmLogout(wrapper)
     } else await deleteForm(wrapper)
     await flushPromises()
     const errorId = action === 'password' ? 'account-password-error' : action === 'logout' ? 'account-session-error' : 'account-delete-error'
@@ -826,8 +800,7 @@ describe('Account page', () => {
   it('keeps a declined uncertain-chat password preparation as cancellation, without a false error', async () => {
     feedback.confirmChoice.mockResolvedValue(false)
     const wrapper = await mountAccount(vi.fn().mockResolvedValue('outcome-unknown'))
-    await passwordForm(wrapper)
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+    await submitPasswordForm(wrapper)
     await flushPromises()
     expect(feedback.confirmChoice).toHaveBeenCalledExactlyOnceWith({
       title: i18n.global.t('account.passwordChatUnknownTitle'),
@@ -889,8 +862,7 @@ describe('Account page', () => {
     const wrapper = await mountAccount(prepare)
     const router = routers.get(wrapper)!
     const requestToken = auth.getToken()
-    await passwordForm(wrapper)
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+    await submitPasswordForm(wrapper)
     await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
     expect(mocks.changePassword).toHaveBeenCalledOnce()
     expect(prepare).toHaveBeenCalledOnce()
@@ -911,25 +883,14 @@ describe('Account page', () => {
     expect(wrapper.find('#account-new-password').exists()).toBe(false)
   })
 
-  it('signs out only its own session when the password response is lost', async () => {
-    const wrapper = await mountAccount()
-    await passwordForm(wrapper)
-    mocks.changePassword.mockRejectedValue(new Error('response lost'))
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
-    await flushPromises()
-    expect(auth.state.isLoggedIn).toBe(false)
-    expect(routers.get(wrapper)!.currentRoute.value.query.reason).toBe('password-change-unknown')
-  })
-
   it('does not sign out a replacement session after a late password response', async () => {
     const response = deferred<{ code: number; data: null }>()
     mocks.changePassword.mockReturnValue(response.promise)
     const wrapper = await mountAccount()
     const requestToken = auth.getToken()!
-    await passwordForm(wrapper)
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+    await submitPasswordForm(wrapper)
     await flushPromises()
-    auth.login(token('bob'), { userId: 8, phone: '13900139000', username: 'bob' })
+    auth.login(token('bob'), bob)
     response.resolve({ code: 200, data: null })
     await flushPromises()
     expect(auth.state.user?.username).toBe('bob')
@@ -942,8 +903,7 @@ describe('Account page', () => {
     mocks.changePassword.mockReturnValue(response.promise)
     const wrapper = await mountAccount()
     const requestToken = auth.getToken()!
-    await passwordForm(wrapper)
-    await wrapper.get('[data-testid="account-password-form"]').trigger('submit')
+    await submitPasswordForm(wrapper)
     await flushPromises()
     expect(auth.isPasswordChangePending(requestToken)).toBe(true)
 

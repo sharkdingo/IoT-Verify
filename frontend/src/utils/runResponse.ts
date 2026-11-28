@@ -1,5 +1,9 @@
 import { isModelFingerprint } from '@/utils/modelComparison'
-import { INTERACTIVE_OPERATION_STAGES as INTERACTIVE_OPERATION_STAGE_VALUES } from '@/types/task'
+import {
+  INTERACTIVE_OPERATION_STAGES as INTERACTIVE_OPERATION_STAGE_VALUES,
+  isAsyncTaskStatus,
+  isTaskProgressStage
+} from '@/types/task'
 import type {
   SimulationResult,
   SimulationTask,
@@ -16,7 +20,6 @@ import type {
 } from '@/types/task'
 import type {
   ImmediateTrace,
-  ModelGenerationIssue,
   PersistedTrace,
   SpecResult,
   Trace,
@@ -52,6 +55,14 @@ const requireRecord = (value: unknown, context: string, field = 'result'): Recor
     throw new RunResponseContractError(context, `${field} must be an object`)
   }
   return value as Record<string, any>
+}
+
+export const validateHistoryDeletionReceipt = (value: unknown): void => {
+  const context = 'Saved history deletion'
+  const receipt = requireRecord(value, context, 'receipt')
+  if (receipt.code !== 200 || receipt.data != null) {
+    throw new RunResponseContractError(context, 'receipt must carry a successful result without data')
+  }
 }
 
 const requireArray = (value: Record<string, any>, field: string, context: string): any[] => {
@@ -188,7 +199,7 @@ const validateGenerationIssues = (
   context: string,
   disabledRuleCount: number,
   skippedSpecCount?: number
-): ModelGenerationIssue[] => {
+): void => {
   const issues = requireArray(value, 'generationIssues', context)
   issues.forEach((issue, index) => {
     const row = requireRecord(issue, context, `generationIssues[${index}]`)
@@ -207,7 +218,29 @@ const validateGenerationIssues = (
       throw new RunResponseContractError(context, 'skippedSpecCount must match generationIssues')
     }
   }
-  return issues as ModelGenerationIssue[]
+}
+
+const validateSimulationCompleteness = (value: Record<string, any>, context: string): void => {
+  const modelComplete = requireBoolean(value, 'modelComplete', context)
+  const disabledRuleCount = requireInteger(value, 'disabledRuleCount', context)
+  validateGenerationIssues(value, context, disabledRuleCount)
+  if (modelComplete !== (disabledRuleCount === 0)) {
+    throw new RunResponseContractError(context, 'modelComplete contradicts disabled rules')
+  }
+}
+
+const validateVerificationCompleteness = (
+  value: Record<string, any>, context: string, modelComplete: boolean
+): void => {
+  const disabledRuleCount = requireInteger(value, 'disabledRuleCount', context)
+  const skippedSpecCount = requireInteger(value, 'skippedSpecCount', context)
+  validateGenerationIssues(value, context, disabledRuleCount, skippedSpecCount)
+  const expectedModelComplete = value.outcome !== 'INCONCLUSIVE'
+    && disabledRuleCount === 0
+    && skippedSpecCount === 0
+  if (modelComplete !== expectedModelComplete) {
+    throw new RunResponseContractError(context, 'modelComplete contradicts the conclusion or omissions')
+  }
 }
 
 const validateStateList = (states: unknown, context: string): TraceState[] => {
@@ -288,26 +321,6 @@ const validateStringArray = (result: Record<string, any>, field: string, context
   })
 }
 
-const TASK_STATUSES = new Set<AsyncTaskStatus>([
-  'PENDING',
-  'RUNNING',
-  'COMPLETED',
-  'FAILED',
-  'CANCELLED'
-])
-
-const TASK_PROGRESS_STAGES = new Set<TaskProgressStage>([
-  'QUEUED',
-  'STARTING',
-  'GENERATING_MODEL',
-  'EXECUTING_MODEL_CHECKER',
-  'PARSING_RESULTS',
-  'RUNNING_SIMULATION',
-  'PREPARING_EXPLORATION',
-  'EXPLORING_CANDIDATES',
-  'PERSISTING_RESULT'
-])
-
 const INTERACTIVE_OPERATION_STAGES = new Set<string>(INTERACTIVE_OPERATION_STAGE_VALUES)
 
 const TERMINAL_TASK_STATUSES = new Set<AsyncTaskStatus>(['COMPLETED', 'FAILED', 'CANCELLED'])
@@ -324,10 +337,10 @@ const validateTaskBase = (value: unknown, context: string): Record<string, any> 
   const task = requireRecord(value, context)
   requireInteger(task, 'id', context, 1)
   requireRunInitiator(task, context)
-  if (!TASK_STATUSES.has(task.status)) {
+  if (!isAsyncTaskStatus(task.status)) {
     throw new RunResponseContractError(context, 'status is invalid')
   }
-  const status = task.status as AsyncTaskStatus
+  const status = task.status
   requireString(task, 'createdAt', context, false)
   requireAttackContext(task, context)
   requireOptionalTimestamp(task, 'startedAt', context)
@@ -339,7 +352,7 @@ const validateTaskBase = (value: unknown, context: string): Record<string, any> 
     requireIntegerInRange(task, 'progress', context, 0, 100)
   }
   if (task.progressStage !== undefined && task.progressStage !== null
-    && !TASK_PROGRESS_STAGES.has(task.progressStage)) {
+    && !isTaskProgressStage(task.progressStage)) {
     throw new RunResponseContractError(context, 'progressStage is invalid')
   }
   if (status === 'RUNNING' || status === 'COMPLETED') {
@@ -395,15 +408,7 @@ const validateCompletedVerificationConclusion = (
   }
   const modelComplete = requireBoolean(task, 'modelComplete', context)
   const violatedSpecCount = requireInteger(task, 'violatedSpecCount', context)
-  const disabledRuleCount = requireInteger(task, 'disabledRuleCount', context)
-  const skippedSpecCount = requireInteger(task, 'skippedSpecCount', context)
-  validateGenerationIssues(task, context, disabledRuleCount, skippedSpecCount)
-  const expectedModelComplete = task.outcome !== 'INCONCLUSIVE'
-    && disabledRuleCount === 0
-    && skippedSpecCount === 0
-  if (modelComplete !== expectedModelComplete) {
-    throw new RunResponseContractError(context, 'modelComplete contradicts the conclusion or omissions')
-  }
+  validateVerificationCompleteness(task, context, modelComplete)
   if (task.outcome === 'SATISFIED' && violatedSpecCount !== 0) {
     throw new RunResponseContractError(context, 'SATISFIED cannot report violated specifications')
   }
@@ -420,20 +425,6 @@ const validateCompletedVerificationConclusion = (
     validateStringArray(task, 'checkLogs', context)
     requireString(task, 'nusmvOutput', context)
   }
-}
-
-export const validateTaskSubmissionId = (value: unknown, context: string): number => {
-  if (!Number.isSafeInteger(value) || Number(value) < 1) {
-    throw new RunResponseContractError(context, 'task id must be a positive integer')
-  }
-  return value as number
-}
-
-export const validateTaskProgress = (value: unknown, context: string): number => {
-  if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > 100) {
-    throw new RunResponseContractError(context, 'progress must be an integer between 0 and 100')
-  }
-  return value as number
 }
 
 export const validateInteractiveOperationStatus = (value: unknown): InteractiveOperationStatus => {
@@ -472,7 +463,7 @@ export const validateTaskCancellationResult = (
   if (!outcomes.has(result.cancellationOutcome)) {
     throw new RunResponseContractError(context, 'cancellationOutcome is invalid')
   }
-  if (!TASK_STATUSES.has(result.taskStatus)) {
+  if (!isAsyncTaskStatus(result.taskStatus)) {
     throw new RunResponseContractError(context, 'taskStatus is invalid')
   }
   if (cancellationAccepted !== (result.cancellationOutcome === 'ACCEPTED')) {
@@ -615,15 +606,7 @@ export const validateVerificationResult = (value: unknown): VerificationResult =
     throw new RunResponseContractError(context, 'outcome is required')
   }
   const modelComplete = requireBoolean(result, 'modelComplete', context)
-  const disabledRuleCount = requireInteger(result, 'disabledRuleCount', context)
-  const skippedSpecCount = requireInteger(result, 'skippedSpecCount', context)
-  validateGenerationIssues(result, context, disabledRuleCount, skippedSpecCount)
-  const expectedModelComplete = result.outcome !== 'INCONCLUSIVE'
-    && disabledRuleCount === 0
-    && skippedSpecCount === 0
-  if (modelComplete !== expectedModelComplete) {
-    throw new RunResponseContractError(context, 'modelComplete contradicts the conclusion or omissions')
-  }
+  validateVerificationCompleteness(result, context, modelComplete)
   const traces = requireArray(result, 'traces', context)
   if (persistence.status === 'SAVED') {
     traces.forEach(trace => validateVerificationTrace(trace, context, persistence.runId))
@@ -650,14 +633,13 @@ export type CompletedVerificationTask = VerificationTask & Required<Pick<
   | 'nusmvOutput'
 >>
 
-export const validateVerificationTask = (value: unknown): VerificationTask => {
-  const context = 'Verification task'
+const validateVerificationTaskShape = (value: unknown, context: string, requireDetails: boolean) => {
   const task = validateTaskBase(value, context)
   if (task.modelSnapshot.specificationCount < 1) {
     throw new RunResponseContractError(context, 'modelSnapshot must include at least one specification')
   }
   if (task.status === 'COMPLETED') {
-    validateCompletedVerificationConclusion(task, context, true)
+    validateCompletedVerificationConclusion(task, context, requireDetails)
   } else if (task.status === 'PENDING' || task.status === 'RUNNING') {
     if (task.outcome !== undefined || task.modelComplete !== undefined) {
       throw new RunResponseContractError(context, 'an active task cannot report a conclusion')
@@ -667,35 +649,19 @@ export const validateVerificationTask = (value: unknown): VerificationTask => {
       throw new RunResponseContractError(context, 'a failed or cancelled task must be inconclusive')
     }
   }
-  return task as VerificationTask
+  return task
 }
 
-// Not exported: the list validator below is the module's public surface, and this is its element step.
-// An exported symbol with no importer reads as public API and invites a second entry point past the
-// list-level checks.
-const validateVerificationTaskSummary = (value: unknown): VerificationTaskSummary => {
-  const context = 'Verification task summary'
-  const task = validateTaskBase(value, context)
-  if (task.modelSnapshot.specificationCount < 1) {
-    throw new RunResponseContractError(context, 'modelSnapshot must include at least one specification')
-  }
-  if (task.status === 'COMPLETED') {
-    validateCompletedVerificationConclusion(task, context, false)
-  } else if (task.status === 'PENDING' || task.status === 'RUNNING') {
-    if (task.outcome !== undefined || task.modelComplete !== undefined) {
-      throw new RunResponseContractError(context, 'an active task cannot report a conclusion')
-    }
-  } else if (task.outcome !== 'INCONCLUSIVE' || task.modelComplete !== false) {
-    throw new RunResponseContractError(context, 'a failed or cancelled task must be inconclusive')
-  }
-  return task as VerificationTaskSummary
-}
+export const validateVerificationTask = (value: unknown): VerificationTask =>
+  validateVerificationTaskShape(value, 'Verification task', true) as VerificationTask
 
 export const validateVerificationTaskSummaryList = (value: unknown): VerificationTaskSummary[] => {
   if (!Array.isArray(value)) {
     throw new RunResponseContractError('Verification task inbox', 'result must be an array')
   }
-  return value.map(validateVerificationTaskSummary)
+  return value.map(item =>
+    validateVerificationTaskShape(item, 'Verification task summary', false) as VerificationTaskSummary
+  )
 }
 
 const validateVerificationRunBase = (
@@ -829,12 +795,7 @@ const validateSimulationShape = (
   if (result.modelSnapshot.specificationCount !== 0) {
     throw new RunResponseContractError(context, 'simulation modelSnapshot specificationCount must be 0')
   }
-  const modelComplete = requireBoolean(result, 'modelComplete', context)
-  const disabledRuleCount = requireInteger(result, 'disabledRuleCount', context)
-  validateGenerationIssues(result, context, disabledRuleCount)
-  if (modelComplete !== (disabledRuleCount === 0)) {
-    throw new RunResponseContractError(context, 'modelComplete contradicts disabled rules')
-  }
+  validateSimulationCompleteness(result, context)
   const states = validateStateList(result.states, context)
   const steps = requireInteger(result, 'steps', context)
   const requestedSteps = requireInteger(result, 'requestedSteps', context, 1)
@@ -872,12 +833,7 @@ export const validateSimulationTraceSummary = (value: unknown): SimulationTraceS
   if (steps > requestedSteps) {
     throw new RunResponseContractError(context, 'steps cannot exceed requestedSteps')
   }
-  const modelComplete = requireBoolean(result, 'modelComplete', context)
-  const disabledRuleCount = requireInteger(result, 'disabledRuleCount', context)
-  validateGenerationIssues(result, context, disabledRuleCount)
-  if (modelComplete !== (disabledRuleCount === 0)) {
-    throw new RunResponseContractError(context, 'modelComplete contradicts disabled rules')
-  }
+  validateSimulationCompleteness(result, context)
   const isAttack = requireBoolean(result, 'isAttack', context)
   const attackBudget = requireInteger(result, 'attackBudget', context)
   if ((!isAttack && attackBudget !== 0) || (isAttack && attackBudget < 1)) {
@@ -918,12 +874,7 @@ const validateSimulationTaskShape = (
   if (task.status === 'COMPLETED') {
     requireInteger(task, 'steps', context)
     requireInteger(task, 'simulationTraceId', context, 1)
-    const modelComplete = requireBoolean(task, 'modelComplete', context)
-    const disabledRuleCount = requireInteger(task, 'disabledRuleCount', context)
-    validateGenerationIssues(task, context, disabledRuleCount)
-    if (modelComplete !== (disabledRuleCount === 0)) {
-      throw new RunResponseContractError(context, 'modelComplete contradicts disabled rules')
-    }
+    validateSimulationCompleteness(task, context)
     if (requireDetails) {
       validateStringArray(task, 'checkLogs', context)
     }
@@ -942,7 +893,6 @@ const validateSimulationTaskShape = (
 export const validateSimulationTask = (value: unknown): SimulationTask =>
   validateSimulationTaskShape(value, 'Simulation task', true) as SimulationTask
 
-// Not exported, for the same reason as `validateVerificationTaskSummary` above.
 const validateSimulationTaskSummary = (value: unknown): SimulationTaskSummary =>
   validateSimulationTaskShape(value, 'Simulation task summary', false) as SimulationTaskSummary
 

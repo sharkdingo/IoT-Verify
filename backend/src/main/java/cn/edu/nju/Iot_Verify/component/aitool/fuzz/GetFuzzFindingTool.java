@@ -57,12 +57,7 @@ public class GetFuzzFindingTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "findingId", "stateOffset", "stateLimit"));
             long findingId = positiveLongArg(args, "findingId");
@@ -99,7 +94,7 @@ public class GetFuzzFindingTool extends AbstractAiTool {
             body.put("inputEvents", List.copyOf(inputEventWindow));
             body.put("createdAt", finding.getCreatedAt());
             body.put("message", "Counterexample-search finding loaded. This is heuristic candidate evidence, not a formal counterexample.");
-            return readOnlySuccessJson(body, "Counterexample-search finding loaded.");
+            return readOnlySuccessJson(body);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (ServiceUnavailableException e) {

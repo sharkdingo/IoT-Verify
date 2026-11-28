@@ -315,6 +315,13 @@ const conditionWithoutSuggestionResult = (): FixResult => ({
   fixable: false
 })
 
+const allRemovalsRejectedResult = (): FixResult => ({
+  ...removeResult(),
+  suggestions: [],
+  strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
+  fixable: false
+})
+
 // A parameter search that listed nothing, keeping its target catalog, ended with `status`.
 const parameterOutcomeResult = (status: FixStrategyAttemptStatus): FixResult => ({
   ...parameterResult(),
@@ -347,7 +354,7 @@ const incompleteSourceModelResult = (): FixResult => ({
 })
 
 const mountedDialogs: VueWrapper[] = []
-const applyImmediately = (write: () => Promise<FixApplyResult | null>) => write()
+const applyImmediately = (_traceId: number, write: () => Promise<FixApplyResult | null>) => write()
 
 const mountDialog = (i18nPlugin: any = i18n) => {
   const wrapper = mount(FixResultDialog, {
@@ -384,14 +391,29 @@ const mountPersistentDialogHost = () => {
 }
 
 // Opens the dialog and runs the default (parameter) strategy against `result`.
-const tryParameter = async (result: FixResult) => {
-  boardApi.fixTrace.mockResolvedValueOnce(result)
+const tryParameter = async (result: FixResult, ...subsequentResults: FixResult[]) => {
+  for (const response of [result, ...subsequentResults]) {
+    boardApi.fixTrace.mockResolvedValueOnce(response)
+  }
   const wrapper = mountDialog()
   await flush()
   await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
   await flush()
   await wrapper.vm.$nextTick()
   return wrapper
+}
+
+const tryNextFixStrategy = async (wrapper: VueWrapper) => {
+  await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
+  await flush()
+}
+
+const startFixSearchWithFakeTimers = async () => {
+  const wrapper = mountDialog()
+  await flush()
+  vi.useFakeTimers()
+  await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+  return { wrapper, options: boardApi.fixTrace.mock.calls[0]![2] }
 }
 
 const alternativesChecked = (wrapper: VueWrapper) =>
@@ -844,12 +866,7 @@ describe('FixResultDialog strategy workflow', () => {
     boardApi.cancelFixRequest
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await wrapper.setProps({ visible: false })
     await vi.advanceTimersByTimeAsync(50)
 
@@ -864,13 +881,7 @@ describe('FixResultDialog strategy workflow', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     boardApi.cancelFixRequest.mockRejectedValue(cancellationError)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await wrapper.setProps({ visible: false })
     await vi.advanceTimersByTimeAsync(250)
 
@@ -897,13 +908,7 @@ describe('FixResultDialog strategy workflow', () => {
       stage: 'CANCELLING',
       elapsedMs: 1000
     })
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await wrapper.setProps({ visible: false })
     await vi.advanceTimersByTimeAsync(250)
 
@@ -920,12 +925,7 @@ describe('FixResultDialog strategy workflow', () => {
       stage: 'FINALIZING',
       elapsedMs: 1000
     })
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await vi.advanceTimersByTimeAsync(1000)
     await wrapper.vm.$nextTick()
 
@@ -951,12 +951,7 @@ describe('FixResultDialog strategy workflow', () => {
       stage: 'FINALIZING',
       elapsedMs: 1000
     })
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await vi.advanceTimersByTimeAsync(2000)
     await wrapper.vm.$nextTick()
 
@@ -977,11 +972,7 @@ describe('FixResultDialog strategy workflow', () => {
       stage: 'FINALIZING',
       elapsedMs: 1000
     })
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    const { wrapper } = await startFixSearchWithFakeTimers()
     await vi.advanceTimersByTimeAsync(2000)
     await wrapper.vm.$nextTick()
     await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
@@ -1006,12 +997,7 @@ describe('FixResultDialog strategy workflow', () => {
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     boardApi.cancelFixRequest.mockResolvedValue(false)
     boardApi.getFixRequestStatus.mockRejectedValue(new Error('status unavailable'))
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await wrapper.setProps({ visible: false })
     await vi.advanceTimersByTimeAsync(31_000)
 
@@ -1027,12 +1013,7 @@ describe('FixResultDialog strategy workflow', () => {
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     boardApi.cancelFixRequest.mockResolvedValue(false)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
 
     wrapper.unmount()
     mountedDialogs.splice(mountedDialogs.indexOf(wrapper), 1)
@@ -1072,12 +1053,7 @@ describe('FixResultDialog strategy workflow', () => {
     authStore.login(aliceToken, { userId: 1, phone: '13800138000', username: 'alice' })
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     boardApi.cancelFixRequest.mockResolvedValue(false)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     await wrapper.setProps({ visible: false })
     await vi.advanceTimersByTimeAsync(250)
 
@@ -1119,12 +1095,7 @@ describe('FixResultDialog strategy workflow', () => {
     boardApi.cancelFixRequest
       .mockReturnValueOnce(firstCancellation.promise)
       .mockResolvedValue(false)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const options = boardApi.fixTrace.mock.calls[0]![2]
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
     const logoutPreparation = (wrapper.vm as any).prepareForLogout()
 
     pendingPost.reject(new Error('transport lost during logout'))
@@ -1147,12 +1118,8 @@ describe('FixResultDialog strategy workflow', () => {
     const pendingPost = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pendingPost.promise)
     boardApi.cancelFixRequest.mockResolvedValue(false)
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    const firstRequestId = boardApi.fixTrace.mock.calls[0]![2].requestId
+    const { wrapper, options } = await startFixSearchWithFakeTimers()
+    const firstRequestId = options.requestId
     pendingPost.reject(new Error('transport lost while visible'))
     await Promise.resolve()
     await Promise.resolve()
@@ -1260,11 +1227,7 @@ describe('FixResultDialog strategy workflow', () => {
     const pending = deferred<FixResult>()
     boardApi.fixTrace.mockReturnValueOnce(pending.promise)
     boardApi.getFixRequestStatus.mockResolvedValue({ requestId: 'request', state: 'RUNNING', stage, elapsedMs: 1000 })
-    const wrapper = mountDialog()
-    await flush()
-
-    vi.useFakeTimers()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
+    const { wrapper } = await startFixSearchWithFakeTimers()
     await vi.advanceTimersByTimeAsync(1000)
     await wrapper.vm.$nextTick()
 
@@ -1473,7 +1436,7 @@ describe('FixResultDialog strategy workflow', () => {
     const pending = deferred<ReturnType<typeof parameterApplied>>()
     boardApi.applyFix.mockReturnValueOnce(pending.promise)
     const wrapper = await tryParameter(result)
-    await wrapper.setProps({ applyOnBoard: async (write: () => Promise<FixApplyResult | null>) => {
+    await wrapper.setProps({ applyOnBoard: async (_traceId: number, write: () => Promise<FixApplyResult | null>) => {
       await boardMutationSlot.promise
       return write()
     } })
@@ -1828,27 +1791,17 @@ describe('FixResultDialog strategy workflow', () => {
   })
 
   it('offers model review after all strategies return no option without treating a budget as proof', async () => {
-    boardApi.fixTrace
-      .mockResolvedValueOnce({ ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] })
-      .mockResolvedValueOnce({
+    const wrapper = await tryParameter(
+      { ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] },
+      {
         ...conditionWithoutSuggestionResult(),
         strategyAttempts: [{ strategy: 'condition', status: 'SEARCH_BUDGET_EXHAUSTED', reason: 'Server reason.' }]
-      })
-      .mockResolvedValueOnce({
-        ...removeResult(),
-        suggestions: [],
-        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
-        fixable: false
-      })
-    const wrapper = mountDialog()
-    await flush()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await flush()
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
+      },
+      allRemovalsRejectedResult()
+    )
+    await tryNextFixStrategy(wrapper)
     expect(wrapper.find('[data-testid="fix-no-safe-repair-next-step"]').exists()).toBe(false)
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
+    await tryNextFixStrategy(wrapper)
 
     expect(wrapper.get('[data-testid="fix-no-safe-repair-next-step"]').text()).toBe('fixNoSafeRepairNextStep')
     expect(wrapper.get('[data-testid="fix-result-header"] .iot-dialog__subtitle').text()).toBe('noVerifiedSolutionsYet')
@@ -1860,23 +1813,13 @@ describe('FixResultDialog strategy workflow', () => {
   })
 
   it('offers no primary action once every strategy has settled without a repair', async () => {
-    boardApi.fixTrace
-      .mockResolvedValueOnce(parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'))
-      .mockResolvedValueOnce(conditionWithoutSuggestionResult())
-      .mockResolvedValueOnce({
-        ...removeResult(),
-        suggestions: [],
-        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
-        fixable: false
-      })
-    const wrapper = mountDialog()
-    await flush()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await flush()
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
+    const wrapper = await tryParameter(
+      parameterOutcomeResult('NO_CANDIDATE_AVOIDS_COUNTEREXAMPLE'),
+      conditionWithoutSuggestionResult(),
+      allRemovalsRejectedResult()
+    )
+    await tryNextFixStrategy(wrapper)
+    await tryNextFixStrategy(wrapper)
 
     expect(boardApi.fixTrace.mock.calls.map(call => call[1].strategies))
       .toEqual([['parameter'], ['condition'], ['remove']])
@@ -1891,23 +1834,13 @@ describe('FixResultDialog strategy workflow', () => {
 
   // A strategy that does not apply to this model is as final as one that proved it cannot repair it.
   it('says no option exists when one strategy does not apply and the others proved they cannot repair it', async () => {
-    boardApi.fixTrace
-      .mockResolvedValueOnce({ ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] })
-      .mockResolvedValueOnce(conditionWithoutSuggestionResult())
-      .mockResolvedValueOnce({
-        ...removeResult(),
-        suggestions: [],
-        strategyAttempts: [{ strategy: 'remove', status: 'ALL_CANDIDATES_REJECTED', reason: 'Server reason.' }],
-        fixable: false
-      })
-    const wrapper = mountDialog()
-    await flush()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await flush()
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
-    await wrapper.get('[data-testid="fix-try-next-strategy"]').trigger('click')
-    await flush()
+    const wrapper = await tryParameter(
+      { ...parameterOutcomeResult('SKIPPED_NO_PARAMETERIZABLE_VALUES'), parameterTargets: [] },
+      conditionWithoutSuggestionResult(),
+      allRemovalsRejectedResult()
+    )
+    await tryNextFixStrategy(wrapper)
+    await tryNextFixStrategy(wrapper)
 
     expect(wrapper.find('[data-testid="fix-try-current"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="fix-try-next-strategy"]').exists()).toBe(false)
@@ -2107,7 +2040,6 @@ describe('FixResultDialog strategy workflow', () => {
     else pending.reject(new Error('Connection lost'))
     await flush()
     expect(wrapper.emitted('applied')).toBeUndefined()
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
     expect(elementPlus.success).not.toHaveBeenCalled()
     expect(elementPlus.failure).not.toHaveBeenCalled()
@@ -2172,7 +2104,6 @@ describe('FixResultDialog strategy workflow', () => {
       ])
     }))
     expect(elementPlus.error).not.toHaveBeenCalled()
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
   })
 
@@ -2200,7 +2131,6 @@ describe('FixResultDialog strategy workflow', () => {
       suggestion: 'fixApplyPreflightRetry',
       details: expect.arrayContaining(['reasonCode: FIX_APPLY_PREFLIGHT_UNAVAILABLE'])
     }))
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
   })
 
@@ -2232,7 +2162,6 @@ describe('FixResultDialog strategy workflow', () => {
       expect(wrapper.find('[data-testid="fix-fault-summary"]').exists()).toBe(false)
     }
     expect(wrapper.emitted('model-semantics-changed')).toEqual([[7]])
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     await wrapper.get('[data-testid="fix-reverify-current-board"]').trigger('click')
     expect(wrapper.emitted('reverify')).toHaveLength(1)
   })
@@ -2253,7 +2182,6 @@ describe('FixResultDialog strategy workflow', () => {
       details: expect.arrayContaining(['HTTP 429', 'reasonCode: USER_FORMAL_OPERATION_BUSY'])
     }))
     expect(wrapper.emitted('applied')).toBeUndefined()
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeUndefined()
   })
 
@@ -2300,7 +2228,6 @@ describe('FixResultDialog strategy workflow', () => {
     expect(document.activeElement).toBe(wrapper.get('[data-testid="fix-try-current"]').element)
     expect(elementPlus.failure).not.toHaveBeenCalled()
     expect(wrapper.emitted('applied')).toBeUndefined()
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     expect(wrapper.emitted('update:visible')).toBeUndefined()
 
     await select('condition')
@@ -2347,7 +2274,6 @@ describe('FixResultDialog strategy workflow', () => {
     }))
     expect(apply.attributes('disabled')).toBeUndefined()
     expect(wrapper.emitted('applied')).toBeUndefined()
-    expect(wrapper.emitted('outcome-uncertain')).toBeUndefined()
     await apply.trigger('click')
     translations.global.locale.value = locale === 'zh-CN' ? 'en' : 'zh-CN'
     await flush()
@@ -2362,20 +2288,20 @@ describe('FixResultDialog strategy workflow', () => {
     expect(elementPlus.success).not.toHaveBeenCalled()
   })
 
-  it('treats an unclassified 503 as an uncertain mutation outcome', async () => {
-    boardApi.fixTrace.mockResolvedValueOnce(parameterResult())
-    boardApi.applyFix.mockRejectedValueOnce({
-      response: { status: 503, data: { message: 'Upstream unavailable.' } }
-    })
-    const wrapper = mountDialog()
-    await flush()
-    await wrapper.get('[data-testid="fix-try-current"]').trigger('click')
-    await flush()
+  it('locks apply during Board recovery and closes without emitting an applied receipt', async () => {
+    const recovery = deferred<'unconfirmed'>()
+    const wrapper = await tryParameter(parameterResult())
+    const applyOnBoard = vi.fn(() => recovery.promise)
+    await wrapper.setProps({ applyOnBoard })
 
     await wrapper.get('[data-testid="fix-apply-current"]').trigger('click')
+    expect(applyOnBoard).toHaveBeenCalledExactlyOnceWith(7, expect.any(Function))
+    expect(wrapper.get('[data-testid="fix-apply-current"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.emitted('update:visible')).toBeUndefined()
+    recovery.resolve('unconfirmed')
     await flush()
 
-    expect(wrapper.emitted('outcome-uncertain')).toHaveLength(1)
+    expect(wrapper.emitted('applied')).toBeUndefined()
     expect(wrapper.emitted('update:visible')?.at(-1)).toEqual([false])
     expect(elementPlus.error).not.toHaveBeenCalled()
     expect(elementPlus.failure).not.toHaveBeenCalled()

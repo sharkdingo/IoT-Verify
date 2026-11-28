@@ -191,7 +191,7 @@ class ListTracesToolTest {
                 VerificationRunSummaryDto.builder().id(8L).dataAvailable(true)
                         .generationIssues(List.of(ModelGenerationIssueDto.builder()
                                 .issueType("rule").itemLabel("long issue")
-                                .reason("cause ".repeat(90)).build()))
+                                .reason("原因".repeat(100)).build()))
                         .counterexamples(traces).build()));
 
         AiToolManager manager = new AiToolManager(List.of(tool), objectMapper, config,

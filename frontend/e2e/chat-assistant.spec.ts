@@ -1,7 +1,9 @@
-import { type APIRequestContext, type Page } from '@playwright/test'
+import { type Page } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import {
   apiBaseURL,
   createAuthenticatedUser,
+  seedBrowserSession,
   expect,
   test,
   type AuthUser
@@ -9,28 +11,8 @@ import {
 import type { PersistedChatMessage, StreamCommand, StreamProgress } from '../src/types/chat'
 import { collapseChatSidebar } from './support/chatSidebar'
 
-const unwrap = async <T>(response: Awaited<ReturnType<APIRequestContext['get']>>): Promise<T> => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code, JSON.stringify(body)).toBe(200)
-  return body.data as T
-}
-
 const openWorkspace = async (page: Page, auth: AuthUser, theme: 'light' | 'dark' = 'light') => {
-  await page.addInitScript(({ token, user, themeMode }) => {
-    window.localStorage.setItem('iot_verify_token', token)
-    window.localStorage.setItem('iot_verify_user', JSON.stringify(user))
-    window.localStorage.setItem('iot_verify_theme', themeMode)
-    window.localStorage.setItem('locale', 'zh-CN')
-  }, {
-    token: auth.token,
-    themeMode: theme,
-    user: {
-      userId: auth.userId,
-      phone: auth.phone,
-      username: auth.username
-    }
-  })
+  await seedBrowserSession(page, auth, { locale: 'zh-CN', theme })
 
   await page.goto('/#/board')
   await expect(page.getByTestId('board-root')).toBeVisible({ timeout: 30_000 })
@@ -74,14 +56,18 @@ for (const { name, theme, viewport } of [
   })
 }
 
-const installPersistedPartialChatMock = async (
+const installPersistedChatMock = async (
   page: Page,
   sessionId: string,
   assistantContent: string,
-  beforeResponse?: () => Promise<void>,
-  errorMessage?: string,
-  command?: StreamCommand
+  { beforeResponse, errorMessage, commands = [], completedTool }: {
+    beforeResponse?: () => Promise<void>
+    errorMessage?: string
+    commands?: StreamCommand[]
+    completedTool?: string
+  } = {}
 ) => {
+  const executionStatus = completedTool ? 'COMPLETED' : 'PARTIAL'
   let messages: PersistedChatMessage[] = []
 
   await page.route(`**/api/chat/sessions/${sessionId}/messages**`, async route => {
@@ -105,9 +91,15 @@ const installPersistedPartialChatMock = async (
     expect(request.turnId.trim()).not.toBe('')
     const executionTrace: StreamProgress[] = [
       { stage: 'CONTEXT_READY' },
-      { stage: 'PLANNING', round: 1 },
-      { stage: 'WRITING_RESPONSE', round: 1 }
+      { stage: 'PLANNING', round: 1 }
     ]
+    if (completedTool) {
+      executionTrace.push(
+        { stage: 'TOOL_EXECUTION', round: 1, toolName: completedTool },
+        { stage: 'TOOL_RESULT', round: 1, toolName: completedTool, outcome: 'USABLE' }
+      )
+    }
+    executionTrace.push({ stage: 'WRITING_RESPONSE', round: 1 })
     const createdAt = new Date().toISOString()
     messages = [
       {
@@ -125,15 +117,15 @@ const installPersistedPartialChatMock = async (
         content: assistantContent,
         turnId: request.turnId,
         createdAt,
-        executionStatus: 'PARTIAL',
+        executionStatus,
         executionTrace
       }
     ]
     const frames = [
       ...executionTrace.map(progress => ({ progress })),
-      ...(command ? [{ command }] : []),
+      ...commands.map(command => ({ command })),
       errorMessage ? { error: errorMessage } : { content: assistantContent },
-      { terminal: { turnId: request.turnId, executionStatus: 'PARTIAL' } }
+      { terminal: { turnId: request.turnId, executionStatus } }
     ]
     await route.fulfill({
       status: 200,
@@ -142,6 +134,51 @@ const installPersistedPartialChatMock = async (
     })
   })
 }
+
+test('adopts an assistant device edit and its undo state from one Board snapshot', async ({ page, request }) => {
+  const auth = await createAuthenticatedUser(request)
+  const headers = { Authorization: `Bearer ${auth.token}` }
+  const session = await unwrap<{ id: string }>(await request.post(`${apiBaseURL}/api/chat/sessions`, { headers }))
+  const reply = '已添加客厅灯。'
+  const receipt = '客厅灯已添加到画布。'
+  await installPersistedChatMock(page, session.id, reply, {
+    completedTool: 'add_device',
+    commands: [
+      { type: 'REFRESH_DATA', payload: { target: 'environment_list' } },
+      { type: 'REFRESH_DATA', payload: { target: 'device_list', assistantAction: 'DEVICE_ADDED', assistantSummary: receipt } }
+    ],
+    beforeResponse: async () => {
+      await unwrap(await request.post(`${apiBaseURL}/api/board/nodes`, {
+        headers,
+        data: { devices: [{ id: 'assistant_light', templateName: 'Light', label: '客厅灯',
+          position: { x: 160, y: 120 }, width: 176, height: 128, state: 'off',
+          currentStateTrust: 'trusted', currentStatePrivacy: 'public', variables: [], privacies: [] }],
+          environmentVariablePatches: [] }
+      }))
+    }
+  })
+  await openWorkspace(page, auth)
+  await expect(page.getByTestId('scene-import')).toBeEnabled()
+  await page.getByTestId('open-ai-assistant').click()
+  await page.getByTestId('chat-sidebar-toggle').click()
+  await page.getByTestId(`chat-session-${session.id}`).click()
+  await expect(page.getByTestId('board-undo')).toBeDisabled()
+  const boardReads = new Set(['/api/board/snapshot', '/api/board/nodes', '/api/board/edits/availability'])
+  const reads: string[] = []
+  page.on('request', networkRequest => {
+    const path = new URL(networkRequest.url()).pathname
+    if (boardReads.has(path) && networkRequest.method() === 'GET') reads.push(path)
+  })
+  await page.getByTestId('chat-input').fill('添加一台客厅灯')
+  await page.getByTestId('chat-send').click()
+  await expect(page.getByTestId('chat-panel').getByText(reply, { exact: true })).toBeVisible()
+  await expect(page.getByText(receipt, { exact: true })).toBeVisible()
+  await expect(page.getByTestId('chat-input')).toBeEnabled()
+  await page.getByTestId('chat-close').click()
+  await expect(page.locator('[data-node-id="assistant_light"]')).toContainText('客厅灯')
+  await expect(page.getByTestId('board-undo')).toBeEnabled()
+  expect(reads).toEqual(['/api/board/snapshot'])
+})
 
 test('reopens the assistant after a provider error and failed Board synchronization', async ({ page, request }) => {
   const auth = await createAuthenticatedUser(request)
@@ -156,8 +193,9 @@ test('reopens the assistant after a provider error and failed Board synchronizat
     }) })
   })
   const failure = 'AI 服务暂时不可用，请稍后重试。'
-  await installPersistedPartialChatMock(page, session.id, failure,
-    async () => { snapshotUnavailable = true }, failure)
+  await installPersistedChatMock(page, session.id, failure, {
+    beforeResponse: async () => { snapshotUnavailable = true }, errorMessage: failure
+  })
   await openWorkspace(page, auth)
   await page.getByTestId('open-ai-assistant').click()
   await page.getByTestId('chat-sidebar-toggle').click()
@@ -187,7 +225,7 @@ for (const { width, theme } of [{ width: 320, theme: 'dark' }] as const) {
     }))
     let releaseReply!: () => void
     const replyPending = new Promise<void>(resolve => { releaseReply = resolve })
-    await installPersistedPartialChatMock(page, session.id, 'Reply received.', () => replyPending)
+    await installPersistedChatMock(page, session.id, 'Reply received.', { beforeResponse: () => replyPending })
     await openWorkspace(page, auth, theme)
     await page.getByTestId('open-ai-assistant').click()
     const panel = page.getByTestId('chat-panel')
@@ -291,7 +329,7 @@ test('protected confirm submits the displayed action identity', async ({ page, r
   }))
   const confirmationId = `pending-CONFIRM-${auth.userId}`
   let settled = false
-  await installPersistedPartialChatMock(page, session.id, 'Decision recorded.', async () => { settled = true })
+  await installPersistedChatMock(page, session.id, 'Decision recorded.', { beforeResponse: async () => { settled = true } })
   await page.route(`**/api/chat/sessions/${session.id}/confirmation`, route => route.fulfill({
     status: 200,
     contentType: 'application/json',

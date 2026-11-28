@@ -1,16 +1,11 @@
-import type { APIRequestContext, APIResponse } from '@playwright/test'
+import type { APIRequestContext } from '@playwright/test'
+import { unwrap } from './support/apiResponse'
 import {
   apiBaseURL, createAuthenticatedUser,
   expect, test, type AuthUser
 } from './support/auth'
 
 const PASSWORD = 'Pass1234!!'
-const unwrap = async (response: APIResponse) => {
-  expect(response.ok(), await response.text()).toBeTruthy()
-  const body = await response.json()
-  expect(body.code).toBe(200)
-  return body.data
-}
 const persistedState = async (request: APIRequestContext, auth: AuthUser) => {
   const headers = { Authorization: `Bearer ${auth.token}` }
   const [snapshot, history, runs] = await Promise.all([

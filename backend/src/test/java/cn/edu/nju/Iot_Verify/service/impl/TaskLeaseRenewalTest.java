@@ -30,7 +30,7 @@ class TaskLeaseRenewalTest {
         AtomicReference<LocalDateTime> databaseTime = new AtomicReference<>(beforeLock);
         AtomicBoolean flushed = new AtomicBoolean();
 
-        boolean renewed = TaskLeaseRenewal.renew(
+        boolean renewed = TaskLeaseRenewal.renewWithConfirmation(
                 transactionTemplate(),
                 () -> {
                     databaseTime.set(afterLock);
@@ -39,7 +39,7 @@ class TaskLeaseRenewalTest {
                 databaseTime::get,
                 ignored -> flushed.set(true),
                 "worker-a",
-                Duration.ofMinutes(2));
+                Duration.ofMinutes(2)).renewed();
 
         assertFalse(renewed);
         assertFalse(flushed.get());
@@ -53,7 +53,7 @@ class TaskLeaseRenewalTest {
         AtomicBoolean lockAcquired = new AtomicBoolean();
         AtomicBoolean flushed = new AtomicBoolean();
 
-        boolean renewed = TaskLeaseRenewal.renew(
+        boolean renewed = TaskLeaseRenewal.renewWithConfirmation(
                 transactionTemplate(),
                 () -> {
                     lockAcquired.set(true);
@@ -65,7 +65,7 @@ class TaskLeaseRenewalTest {
                 },
                 ignored -> flushed.set(true),
                 "worker-a",
-                Duration.ofMinutes(2));
+                Duration.ofMinutes(2)).renewed();
 
         assertTrue(renewed);
         assertTrue(flushed.get());
@@ -223,11 +223,8 @@ class TaskLeaseRenewalTest {
 
         @Override public Long getId() { return 1L; }
         @Override public Integer getProgress() { return 0; }
-        @Override public boolean isTerminalStatus() { return false; }
-        @Override public boolean isCancelledStatus() { return false; }
         @Override public String getTaskStatusName() { return status; }
         @Override public String getCheckLogsJson() { return "[]"; }
-        @Override public void setCheckLogsJson(String json) { }
         @Override public String getWorkerId() { return workerId; }
         @Override public LocalDateTime getLeaseExpiresAt() { return leaseExpiresAt; }
         @Override public void setLeaseExpiresAt(LocalDateTime value) { leaseExpiresAt = value; }

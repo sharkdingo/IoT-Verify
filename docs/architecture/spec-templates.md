@@ -52,8 +52,8 @@ negation only when a `ParameterizationConfig` is supplied, which is the automati
 (ActFeedback §5) asking whether a candidate repair still admits `¬ρ`; an ordinary run takes the
 `else` branch and NuSMV reports its own counterexample for the positive form. This matters when
 reasoning about where a violation sits in a trace: the shape you get is NuSMV's counterexample to
-`AG …`/`AF …`, not a witness path for the negation. For reference, the negated forms in
-`generateNegatedCtlSpec` / `generateNegatedLtlSpec`:
+`AG …`/`AF …`, not a witness path for the negation. The following table lists the negated forms produced by
+`generateNegatedSpec`.
 
 | id | Negated formula |
 | :--- | :--- |
@@ -79,7 +79,7 @@ satisfied. See [fuzzing-flow.md](fuzzing-flow.md).
 
 ## Safety template (id 7) detail
 
-`buildSafetySpec()` injects the matching untrusted control-source term for each
+`buildSafetyBody()` includes the matching untrusted control-source term for each
 A-condition. Attack selection is not used to exclude a condition from the property:
 
 ```smv

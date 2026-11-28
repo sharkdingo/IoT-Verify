@@ -108,8 +108,8 @@ class TaskCancellationMySqlIntegrationTest {
             assertEquals(TaskCancellationOutcome.ALREADY_CANCELLED, result.getCancellationOutcome());
             assertEquals("CANCELLED", result.getTaskStatus());
             assertFalse(result.isExecutionMayStillBeStopping());
-            transactions.executeWithoutResult(status -> assertTrue(operation.lock().get()
-                    .orElseThrow().isCancelledStatus()));
+            transactions.executeWithoutResult(status -> assertEquals("CANCELLED",
+                    operation.lock().get().orElseThrow().getTaskStatusName()));
         } finally {
             transactions.executeWithoutResult(status -> operation.delete().run());
         }
@@ -393,11 +393,6 @@ class TaskCancellationMySqlIntegrationTest {
         @Override
         protected boolean isLocalStopRequested(Long taskId) {
             return operation.id().equals(taskId) && execution.isCancelled();
-        }
-
-        @Override
-        protected Optional<TaskView> findTaskByIdAndUserId(Long id, Long userId) {
-            return operation.read().get();
         }
 
         @Override

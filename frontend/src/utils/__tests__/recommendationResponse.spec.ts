@@ -282,12 +282,14 @@ describe('recommendation candidate accounting', () => {
     }))
   })
 
-  it('rejects a filtered candidate without an itemized reason code', () => {
+  it.each([
+    ['rejects a filtered candidate without an itemized reason code',
+      { type: 'rule', index: 2, reason: 'Unknown action' }, 'reasonCode must be non-blank text'],
+    ['requires an index on a filtered candidate',
+      { type: 'rule', reasonCode: 'unknownAction', reason: 'Unknown action' }, 'index must be a positive integer']
+  ])('%s', (_name, row, message) => {
     expect(() => validateStandaloneRecommendationResponse({
-      ...validStandalone(),
-      filteredItems: [{ type: 'rule', index: 2, reason: 'Unknown action' }]
-    }, 'Rules')).toThrow(expect.objectContaining({
-      code: RECOMMENDATION_RESPONSE_INCOMPLETE_CODE
-    }))
+      ...validStandalone(), filteredItems: [row]
+    }, 'Rules')).toThrow(`filteredItems[0].${message}`)
   })
 })

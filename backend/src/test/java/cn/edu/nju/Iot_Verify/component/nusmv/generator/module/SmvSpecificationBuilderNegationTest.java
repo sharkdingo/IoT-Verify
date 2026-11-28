@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.component.nusmv.generator.module;
 
+import cn.edu.nju.Iot_Verify.component.nusmv.generator.SmvGenerationContext;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvData;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
@@ -25,7 +26,7 @@ class SmvSpecificationBuilderNegationTest {
             SpecificationDto spec = buildSpec(template, null,
                     List.of(buildCondition("sensor_1", "state", null, "=", "active")),
                     List.of(buildCondition("sensor_1", "state", null, "=", "idle")));
-            String generated = builder.build(List.of(spec), buildDeviceMap(), false);
+            String generated = builder.build(List.of(spec), buildDeviceMap(), false, SmvGenerationContext.noop());
             assertTrue(generated.contains("CTLSPEC !EF(sensor_1.SensorState=active)"), generated);
             assertEquals(2, generated.lines().filter(line -> line.contains("SPEC ")).count());
             assertFalse(builder.generateNegatedSpec(spec, buildDeviceMap()).contains("\n"));
@@ -340,7 +341,7 @@ class SmvSpecificationBuilderNegationTest {
         SpecificationDto spec2 = buildSpec("3", List.of(cond), null, null);
 
         String result = builder.buildNegated(List.of(spec1, spec2), 0,
-                buildDeviceMap(), false);
+                buildDeviceMap(), false, SmvGenerationContext.noop());
 
         assertTrue(result.contains("Negated specification (index 0)"));
         assertTrue(result.contains("CTLSPEC EF(!("));
@@ -351,8 +352,8 @@ class SmvSpecificationBuilderNegationTest {
     @Test
     void buildNegated_invalidIndex_failsClosed() {
         assertThrows(SmvGenerationException.class,
-                () -> builder.buildNegated(List.of(), 0, Map.of(), false));
+                () -> builder.buildNegated(List.of(), 0, Map.of(), false, SmvGenerationContext.noop()));
         assertThrows(SmvGenerationException.class,
-                () -> builder.buildNegated(null, 0, Map.of(), false));
+                () -> builder.buildNegated(null, 0, Map.of(), false, SmvGenerationContext.noop()));
     }
 }

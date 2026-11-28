@@ -36,8 +36,8 @@ const router = useRouter()
 const auth = useAuth()
 const profile = ref<AccountProfile | null>(null)
 const loading = ref(false)
-const pending = ref<'username' | 'password' | 'logout' | 'delete' | null>(null)
-const pendingToken = ref<string | null>(null)
+const pendingRequest = shallowRef<{ action: 'username' | 'password' | 'logout' | 'delete'; token: string } | null>(null)
+const pending = computed(() => pendingRequest.value?.action ?? null)
 const showLogoutDialog = ref(false)
 const showDeleteAccountDialog = ref(false)
 const sessionError = ref('')
@@ -281,8 +281,7 @@ const saveUsername = async () => {
   if (usernameConfirmationBlockedReason.value || !confirmation) return
   const request = confirmation.request
   if (!request.token || !request.current()) return
-  pending.value = 'username'
-  pendingToken.value = request.token
+  pendingRequest.value = { action: 'username', token: request.token }
   usernameError.value = null
   usernameErrorField.value = null
   try {
@@ -327,11 +326,11 @@ const saveUsername = async () => {
     }
     await focusError('account-username-error')
   } finally {
-    if (request.current()) { pending.value = null; pendingToken.value = null }
+    if (request.current()) pendingRequest.value = null
   }
 }
 
-const finishPasswordChange = async (token: string, reason: LoginRedirectReason) => {
+const signOutToLogin = async (token: string, reason?: LoginRedirectReason) => {
   const target = loginRedirectTarget({ path: '/board', fullPath: returnTo.value }, reason)
   clearSecrets()
   if (auth.logoutIfTokenMatches(token) && target) await router.replace(target)
@@ -340,8 +339,7 @@ const savePassword = async () => {
   if (passwordBlockedReason.value) return
   const request = owner()
   if (!request.token || !request.current()) return
-  pending.value = 'password'
-  pendingToken.value = request.token
+  pendingRequest.value = { action: 'password', token: request.token }
   passwordError.value = null
   passwordErrorField.value = null
   let submitted = false
@@ -363,11 +361,11 @@ const savePassword = async () => {
     }, request.token)
     if (!request.current()) return
     if (response.code !== 200) throw new Error('Password change response is incomplete')
-    await finishPasswordChange(request.token, 'password-changed')
+    await signOutToLogin(request.token, 'password-changed')
   } catch (error) {
     if (!request.current()) return
     if (submitted && outcomeUnknown(error)) {
-      await finishPasswordChange(request.token, 'password-change-unknown')
+      await signOutToLogin(request.token, 'password-change-unknown')
     } else {
       passwordError.value = { key: 'account.passwordSaveFailed', error }
       const data = (error as any)?.response?.data?.data
@@ -379,7 +377,7 @@ const savePassword = async () => {
     }
   } finally {
     if (submitted) auth.endPasswordChange(request.token)
-    if (request.current()) { pending.value = null; pendingToken.value = null }
+    if (request.current()) pendingRequest.value = null
   }
 }
 
@@ -408,13 +406,13 @@ const handleLogoutConfirm = async () => {
   if (pending.value) return
   const request = owner()
   if (!request.token || !request.current()) return
-  pending.value = 'logout'
-  pendingToken.value = request.token
+  pendingRequest.value = { action: 'logout', token: request.token }
   sessionError.value = ''
   try {
     const prepared = await prepareSessionEnd(request.current, 'logout')
+    if (!request.current()) return
     if (prepared !== 'ready') {
-      if (request.current() && prepared === 'reconciliation-failed') {
+      if (prepared === 'reconciliation-failed') {
         showLogoutDialog.value = false
         sessionError.value = 'account.sessionPreparationBlocked'
       }
@@ -425,11 +423,9 @@ const handleLogoutConfirm = async () => {
       await authApi.logout(request.token)
     } catch { /* Local sign-out does not depend on Redis or the logout response. */ }
     if (!request.current()) return
-    const target = loginRedirectTarget({ path: '/board', fullPath: returnTo.value })
-    clearSecrets()
-    if (auth.logoutIfTokenMatches(request.token) && target) await router.replace(target)
+    await signOutToLogin(request.token)
   } finally {
-    if (request.current()) { pending.value = null; pendingToken.value = null }
+    if (request.current()) pendingRequest.value = null
   }
 }
 
@@ -438,15 +434,15 @@ const handleDeleteAccountConfirm = async (payload: { password: string; confirmat
   const request = owner()
   if (!request.token || !request.current()) return
   const notificationKey = fuzzNotificationStorageKeyForUser(request.userId)
-  pending.value = 'delete'
-  pendingToken.value = request.token
+  pendingRequest.value = { action: 'delete', token: request.token }
   deleteError.value = ''
   deleteFailure.value = null
   let submitted = false
   try {
     const prepared = await prepareSessionEnd(request.current, 'delete')
+    if (!request.current()) return
     if (prepared !== 'ready') {
-      if (request.current() && prepared === 'reconciliation-failed') {
+      if (prepared === 'reconciliation-failed') {
         showDeleteAccountDialog.value = false
         deleteError.value = 'account.deletePreparationBlocked'
       }
@@ -467,16 +463,12 @@ const handleDeleteAccountConfirm = async (payload: { password: string; confirmat
     if (!request.current()) return
     if (submitted && isAccountDeletionOutcomeUncertain(error)) {
       clearStoredFuzzNotifications(notificationKey)
-      clearSecrets()
-      const target = loginRedirectTarget({ path: '/board', fullPath: returnTo.value }, 'account-deletion-unknown')
-      if (auth.logoutIfTokenMatches(request.token) && target) {
-        await router.replace(target)
-      }
+      await signOutToLogin(request.token, 'account-deletion-unknown')
     } else {
       deleteFailure.value = errorDetails(error)
     }
   } finally {
-    if (request.current()) { pending.value = null; pendingToken.value = null }
+    if (request.current()) pendingRequest.value = null
   }
 }
 
@@ -498,8 +490,7 @@ watch(() => auth.state.token, () => {
   deleteError.value = ''
   deleteFailure.value = null
   loading.value = false
-  pending.value = null
-  pendingToken.value = null
+  pendingRequest.value = null
   showLogoutDialog.value = false
   showDeleteAccountDialog.value = false
   if (auth.state.isLoggedIn) void loadProfile()
@@ -507,8 +498,8 @@ watch(() => auth.state.token, () => {
 
 onBeforeRouteLeave(() => {
   // Authentication loss must be able to leave even while its rejected write is settling.
-  if (pending.value && pendingToken.value && auth.isCurrentSessionToken(pendingToken.value)) return false
-  return true
+  const request = pendingRequest.value
+  return !request || !auth.isCurrentSessionToken(request.token)
 })
 onBeforeUnmount(() => {
   disposed = true

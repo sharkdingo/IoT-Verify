@@ -40,7 +40,6 @@ import cn.edu.nju.Iot_Verify.dto.device.DeviceDeletionResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceJournalSnapshot;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceMutationResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
-import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDeletionBlockerDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDeletionResultDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
@@ -108,12 +107,25 @@ import java.time.LocalDateTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findApi;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findConditionVariable;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.findDeclaredVariable;
+import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasContent;
 import static cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics.hasSignalApi;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.isEnvironmentVariable;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateEnumRelation;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateRuntimePrivacies;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateRuntimeVariables;
+import static cn.edu.nju.Iot_Verify.service.impl.ManifestConditionValidation.validateVariableValues;
+import static cn.edu.nju.Iot_Verify.service.impl.BoardTemplateImpact.firstText;
 
 @Slf4j
 @Service
@@ -185,7 +197,18 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return userWriteLocks[stripe];
     }
 
-    private cn.edu.nju.Iot_Verify.po.UserPo requireActiveUserForWrite(Long userId) {
+    private <T> T withBoardWriteTransaction(Long userId, Supplier<T> work) {
+        return withBoardWriteTransaction(userId, owner -> work.get());
+    }
+
+    /** Keep the stripe held through transaction completion for standalone writes. */
+    private <T> T withBoardWriteTransaction(Long userId, Function<UserPo, T> work) {
+        synchronized (getUserWriteLock(userId)) {
+            return transactionTemplate.execute(status -> work.apply(requireActiveUserForWrite(userId)));
+        }
+    }
+
+    private UserPo requireActiveUserForWrite(Long userId) {
         if (userId == null) throw UnauthorizedException.invalidToken();
         var owner = userRepository.findByIdForUpdate(userId).orElseThrow(UnauthorizedException::invalidToken);
         if (chatExecutionLeaseGuard != null) {
@@ -242,86 +265,49 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return transactionTemplate.execute(capture);
     }
 
-    /** Package-private full replacement used by semantic precheck tests; not an external service contract. */
-    List<DeviceNodeDto> saveNodes(Long userId, List<DeviceNodeDto> nodes) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                requireTotalCapacity("devices", safeList(nodes).size(), RequestLimits.MAX_DEVICES);
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, nodes);
-                validateBoardReferences(userId, canonicalNodes, getRulesInternal(userId), getSpecsInternal(userId));
-                return saveNodesInternal(userId, canonicalNodes);
-            });
-        }
-    }
-
     @Override
     public DeviceMutationResultDto addNodes(Long userId,
                                             List<DeviceNodeDto> nodes,
                                             List<BoardEnvironmentVariableDto> environmentVariablePatches) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (nodes == null || nodes.isEmpty()) {
-                    throw new BadRequestException("At least one device is required");
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            if (nodes == null || nodes.isEmpty()) {
+                throw new BadRequestException("At least one device is required");
+            }
 
-                List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
-                requireAdditionalCapacity(
-                        "devices", current.size(), nodes.size(), RequestLimits.MAX_DEVICES);
-                List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
-                List<DeviceNodeDto> next = new ArrayList<>(current);
-                next.addAll(nodes);
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, next);
-                List<RuleDto> currentRules = getRulesInternal(userId);
-                List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
-                validateBoardReferences(userId, canonicalNodes, currentRules, currentSpecs);
+            List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
+            requireAdditionalCapacity(
+                    "devices", current.size(), nodes.size(), RequestLimits.MAX_DEVICES);
+            List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
+            List<DeviceNodeDto> next = new ArrayList<>(current);
+            next.addAll(nodes);
+            List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, next);
+            List<RuleDto> currentRules = getRulesInternal(userId);
+            List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
+            validateBoardReferences(userId, canonicalNodes, currentRules, currentSpecs);
 
-                List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
-                List<BoardEnvironmentVariableDto> savedEnvironment = environmentVariablePatches != null
-                        && !environmentVariablePatches.isEmpty()
-                        ? patchEnvironmentVariablesInternal(userId, savedNodes, environmentVariablePatches)
-                        : getEnvironmentVariablesInternal(userId);
-                requireTotalCapacity("environment variables", savedEnvironment.size(),
-                        RequestLimits.MAX_ENVIRONMENT_VARIABLES);
-                List<String> createdIds = nodes.stream()
-                        .map(DeviceNodeDto::getId)
-                        .filter(Objects::nonNull)
-                        .distinct()
-                        .toList();
-                List<DeviceNodeDto> created = savedNodes.stream()
-                        .filter(node -> createdIds.contains(node.getId()))
-                        .toList();
-                if (created.size() != createdIds.size()) {
-                    throw new InternalServerException(
-                            "Device creation did not return every persisted device in the batch");
-                }
+            List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
+            List<BoardEnvironmentVariableDto> savedEnvironment = environmentVariablePatches != null
+                    && !environmentVariablePatches.isEmpty()
+                    ? patchEnvironmentVariablesInternal(userId, savedNodes, environmentVariablePatches)
+                    : getEnvironmentVariablesInternal(userId);
+            requireTotalCapacity("environment variables", savedEnvironment.size(),
+                    RequestLimits.MAX_ENVIRONMENT_VARIABLES);
+            List<String> createdIds = nodes.stream()
+                    .map(DeviceNodeDto::getId)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
+            List<DeviceNodeDto> created = savedNodes.stream()
+                    .filter(node -> createdIds.contains(node.getId()))
+                    .toList();
+            if (created.size() != createdIds.size()) {
+                throw new InternalServerException(
+                        "Device creation did not return every persisted device in the batch");
+            }
 
-                DeviceJournalSnapshot before = deviceJournalSnapshot(
-                        createdIds, List.of(), List.of(), List.of(), previousEnvironment);
-                DeviceJournalSnapshot after = deviceJournalSnapshot(
-                        createdIds,
-                        positionedDevices(savedNodes, new LinkedHashSet<>(createdIds)),
-                        List.of(), List.of(), savedEnvironment);
-                // One request is one user action, including its Environment Pool patches.
-                editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.CREATE,
-                        createdIds.get(0), before, after);
-
-                BoardUndoAvailability availability = editJournal.availability(userId);
-                return DeviceMutationResultDto.builder()
-                        .operation("created")
-                        .affectedDevices(created)
-                        .currentNodes(savedNodes)
-                        .environmentVariables(savedEnvironment)
-                        .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
-                        .currentSpecifications(currentSpecs)
-                        .currentCount(savedNodes.size())
-                        .canUndo(availability.canUndo())
-                        .canRedo(availability.canRedo())
-                        .editHistoryRevision(availability.editHistoryRevision())
-                        .build();
-            });
-        }
+            return recordDeviceCreation(
+                    userId, createdIds, created, savedNodes, previousEnvironment, savedEnvironment, currentSpecs);
+        });
     }
 
     @Override
@@ -340,326 +326,315 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     private DeviceUpdateResultDto updateNodeLayout(
             Long userId, String nodeId, DeviceLayoutDto expected, DeviceLayoutDto desired) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                String targetId = nodeIdForLookup(nodeId);
-                if (targetId == null || desired == null) {
-                    throw new BadRequestException("Device id and layout are required");
-                }
-                if (expected != null) {
-                    validateDeviceLayout(expected);
-                }
-                validateDeviceLayout(desired);
-                List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
-                int index = indexOfNode(current, targetId);
-                if (index < 0) {
-                    throw new ResourceNotFoundException("Device", targetId);
-                }
-                DeviceNodeDto previous = copyDeviceNode(current.get(index));
-                if (expected != null && !sameLayout(previous, expected)) {
-                    throw new DeviceLayoutConflictException(previous);
-                }
-                DeviceNodeDto next = copyDeviceNode(previous);
-                next.setPosition(copyPosition(desired.getPosition()));
-                next.setWidth(desired.getWidth());
-                next.setHeight(desired.getHeight());
-                return persistTargetedNodeUpdate(userId, current, index, previous, next, "layout");
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            String targetId = nodeIdForLookup(nodeId);
+            if (targetId == null || desired == null) {
+                throw new BadRequestException("Device id and layout are required");
+            }
+            if (expected != null) {
+                validateDeviceLayout(expected);
+            }
+            validateDeviceLayout(desired);
+            List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
+            int index = indexOfNode(current, targetId);
+            if (index < 0) {
+                throw new ResourceNotFoundException("Device", targetId);
+            }
+            DeviceNodeDto previous = copyDeviceNode(current.get(index));
+            if (expected != null && !sameLayout(previous, expected)) {
+                throw new DeviceLayoutConflictException(previous);
+            }
+            DeviceNodeDto next = copyDeviceNode(previous);
+            next.setPosition(copyPosition(desired.getPosition()));
+            next.setWidth(desired.getWidth());
+            next.setHeight(desired.getHeight());
+            return persistTargetedNodeUpdate(userId, current, index, previous, next, "layout");
+        });
     }
 
     @Override
     public DeviceUpdateResultDto updateNodeRuntime(
             Long userId, String nodeId, DeviceRuntimeUpdateDto runtime) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                String targetId = nodeIdForLookup(nodeId);
-                if (targetId == null || runtime == null
-                        || runtime.getExpected() == null || runtime.getDesired() == null) {
-                    throw new BadRequestException(
-                            "Device id, expected runtime, and desired runtime are required");
-                }
-                List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
-                int index = indexOfNode(current, targetId);
-                if (index < 0) {
-                    throw new ResourceNotFoundException("Device", targetId);
-                }
-                DeviceNodeDto persistedPrevious = copyDeviceNode(current.get(index));
-                DeviceNodeDto previous = copyDeviceNode(persistedPrevious);
-                Map<String, DeviceManifest> templates = loadTemplateManifestMap(userId);
-                DeviceManifest manifest = manifestForTemplateName(
-                        previous.getTemplateName(), templates);
-                canonicalizeRuntime(previous, manifest);
+        return withBoardWriteTransaction(userId, () -> {
+            String targetId = nodeIdForLookup(nodeId);
+            if (targetId == null || runtime == null
+                    || runtime.getExpected() == null || runtime.getDesired() == null) {
+                throw new BadRequestException(
+                        "Device id, expected runtime, and desired runtime are required");
+            }
+            List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
+            int index = indexOfNode(current, targetId);
+            if (index < 0) {
+                throw new ResourceNotFoundException("Device", targetId);
+            }
+            DeviceNodeDto persistedPrevious = copyDeviceNode(current.get(index));
+            DeviceNodeDto previous = copyDeviceNode(persistedPrevious);
+            Map<String, DeviceManifest> templates = loadTemplateManifestMap(userId);
+            DeviceManifest manifest = manifestForTemplateName(
+                    previous.getTemplateName(), templates);
+            canonicalizeRuntime(previous, manifest);
 
-                DeviceNodeDto expected = copyDeviceNode(previous);
-                applyRuntime(expected, runtime.getExpected(), manifest);
-                if (!sameRuntime(previous, expected)) {
-                    throw new DeviceRuntimeConflictException(previous);
-                }
+            DeviceNodeDto expected = copyDeviceNode(previous);
+            applyRuntime(expected, runtime.getExpected(), manifest);
+            if (!sameRuntime(previous, expected)) {
+                throw new DeviceRuntimeConflictException(previous);
+            }
 
-                DeviceNodeDto next = copyDeviceNode(previous);
-                applyRuntime(next, runtime.getDesired(), manifest);
-                List<DeviceNodeDto> validationNodes = current.stream()
-                        .map(this::copyDeviceNode)
-                        .collect(Collectors.toCollection(ArrayList::new));
-                validationNodes.set(index, next);
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(validationNodes, templates);
-                // Starting states are corrected one device at a time. Validate the state this write owns.
-                validateBoardReferences(
-                        userId, canonicalNodes, getRulesInternal(userId), getSpecsInternal(userId), templates, targetId);
-                DeviceNodeDto canonicalNext = requireNode(canonicalNodes, targetId);
-                return persistTargetedNodeUpdate(
-                        userId, current, index, persistedPrevious, canonicalNext, "runtime");
-            });
-        }
+            DeviceNodeDto next = copyDeviceNode(previous);
+            applyRuntime(next, runtime.getDesired(), manifest);
+            List<DeviceNodeDto> validationNodes = current.stream()
+                    .map(this::copyDeviceNode)
+                    .collect(Collectors.toCollection(ArrayList::new));
+            validationNodes.set(index, next);
+            List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(validationNodes, templates);
+            // Starting states are corrected one device at a time. Validate the state this write owns.
+            validateBoardReferences(
+                    userId, canonicalNodes, getRulesInternal(userId), getSpecsInternal(userId), templates, targetId);
+            DeviceNodeDto canonicalNext = requireNode(canonicalNodes, targetId);
+            return persistTargetedNodeUpdate(
+                    userId, current, index, persistedPrevious, canonicalNext, "runtime");
+        });
     }
 
     @Override
     public DeviceMutationResultDto renameNode(
             Long userId, String nodeId, String newLabel, String expectedLabel) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                String targetId = nodeIdForLookup(nodeId);
-                String label = trimToNull(newLabel);
-                if (targetId == null || label == null || trimToNull(expectedLabel) == null) {
-                    throw new BadRequestException(
-                            "Device id, name, and expected current name are required");
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            String targetId = nodeIdForLookup(nodeId);
+            String label = trimToNull(newLabel);
+            if (targetId == null || label == null || trimToNull(expectedLabel) == null) {
+                throw new BadRequestException(
+                        "Device id, name, and expected current name are required");
+            }
 
-                List<DeviceNodeDto> currentNodes = new ArrayList<>(getNodesInternal(userId));
-                List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
-                DeviceNodeDto target = requireNode(currentNodes, targetId);
-                int targetPosition = indexOfNode(currentNodes, targetId);
-                DeviceNodeDto previousDevice = copyDeviceNode(target);
-                String previousLabel = target.getLabel();
-                if (!Objects.equals(expectedLabel, previousLabel)) {
-                    throw new ConflictException(
-                            "The device name changed after the rename dialog was opened. "
-                                    + "Review the current device name before renaming it.");
-                }
-                if (Objects.equals(label, previousLabel)) {
-                    throw new BadRequestException("The new device name must differ from the current name");
-                }
-                List<DeviceNodeDto> otherNodes = currentNodes.stream()
-                        .filter(Objects::nonNull)
-                        .filter(node -> !targetId.equals(trimToNull(node.getId())))
-                        .toList();
-                String suggestedLabel = NodeServiceImpl.chooseAvailableLabel(label, otherNodes);
-                if (!label.equals(suggestedLabel)) {
-                    throw new DeviceLabelConflictException(label, suggestedLabel);
-                }
-                target.setLabel(label);
+            List<DeviceNodeDto> currentNodes = new ArrayList<>(getNodesInternal(userId));
+            List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
+            DeviceNodeDto target = requireNode(currentNodes, targetId);
+            int targetPosition = indexOfNode(currentNodes, targetId);
+            DeviceNodeDto previousDevice = copyDeviceNode(target);
+            String previousLabel = target.getLabel();
+            if (!Objects.equals(expectedLabel, previousLabel)) {
+                throw new ConflictException(
+                        "The device name changed after the rename dialog was opened. "
+                                + "Review the current device name before renaming it.");
+            }
+            if (Objects.equals(label, previousLabel)) {
+                throw new BadRequestException("The new device name must differ from the current name");
+            }
+            List<DeviceNodeDto> otherNodes = currentNodes.stream()
+                    .filter(Objects::nonNull)
+                    .filter(node -> !targetId.equals(trimToNull(node.getId())))
+                    .toList();
+            String suggestedLabel = NodeServiceImpl.chooseAvailableLabel(label, otherNodes);
+            if (!label.equals(suggestedLabel)) {
+                throw new DeviceLabelConflictException(label, suggestedLabel);
+            }
+            target.setLabel(label);
 
-                List<RuleDto> currentRules = getRulesInternal(userId);
-                List<SpecificationDto> previousSpecs = getSpecsInternal(userId);
-                int updatedSpecCount = countSpecificationDeviceLabelChanges(previousSpecs, targetId, label);
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, currentNodes);
-                validateBoardReferences(userId, canonicalNodes, currentRules, previousSpecs);
+            List<RuleDto> currentRules = getRulesInternal(userId);
+            List<SpecificationDto> previousSpecs = getSpecsInternal(userId);
+            int updatedSpecCount = countSpecificationDeviceLabelChanges(previousSpecs, targetId, label);
+            List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, currentNodes);
+            validateBoardReferences(userId, canonicalNodes, currentRules, previousSpecs);
 
-                DeviceNodePo entity = nodeRepo.findById(new DeviceNodeId(targetId, userId))
-                        .orElseThrow(() -> new ResourceNotFoundException("Device", targetId));
-                entity.setLabel(label);
-                DeviceNodeDto renamed = Objects.requireNonNull(
-                        deviceNodeMapper.toDto(nodeRepo.save(entity)),
-                        "renamed device must not be null");
-                List<DeviceNodeDto> savedNodes = new ArrayList<>(currentNodes);
-                savedNodes.set(targetPosition, renamed);
-                savedNodes = List.copyOf(savedNodes);
-                List<SpecificationDto> savedSpecs = updatedSpecCount > 0
-                        ? saveSpecsInternal(userId, previousSpecs, savedNodes)
-                        : previousSpecs;
-                List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
-                Set<String> updatedSpecIds = savedSpecs.stream()
-                        .filter(spec -> previousSpecs.stream()
-                                .filter(previous -> Objects.equals(previous.getId(), spec.getId()))
-                                .findFirst()
-                                .map(previous -> !Objects.equals(previous, spec))
-                                .orElse(false))
-                        .map(SpecificationDto::getId)
-                        .collect(Collectors.toCollection(LinkedHashSet::new));
-                DeviceJournalSnapshot before = deviceJournalSnapshot(
-                        List.of(targetId),
-                        List.of(new DeviceJournalSnapshot.DeviceWithPosition(previousDevice, targetPosition)),
-                        List.of(), positionedSpecs(previousSpecs, updatedSpecIds), previousEnvironment);
-                DeviceJournalSnapshot after = deviceJournalSnapshot(
-                        List.of(targetId),
-                        List.of(new DeviceJournalSnapshot.DeviceWithPosition(renamed, targetPosition)),
-                        List.of(), positionedSpecs(savedSpecs, updatedSpecIds), savedEnvironment);
-                editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.UPDATE,
-                        targetId, before, after);
-                BoardUndoAvailability availability = editJournal.availability(userId);
-                return DeviceMutationResultDto.builder()
-                        .operation("renamed")
-                        .affectedDevices(List.of(renamed))
-                        .currentNodes(savedNodes)
-                        .environmentVariables(savedEnvironment)
-                        .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
-                        .currentSpecifications(savedSpecs)
-                        .previousLabel(previousLabel)
-                        .updatedSpecificationCount(updatedSpecCount)
-                        .currentCount(savedNodes.size())
-                        .canUndo(availability.canUndo())
-                        .canRedo(availability.canRedo())
-                        .editHistoryRevision(availability.editHistoryRevision())
-                        .build();
-            });
-        }
+            DeviceNodePo entity = nodeRepo.findById(new DeviceNodeId(targetId, userId))
+                    .orElseThrow(() -> new ResourceNotFoundException("Device", targetId));
+            entity.setLabel(label);
+            DeviceNodeDto renamed = Objects.requireNonNull(
+                    deviceNodeMapper.toDto(nodeRepo.save(entity)),
+                    "renamed device must not be null");
+            List<DeviceNodeDto> savedNodes = new ArrayList<>(currentNodes);
+            savedNodes.set(targetPosition, renamed);
+            savedNodes = List.copyOf(savedNodes);
+            List<SpecificationDto> savedSpecs = updatedSpecCount > 0
+                    ? saveSpecsInternal(userId, previousSpecs, savedNodes)
+                    : previousSpecs;
+            List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
+            Set<String> updatedSpecIds = savedSpecs.stream()
+                    .filter(spec -> previousSpecs.stream()
+                            .filter(previous -> Objects.equals(previous.getId(), spec.getId()))
+                            .findFirst()
+                            .map(previous -> !Objects.equals(previous, spec))
+                            .orElse(false))
+                    .map(SpecificationDto::getId)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            DeviceJournalSnapshot before = deviceJournalSnapshot(
+                    List.of(targetId),
+                    List.of(new DeviceJournalSnapshot.DeviceWithPosition(previousDevice, targetPosition)),
+                    List.of(), positionedEntries(previousSpecs, updatedSpecIds, SpecificationDto::getId,
+                            DeviceJournalSnapshot.SpecWithPosition::new), previousEnvironment);
+            DeviceJournalSnapshot after = deviceJournalSnapshot(
+                    List.of(targetId),
+                    List.of(new DeviceJournalSnapshot.DeviceWithPosition(renamed, targetPosition)),
+                    List.of(), positionedEntries(savedSpecs, updatedSpecIds, SpecificationDto::getId,
+                            DeviceJournalSnapshot.SpecWithPosition::new), savedEnvironment);
+            editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.UPDATE,
+                    targetId, before, after);
+            BoardUndoAvailability availability = editJournal.availability(userId);
+            return DeviceMutationResultDto.builder()
+                    .operation("renamed")
+                    .affectedDevices(List.of(renamed))
+                    .currentNodes(savedNodes)
+                    .environmentVariables(savedEnvironment)
+                    .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
+                    .currentSpecifications(savedSpecs)
+                    .previousLabel(previousLabel)
+                    .updatedSpecificationCount(updatedSpecCount)
+                    .currentCount(savedNodes.size())
+                    .canUndo(availability.canUndo())
+                    .canRedo(availability.canRedo())
+                    .editHistoryRevision(availability.editHistoryRevision())
+                    .build();
+        });
     }
 
     @Override
     public DeviceDeletionResultDto previewNodeDeletion(Long userId, String nodeId) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                String targetId = nodeIdForLookup(nodeId);
-                if (targetId == null) {
-                    throw new BadRequestException("Device id is required");
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            String targetId = nodeIdForLookup(nodeId);
+            if (targetId == null) {
+                throw new BadRequestException("Device id is required");
+            }
 
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                DeviceNodeDto target = requireNode(currentNodes, targetId);
-                List<RuleDto> currentRules = getRulesInternal(userId);
-                List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
-                List<BoardEnvironmentVariableDto> currentEnvironment = getEnvironmentVariablesInternal(userId);
-                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
-                List<DeviceNodeDto> projectedNodes = currentNodes.stream()
-                        .filter(node -> !targetId.equals(node.getId()))
-                        .toList();
-                List<BoardEnvironmentVariableDto> projectedEnvironment =
-                        projectEnvironmentVariablesForNodes(currentEnvironment, projectedNodes,
-                                templateManifestMap(templates), false);
-                List<RuleDto> removedRules = currentRules.stream()
-                        .filter(rule -> ruleReferencesNode(rule, targetId))
-                        .toList();
-                List<SpecificationDto> removedSpecifications = currentSpecs.stream()
-                        .filter(spec -> specificationReferencesNode(spec, targetId))
-                        .toList();
-                List<EnvironmentVariableChangeDto> environmentChanges =
-                        diffEnvironmentVariables(currentEnvironment, projectedEnvironment);
-                BoardUndoAvailability availability = editJournal.availability(userId);
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            DeviceNodeDto target = requireNode(currentNodes, targetId);
+            List<RuleDto> currentRules = getRulesInternal(userId);
+            List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
+            List<BoardEnvironmentVariableDto> currentEnvironment = getEnvironmentVariablesInternal(userId);
+            List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+            List<DeviceNodeDto> projectedNodes = currentNodes.stream()
+                    .filter(node -> !targetId.equals(node.getId()))
+                    .toList();
+            List<BoardEnvironmentVariableDto> projectedEnvironment =
+                    projectEnvironmentVariablesForNodes(currentEnvironment, projectedNodes,
+                            templateManifestMap(templates), false);
+            List<RuleDto> removedRules = currentRules.stream()
+                    .filter(rule -> ruleReferencesNode(rule, targetId))
+                    .toList();
+            List<SpecificationDto> removedSpecifications = currentSpecs.stream()
+                    .filter(spec -> specificationReferencesNode(spec, targetId))
+                    .toList();
+            List<EnvironmentVariableChangeDto> environmentChanges =
+                    diffEnvironmentVariables(currentEnvironment, projectedEnvironment);
+            BoardUndoAvailability availability = editJournal.availability(userId);
 
-                return DeviceDeletionResultDto.builder()
-                        .operation("preview")
-                        .impactToken(deletionImpactToken(
-                                target, removedRules, removedSpecifications, environmentChanges))
-                        .deletedDevice(target)
-                        .removedRules(removedRules)
-                        .removedSpecifications(removedSpecifications)
-                        .currentNodes(currentNodes)
-                        .environmentVariables(currentEnvironment)
-                        .environmentChanges(environmentChanges)
-                        .currentRules(currentRules)
-                        .currentSpecifications(currentSpecs)
-                        .deviceTemplates(templates)
-                        .canUndo(availability.canUndo())
-                        .canRedo(availability.canRedo())
-                        .editHistoryRevision(availability.editHistoryRevision())
-                        .build();
-            });
-        }
+            return DeviceDeletionResultDto.builder()
+                    .operation("preview")
+                    .impactToken(deletionImpactToken(
+                            target, removedRules, removedSpecifications, environmentChanges))
+                    .deletedDevice(target)
+                    .removedRules(removedRules)
+                    .removedSpecifications(removedSpecifications)
+                    .currentNodes(currentNodes)
+                    .environmentVariables(currentEnvironment)
+                    .environmentChanges(environmentChanges)
+                    .currentRules(currentRules)
+                    .currentSpecifications(currentSpecs)
+                    .deviceTemplates(templates)
+                    .canUndo(availability.canUndo())
+                    .canRedo(availability.canRedo())
+                    .editHistoryRevision(availability.editHistoryRevision())
+                    .build();
+        });
     }
 
     @Override
     public DeviceDeletionResultDto deleteNodeCascade(Long userId,
                                                      String nodeId,
                                                      String expectedImpactToken) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                String targetId = nodeIdForLookup(nodeId);
-                if (targetId == null) {
-                    throw new BadRequestException("Device id is required");
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            String targetId = nodeIdForLookup(nodeId);
+            if (targetId == null) {
+                throw new BadRequestException("Device id is required");
+            }
 
-                List<DeviceNodeDto> currentNodes = new ArrayList<>(getNodesInternal(userId));
-                List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
-                DeviceNodeDto deleted = requireNode(currentNodes, targetId);
-                int deviceIndex = indexOfNode(currentNodes, targetId);
-                currentNodes.removeIf(node -> targetId.equals(node.getId()));
+            List<DeviceNodeDto> currentNodes = new ArrayList<>(getNodesInternal(userId));
+            List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
+            DeviceNodeDto deleted = requireNode(currentNodes, targetId);
+            int deviceIndex = indexOfNode(currentNodes, targetId);
+            currentNodes.removeIf(node -> targetId.equals(node.getId()));
 
-                List<RuleDto> currentRules = getRulesInternal(userId);
-                List<RuleDto> removedRules = currentRules.stream()
-                        .filter(rule -> ruleReferencesNode(rule, targetId))
-                        .toList();
-                List<RuleDto> nextRules = currentRules.stream()
-                        .filter(rule -> !ruleReferencesNode(rule, targetId))
-                        .toList();
+            List<RuleDto> currentRules = getRulesInternal(userId);
+            List<RuleDto> removedRules = currentRules.stream()
+                    .filter(rule -> ruleReferencesNode(rule, targetId))
+                    .toList();
+            List<RuleDto> nextRules = currentRules.stream()
+                    .filter(rule -> !ruleReferencesNode(rule, targetId))
+                    .toList();
 
-                List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
-                List<SpecificationDto> removedSpecs = currentSpecs.stream()
-                        .filter(spec -> specificationReferencesNode(spec, targetId))
-                        .toList();
-                List<SpecificationDto> nextSpecs = currentSpecs.stream()
-                        .filter(spec -> !specificationReferencesNode(spec, targetId))
-                        .toList();
+            List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
+            List<SpecificationDto> removedSpecs = currentSpecs.stream()
+                    .filter(spec -> specificationReferencesNode(spec, targetId))
+                    .toList();
+            List<SpecificationDto> nextSpecs = currentSpecs.stream()
+                    .filter(spec -> !specificationReferencesNode(spec, targetId))
+                    .toList();
 
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, currentNodes);
-                validateBoardReferences(userId, canonicalNodes, nextRules, nextSpecs);
-                List<BoardEnvironmentVariableDto> projectedEnvironment =
-                        projectEnvironmentVariablesForNodes(userId, canonicalNodes);
-                List<EnvironmentVariableChangeDto> projectedEnvironmentChanges =
-                        diffEnvironmentVariables(previousEnvironment, projectedEnvironment);
-                String actualImpactToken = deletionImpactToken(
-                        deleted, removedRules, removedSpecs, projectedEnvironmentChanges);
-                if (!hasText(expectedImpactToken)
-                        || !MessageDigest.isEqual(
-                                actualImpactToken.getBytes(StandardCharsets.UTF_8),
-                                expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
-                    throw new ConflictException(
-                            "Device deletion impact changed after confirmation; review a fresh preview before deleting.");
-                }
-                List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
-                List<RuleDto> savedRules = saveRulesInternal(userId, nextRules);
-                List<SpecificationDto> savedSpecs = saveSpecsInternal(userId, nextSpecs, savedNodes);
-                List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
+            List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, currentNodes);
+            validateBoardReferences(userId, canonicalNodes, nextRules, nextSpecs);
+            List<BoardEnvironmentVariableDto> projectedEnvironment =
+                    projectEnvironmentVariablesForNodes(userId, canonicalNodes);
+            List<EnvironmentVariableChangeDto> projectedEnvironmentChanges =
+                    diffEnvironmentVariables(previousEnvironment, projectedEnvironment);
+            String actualImpactToken = deletionImpactToken(
+                    deleted, removedRules, removedSpecs, projectedEnvironmentChanges);
+            if (!hasText(expectedImpactToken)
+                    || !MessageDigest.isEqual(
+                            actualImpactToken.getBytes(StandardCharsets.UTF_8),
+                            expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
+                throw new ConflictException(
+                        "Device deletion impact changed after confirmation; review a fresh preview before deleting.");
+            }
+            List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
+            List<RuleDto> savedRules = saveRulesInternal(userId, nextRules);
+            List<SpecificationDto> savedSpecs = saveSpecsInternal(userId, nextSpecs, savedNodes);
+            List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
 
-                Set<Long> removedRuleIds = removedRules.stream()
-                        .map(RuleDto::getId)
-                        .filter(Objects::nonNull)
-                        .collect(Collectors.toCollection(LinkedHashSet::new));
-                Set<String> removedSpecIds = removedSpecs.stream()
-                        .map(SpecificationDto::getId)
-                        .filter(Objects::nonNull)
-                        .collect(Collectors.toCollection(LinkedHashSet::new));
-                DeviceNodeDto restorableDeleted = copyDeviceNode(deleted);
-                canonicalizeNodes(userId, List.of(restorableDeleted));
-                // The mapper persists absent local collections as JSON arrays. Snapshot that same
-                // observable shape so an immediate redo does not mistake null -> [] for newer work.
-                restorableDeleted = deviceNodeMapper.toDto(
-                        deviceNodeMapper.toEntity(restorableDeleted, userId));
-                DeviceJournalSnapshot before = deviceJournalSnapshot(
-                        List.of(targetId),
-                        List.of(new DeviceJournalSnapshot.DeviceWithPosition(restorableDeleted, deviceIndex)),
-                        positionedRules(currentRules, removedRuleIds),
-                        positionedSpecs(currentSpecs, removedSpecIds),
-                        previousEnvironment);
-                DeviceJournalSnapshot after = deviceJournalSnapshot(
-                        List.of(targetId), List.of(), List.of(), List.of(), savedEnvironment);
-                editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.DELETE,
-                        targetId, before, after);
+            Set<Long> removedRuleIds = removedRules.stream()
+                    .map(RuleDto::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            Set<String> removedSpecIds = removedSpecs.stream()
+                    .map(SpecificationDto::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            DeviceNodeDto restorableDeleted = copyDeviceNode(deleted);
+            canonicalizeNodes(userId, List.of(restorableDeleted));
+            // The mapper persists absent local collections as JSON arrays. Snapshot that same
+            // observable shape so an immediate redo does not mistake null -> [] for newer work.
+            restorableDeleted = deviceNodeMapper.toDto(
+                    deviceNodeMapper.toEntity(restorableDeleted, userId));
+            DeviceJournalSnapshot before = deviceJournalSnapshot(
+                    List.of(targetId),
+                    List.of(new DeviceJournalSnapshot.DeviceWithPosition(restorableDeleted, deviceIndex)),
+                    positionedEntries(currentRules, removedRuleIds, RuleDto::getId,
+                            DeviceJournalSnapshot.RuleWithPosition::new),
+                    positionedEntries(currentSpecs, removedSpecIds, SpecificationDto::getId,
+                            DeviceJournalSnapshot.SpecWithPosition::new),
+                    previousEnvironment);
+            DeviceJournalSnapshot after = deviceJournalSnapshot(
+                    List.of(targetId), List.of(), List.of(), List.of(), savedEnvironment);
+            editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.DELETE,
+                    targetId, before, after);
 
-                BoardUndoAvailability availability = editJournal.availability(userId);
-                return DeviceDeletionResultDto.builder()
-                        .operation("deleted")
-                        .impactToken(actualImpactToken)
-                        .deletedDevice(deleted)
-                        .removedRules(removedRules)
-                        .removedSpecifications(removedSpecs)
-                        .currentNodes(savedNodes)
-                        .environmentVariables(savedEnvironment)
-                        .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
-                        .currentRules(savedRules)
-                        .currentSpecifications(savedSpecs)
-                        .deviceTemplates(getDeviceTemplatesInternal(userId))
-                        .canUndo(availability.canUndo())
-                        .canRedo(availability.canRedo())
-                        .editHistoryRevision(availability.editHistoryRevision())
-                        .build();
-            });
-        }
+            BoardUndoAvailability availability = editJournal.availability(userId);
+            return DeviceDeletionResultDto.builder()
+                    .operation("deleted")
+                    .impactToken(actualImpactToken)
+                    .deletedDevice(deleted)
+                    .removedRules(removedRules)
+                    .removedSpecifications(removedSpecs)
+                    .currentNodes(savedNodes)
+                    .environmentVariables(savedEnvironment)
+                    .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
+                    .currentRules(savedRules)
+                    .currentSpecifications(savedSpecs)
+                    .deviceTemplates(getDeviceTemplatesInternal(userId))
+                    .canUndo(availability.canUndo())
+                    .canRedo(availability.canRedo())
+                    .editHistoryRevision(availability.editHistoryRevision())
+                    .build();
+        });
     }
 
     private String nodeIdForLookup(String nodeId) {
@@ -695,37 +670,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .build();
     }
 
-    private List<DeviceJournalSnapshot.DeviceWithPosition> positionedDevices(
-            List<DeviceNodeDto> devices, Set<String> includedIds) {
-        List<DeviceJournalSnapshot.DeviceWithPosition> positioned = new ArrayList<>();
-        for (int index = 0; index < devices.size(); index++) {
-            DeviceNodeDto device = devices.get(index);
-            if (device != null && includedIds.contains(device.getId())) {
-                positioned.add(new DeviceJournalSnapshot.DeviceWithPosition(device, index));
-            }
-        }
-        return List.copyOf(positioned);
-    }
-
-    private List<DeviceJournalSnapshot.RuleWithPosition> positionedRules(
-            List<RuleDto> rules, Set<Long> includedIds) {
-        List<DeviceJournalSnapshot.RuleWithPosition> positioned = new ArrayList<>();
-        for (int index = 0; index < rules.size(); index++) {
-            RuleDto rule = rules.get(index);
-            if (rule != null && includedIds.contains(rule.getId())) {
-                positioned.add(new DeviceJournalSnapshot.RuleWithPosition(rule, index));
-            }
-        }
-        return List.copyOf(positioned);
-    }
-
-    private List<DeviceJournalSnapshot.SpecWithPosition> positionedSpecs(
-            List<SpecificationDto> specs, Set<String> includedIds) {
-        List<DeviceJournalSnapshot.SpecWithPosition> positioned = new ArrayList<>();
-        for (int index = 0; index < specs.size(); index++) {
-            SpecificationDto spec = specs.get(index);
-            if (spec != null && includedIds.contains(spec.getId())) {
-                positioned.add(new DeviceJournalSnapshot.SpecWithPosition(spec, index));
+    private <T, K, W> List<W> positionedEntries(
+            List<T> items, Set<K> includedIds, Function<T, K> idOf, BiFunction<T, Integer, W> snapshotEntry) {
+        List<W> positioned = new ArrayList<>();
+        for (int index = 0; index < items.size(); index++) {
+            T item = items.get(index);
+            if (item != null && includedIds.contains(idOf.apply(item))) {
+                positioned.add(snapshotEntry.apply(item, index));
             }
         }
         return List.copyOf(positioned);
@@ -934,7 +885,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .map(value -> {
                     if (value == null) return null;
                     String rawName = trimToNull(value.getName());
-                    DeviceManifest.InternalVariable definition = internalVariable(manifest, rawName);
+                    DeviceManifest.InternalVariable definition = findDeclaredVariable(manifest, rawName);
                     String name = definition != null ? definition.getName() : rawName;
                     // A state-derived reading follows the selected state, while its trust remains an instance field.
                     String declared = DeviceManifestModes.stateDeclaredValue(manifest, state, name);
@@ -953,7 +904,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .map(value -> {
                     if (value == null) return null;
                     String rawName = trimToNull(value.getName());
-                    DeviceManifest.InternalVariable definition = internalVariable(manifest, rawName);
+                    DeviceManifest.InternalVariable definition = findDeclaredVariable(manifest, rawName);
                     String name = definition != null ? definition.getName() : rawName;
                     return new PrivacyStateDto(name, normalizeSecurityLabel(value.getPrivacy()));
                 })
@@ -1056,26 +1007,20 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (environmentRepo == null) {
             return List.of();
         }
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                return refreshEnvironmentVariablesInternal(userId, currentNodes);
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            return refreshEnvironmentVariablesInternal(userId, currentNodes);
+        });
     }
 
     @Override
     public EnvironmentMutationResultDto saveEnvironmentVariables(
             Long userId,
             List<EnvironmentVariableUpdateRequestDto> updates) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                return compareAndSetEnvironmentVariablesInternal(userId, currentNodes, updates);
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            return compareAndSetEnvironmentVariablesInternal(userId, currentNodes, updates);
+        });
     }
 
     @Override
@@ -1083,20 +1028,17 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             Long userId,
             java.util.function.UnaryOperator<List<BoardEnvironmentVariableDto>> mutator) {
         Objects.requireNonNull(mutator, "environment mutator must not be null");
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                List<BoardEnvironmentVariableDto> current = new ArrayList<>(
-                        refreshEnvironmentVariablesInternal(userId, currentNodes));
-                List<BoardEnvironmentVariableDto> mutated = mutator.apply(current);
-                List<BoardEnvironmentVariableDto> next = mutated != null ? mutated : current;
-                List<BoardEnvironmentVariableDto> saved =
-                        saveEnvironmentVariablesInternal(userId, currentNodes, next, true);
-                recordEnvironmentUpdate(userId, current, saved);
-                return saved;
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            List<BoardEnvironmentVariableDto> current = new ArrayList<>(
+                    refreshEnvironmentVariablesInternal(userId, currentNodes));
+            List<BoardEnvironmentVariableDto> mutated = mutator.apply(current);
+            List<BoardEnvironmentVariableDto> next = mutated != null ? mutated : current;
+            List<BoardEnvironmentVariableDto> saved =
+                    saveEnvironmentVariablesInternal(userId, currentNodes, next, true);
+            recordEnvironmentUpdate(userId, current, saved);
+            return saved;
+        });
     }
 
     @Override
@@ -1104,48 +1046,60 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             Long userId,
             java.util.function.Function<List<DeviceNodeDto>, DeviceNodeDto> nodeFactory) {
         Objects.requireNonNull(nodeFactory, "node factory must not be null");
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
-                requireAdditionalCapacity("devices", current.size(), 1, RequestLimits.MAX_DEVICES);
-                List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
-                DeviceNodeDto createdDraft = Objects.requireNonNull(
-                        nodeFactory.apply(List.copyOf(current)), "node factory result must not be null");
-                List<DeviceNodeDto> nextNodes = new ArrayList<>(current);
-                nextNodes.add(createdDraft);
-                List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, nextNodes);
-                List<RuleDto> currentRules = getRulesInternal(userId);
-                List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
-                validateBoardReferences(userId, canonicalNodes, currentRules, currentSpecs);
-                List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
-                List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
-                requireTotalCapacity("environment variables", savedEnvironment.size(),
-                        RequestLimits.MAX_ENVIRONMENT_VARIABLES);
-                DeviceNodeDto created = requireNode(savedNodes, createdDraft.getId());
-                DeviceJournalSnapshot before = deviceJournalSnapshot(
-                        List.of(created.getId()), List.of(), List.of(), List.of(), previousEnvironment);
-                DeviceJournalSnapshot after = deviceJournalSnapshot(
-                        List.of(created.getId()),
-                        positionedDevices(savedNodes, Set.of(created.getId())),
-                        List.of(), List.of(), savedEnvironment);
-                editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.CREATE,
-                        created.getId(), before, after);
-                BoardUndoAvailability availability = editJournal.availability(userId);
-                return DeviceMutationResultDto.builder()
-                        .operation("created")
-                        .affectedDevices(List.of(created))
-                        .currentNodes(savedNodes)
-                        .environmentVariables(savedEnvironment)
-                        .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
-                        .currentSpecifications(currentSpecs)
-                        .currentCount(savedNodes.size())
-                        .canUndo(availability.canUndo())
-                        .canRedo(availability.canRedo())
-                        .editHistoryRevision(availability.editHistoryRevision())
-                        .build();
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            List<DeviceNodeDto> current = new ArrayList<>(getNodesInternal(userId));
+            requireAdditionalCapacity("devices", current.size(), 1, RequestLimits.MAX_DEVICES);
+            List<BoardEnvironmentVariableDto> previousEnvironment = getEnvironmentVariablesInternal(userId);
+            DeviceNodeDto createdDraft = Objects.requireNonNull(
+                    nodeFactory.apply(List.copyOf(current)), "node factory result must not be null");
+            List<DeviceNodeDto> nextNodes = new ArrayList<>(current);
+            nextNodes.add(createdDraft);
+            List<DeviceNodeDto> canonicalNodes = canonicalizeNodes(userId, nextNodes);
+            List<RuleDto> currentRules = getRulesInternal(userId);
+            List<SpecificationDto> currentSpecs = getSpecsInternal(userId);
+            validateBoardReferences(userId, canonicalNodes, currentRules, currentSpecs);
+            List<DeviceNodeDto> savedNodes = saveNodesInternal(userId, canonicalNodes);
+            List<BoardEnvironmentVariableDto> savedEnvironment = getEnvironmentVariablesInternal(userId);
+            requireTotalCapacity("environment variables", savedEnvironment.size(),
+                    RequestLimits.MAX_ENVIRONMENT_VARIABLES);
+            DeviceNodeDto created = requireNode(savedNodes, createdDraft.getId());
+            return recordDeviceCreation(userId, List.of(created.getId()), List.of(created),
+                    savedNodes, previousEnvironment, savedEnvironment, currentSpecs);
+        });
+    }
+
+    private DeviceMutationResultDto recordDeviceCreation(
+            Long userId,
+            List<String> createdIds,
+            List<DeviceNodeDto> created,
+            List<DeviceNodeDto> savedNodes,
+            List<BoardEnvironmentVariableDto> previousEnvironment,
+            List<BoardEnvironmentVariableDto> savedEnvironment,
+            List<SpecificationDto> currentSpecs) {
+        DeviceJournalSnapshot before = deviceJournalSnapshot(
+                createdIds, List.of(), List.of(), List.of(), previousEnvironment);
+        DeviceJournalSnapshot after = deviceJournalSnapshot(
+                createdIds,
+                positionedEntries(savedNodes, new LinkedHashSet<>(createdIds), DeviceNodeDto::getId,
+                        DeviceJournalSnapshot.DeviceWithPosition::new),
+                List.of(), List.of(), savedEnvironment);
+        // One request is one user action, including its Environment Pool patches.
+        editJournal.record(userId, BoardEditEntityType.DEVICE, BoardEditOperation.CREATE,
+                createdIds.get(0), before, after);
+
+        BoardUndoAvailability availability = editJournal.availability(userId);
+        return DeviceMutationResultDto.builder()
+                .operation("created")
+                .affectedDevices(created)
+                .currentNodes(savedNodes)
+                .environmentVariables(savedEnvironment)
+                .environmentChanges(diffEnvironmentVariables(previousEnvironment, savedEnvironment))
+                .currentSpecifications(currentSpecs)
+                .currentCount(savedNodes.size())
+                .canUndo(availability.canUndo())
+                .canRedo(availability.canRedo())
+                .editHistoryRevision(availability.editHistoryRevision())
+                .build();
     }
 
     /** Lock-free/transaction-free node save; safe to call inside transactionTemplate lambdas. */
@@ -1185,113 +1139,104 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public CollectionMutationResultDto<SpecificationDto> addSpec(Long userId, SpecificationDto spec) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                List<SpecificationDto> existing = new ArrayList<>(getSpecsInternal(userId));
-                requireAdditionalCapacity(
-                        "specifications", existing.size(), 1, RequestLimits.MAX_SPECS);
-                // Demanded on the specification being authored, not on the whole stored collection: this is
-                // the point where a choice is actually being made, so refusing here names a field the
-                // request contains. The shared revalidation below deliberately tolerates an absent reading
-                // on already-stored specifications, or a legacy row would block this write too.
-                requireResolvedVariableSource(spec);
-                requireSpecWithinDeclaredBounds(spec);
-                existing.add(spec);
-                validateBoardReferences(userId, currentNodes, null, existing);
-                List<SpecificationDto> saved = saveSpecsInternal(userId, existing, currentNodes);
-                SpecificationDto created = saved.stream()
-                        .filter(candidate -> Objects.equals(candidate.getId(), spec.getId()))
-                        .findFirst()
-                        .orElse(spec);
-                editJournal.record(userId, BoardEditEntityType.SPECIFICATION,
-                        BoardEditOperation.CREATE, created.getId(), null, created,
-                        indexOfSpecification(saved, created.getId()));
-                return withUndoAvailability(
-                        userId, CollectionMutationResultDto.of("created", created, saved));
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            List<SpecificationDto> existing = new ArrayList<>(getSpecsInternal(userId));
+            requireAdditionalCapacity(
+                    "specifications", existing.size(), 1, RequestLimits.MAX_SPECS);
+            // Demanded on the specification being authored, not on the whole stored collection: this is
+            // the point where a choice is actually being made, so refusing here names a field the
+            // request contains. The shared revalidation below deliberately tolerates an absent reading
+            // on already-stored specifications, or a legacy row would block this write too.
+            requireResolvedVariableSource(spec);
+            requireSpecWithinDeclaredBounds(spec);
+            existing.add(spec);
+            validateBoardReferences(userId, currentNodes, null, existing);
+            List<SpecificationDto> saved = saveSpecsInternal(userId, existing, currentNodes);
+            SpecificationDto created = saved.stream()
+                    .filter(candidate -> Objects.equals(candidate.getId(), spec.getId()))
+                    .findFirst()
+                    .orElse(spec);
+            editJournal.record(userId, BoardEditEntityType.SPECIFICATION,
+                    BoardEditOperation.CREATE, created.getId(), null, created,
+                    indexOfSpecification(saved, created.getId()));
+            return withUndoAvailability(
+                    userId, CollectionMutationResultDto.of("created", created, saved));
+        });
     }
 
     @Override
     public CollectionMutationResultDto<SpecificationDto> updateSpecIfUnchanged(
             Long userId, String specId, SpecificationDto expected, SpecificationDto desired) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (!hasText(specId) || expected == null || desired == null
-                        || !specId.equals(expected.getId()) || !specId.equals(desired.getId())) {
-                    throw new BadRequestException(
-                            "Expected and desired specification snapshots must identify the specification being edited.");
-                }
-                List<SpecificationPo> records = specRepo.findByUserId(userId);
-                List<SpecificationDto> current = records.stream().map(specificationMapper::toDto).toList();
-                int position = indexOfSpecification(current, specId);
-                if (position == current.size()) throw new ResourceNotFoundException("Specification", specId);
-                SpecificationDto before = current.get(position);
-                if (!sameSpecificationDeletionSnapshot(expected, before)) {
-                    String message = "The specification changed before this edit. Refresh it before saving your changes.";
-                    throw new BoardContentConflictException("SPEC_EDIT_STALE", message, Map.of("expected", message));
-                }
-                requireResolvedVariableSource(desired);
-                requireSpecWithinDeclaredBounds(desired);
-                List<DeviceNodeDto> nodes = getNodesInternal(userId);
-                List<SpecificationDto> next = new ArrayList<>(current);
-                next.set(position, desired);
-                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
-                validateNoIdenticalSpecifications(next, nodes, templates);
-                validateBoardReferences(userId, nodes, null, next);
-                if (sameSpecificationDeletionSnapshot(before, desired)) {
-                    return withUndoAvailability(userId,
-                            CollectionMutationResultDto.of("unchanged", before, current));
-                }
-                SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(
-                        nodes, templates);
-                SpecificationDto canonical = canonicalizeSpecificationForStorage(desired, previewContext);
-                SpecificationPo updated = specificationMapper.toEntity(canonical, userId);
-                updated.setListOrder(records.get(position).getListOrder());
-                SpecificationDto saved = specificationMapper.toDto(specRepo.save(updated));
-                editJournal.record(userId, BoardEditEntityType.SPECIFICATION, BoardEditOperation.UPDATE,
-                        specId, before, saved, position);
+        return withBoardWriteTransaction(userId, () -> {
+            if (!hasText(specId) || expected == null || desired == null
+                    || !specId.equals(expected.getId()) || !specId.equals(desired.getId())) {
+                throw new BadRequestException(
+                        "Expected and desired specification snapshots must identify the specification being edited.");
+            }
+            List<SpecificationPo> records = specRepo.findByUserId(userId);
+            List<SpecificationDto> current = records.stream().map(specificationMapper::toDto).toList();
+            int position = indexOfSpecification(current, specId);
+            if (position == current.size()) throw new ResourceNotFoundException("Specification", specId);
+            SpecificationDto before = current.get(position);
+            if (!sameSpecificationDeletionSnapshot(expected, before)) {
+                String message = "The specification changed before this edit. Refresh it before saving your changes.";
+                throw new BoardContentConflictException("SPEC_EDIT_STALE", message, Map.of("expected", message));
+            }
+            requireResolvedVariableSource(desired);
+            requireSpecWithinDeclaredBounds(desired);
+            List<DeviceNodeDto> nodes = getNodesInternal(userId);
+            List<SpecificationDto> next = new ArrayList<>(current);
+            next.set(position, desired);
+            List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+            validateNoIdenticalSpecifications(next, nodes, templates);
+            validateBoardReferences(userId, nodes, null, next);
+            if (sameSpecificationDeletionSnapshot(before, desired)) {
                 return withUndoAvailability(userId,
-                        CollectionMutationResultDto.of("updated", saved, getSpecsInternal(userId)));
-            });
-        }
+                        CollectionMutationResultDto.of("unchanged", before, current));
+            }
+            SpecificationFormulaPreview.Context previewContext = SpecificationFormulaPreview.context(
+                    nodes, templates);
+            SpecificationDto canonical = canonicalizeSpecificationForStorage(desired, previewContext);
+            SpecificationPo updated = specificationMapper.toEntity(canonical, userId);
+            updated.setListOrder(records.get(position).getListOrder());
+            SpecificationDto saved = specificationMapper.toDto(specRepo.save(updated));
+            editJournal.record(userId, BoardEditEntityType.SPECIFICATION, BoardEditOperation.UPDATE,
+                    specId, before, saved, position);
+            return withUndoAvailability(userId,
+                    CollectionMutationResultDto.of("updated", saved, getSpecsInternal(userId)));
+        });
     }
 
     @Override
     public CollectionMutationResultDto<SpecificationDto> removeSpecIfUnchanged(
             Long userId, String specId, SpecificationDto expected) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (expected == null) {
-                    throw new BadRequestException(
-                            "The confirmed specification snapshot is required for deletion.");
-                }
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                List<SpecificationDto> existing = new ArrayList<>(getSpecsInternal(userId));
-                SpecificationDto removed = existing.stream()
-                        .filter(candidate -> specId.equals(candidate.getId()))
-                        .findFirst()
-                        .orElseThrow(() -> new ResourceNotFoundException("Specification", specId));
-                if (!sameSpecificationDeletionSnapshot(expected, removed)) {
-                    throw new ConflictException(
-                            "The specification changed after confirmation. Review the current specification before deleting it.");
-                }
-                // Record the list position too, for the same reason rule deletion does: saveSpecsInternal
-                // assigns list_order from list index, so restoring by appending puts the specification
-                // somewhere the user did not delete it from.
-                int removedAt = indexOfSpecification(existing, specId);
-                existing.removeIf(candidate -> specId.equals(candidate.getId()));
-                List<SpecificationDto> saved = saveSpecsInternal(userId, existing, currentNodes);
-                editJournal.record(userId, BoardEditEntityType.SPECIFICATION,
-                        BoardEditOperation.DELETE, specId, removed, null, removedAt);
-                return withUndoAvailability(
-                        userId, CollectionMutationResultDto.of("deleted", removed, saved));
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            if (expected == null) {
+                throw new BadRequestException(
+                        "The confirmed specification snapshot is required for deletion.");
+            }
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            List<SpecificationDto> existing = new ArrayList<>(getSpecsInternal(userId));
+            SpecificationDto removed = existing.stream()
+                    .filter(candidate -> specId.equals(candidate.getId()))
+                    .findFirst()
+                    .orElseThrow(() -> new ResourceNotFoundException("Specification", specId));
+            if (!sameSpecificationDeletionSnapshot(expected, removed)) {
+                throw new ConflictException(
+                        "The specification changed after confirmation. Review the current specification before deleting it.");
+            }
+            // Record the list position too, for the same reason rule deletion does: saveSpecsInternal
+            // assigns list_order from list index, so restoring by appending puts the specification
+            // somewhere the user did not delete it from.
+            int removedAt = indexOfSpecification(existing, specId);
+            existing.removeIf(candidate -> specId.equals(candidate.getId()));
+            List<SpecificationDto> saved = saveSpecsInternal(userId, existing, currentNodes);
+            editJournal.record(userId, BoardEditEntityType.SPECIFICATION,
+                    BoardEditOperation.DELETE, specId, removed, null, removedAt);
+            return withUndoAvailability(
+                    userId, CollectionMutationResultDto.of("deleted", removed, saved));
+        });
     }
 
     private boolean sameSpecificationDeletionSnapshot(
@@ -1352,40 +1297,37 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             Long userId,
             java.util.function.Function<BoardSemanticSnapshotDto, List<RuleDto>> mutator) {
         Objects.requireNonNull(mutator, "rule snapshot mutator must not be null");
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                BoardSemanticSnapshotDto snapshot = getSemanticSnapshotInternal(userId);
-                List<RuleDto> next = Objects.requireNonNull(
-                        mutator.apply(snapshot), "rule snapshot mutator result must not be null");
-                Map<Long, RuleDto> existingRules = snapshot.rules().stream()
-                        .collect(Collectors.toMap(RuleDto::getId, rule -> rule));
-                for (RuleDto rule : next) {
-                    RuleDto existing = rule == null ? null : existingRules.get(rule.getId());
-                    // Authoring limits belong to changed rules; an untouched stored row must not block
-                    // a targeted edit or a fix of another rule.
-                    if (existing == null || !sameRuleDeletionSnapshot(existing, rule)) {
-                        requireRuleWithinDeclaredBounds(rule);
-                    }
+        return withBoardWriteTransaction(userId, () -> {
+            BoardSemanticSnapshotDto snapshot = getSemanticSnapshotInternal(userId);
+            List<RuleDto> next = Objects.requireNonNull(
+                    mutator.apply(snapshot), "rule snapshot mutator result must not be null");
+            Map<Long, RuleDto> existingRules = snapshot.rules().stream()
+                    .collect(Collectors.toMap(RuleDto::getId, rule -> rule));
+            for (RuleDto rule : next) {
+                RuleDto existing = rule == null ? null : existingRules.get(rule.getId());
+                // Authoring limits belong to changed rules; an untouched stored row must not block
+                // a targeted edit or a fix of another rule.
+                if (existing == null || !sameRuleDeletionSnapshot(existing, rule)) {
+                    requireRuleWithinDeclaredBounds(rule);
                 }
-                validateBoardReferences(
-                        userId,
-                        snapshot.nodes(),
-                        next,
-                        snapshot.specifications(),
-                        templateManifestMap(snapshot.deviceTemplates()));
-                List<RuleDto> saved = saveRulesInternal(userId, next);
-                if (sameOrderedRuleCollection(snapshot.rules(), saved)) {
-                    throw new BadRequestException("The rule update did not change any rule");
-                }
-                editJournal.record(userId, BoardEditEntityType.RULE_SET, BoardEditOperation.UPDATE,
-                        RULE_SET_ENTITY_KEY,
-                        new RuleCollectionJournalSnapshot(snapshot.rules()),
-                        new RuleCollectionJournalSnapshot(saved));
-                return withUndoAvailability(
-                        userId, CollectionMutationResultDto.of("updated", null, saved));
-            });
-        }
+            }
+            validateBoardReferences(
+                    userId,
+                    snapshot.nodes(),
+                    next,
+                    snapshot.specifications(),
+                    templateManifestMap(snapshot.deviceTemplates()));
+            List<RuleDto> saved = saveRulesInternal(userId, next);
+            if (sameOrderedRuleCollection(snapshot.rules(), saved)) {
+                throw new BadRequestException("The rule update did not change any rule");
+            }
+            editJournal.record(userId, BoardEditEntityType.RULE_SET, BoardEditOperation.UPDATE,
+                    RULE_SET_ENTITY_KEY,
+                    new RuleCollectionJournalSnapshot(snapshot.rules()),
+                    new RuleCollectionJournalSnapshot(saved));
+            return withUndoAvailability(
+                    userId, CollectionMutationResultDto.of("updated", null, saved));
+        });
     }
 
     /**
@@ -1712,12 +1654,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public BoardReplacementPreviewDto previewBoardReplacement(Long userId) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                return currentBoardReplacementPreview(userId);
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            return currentBoardReplacementPreview(userId);
+        });
     }
 
     @Override
@@ -1730,55 +1669,52 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         Objects.requireNonNull(afterReplacement, "Scene replacement completion is required");
         // Atomic save of nodes + environment + rules + specs in ONE transaction under the user write lock.
         // Scene import depends on this so a new topology cannot be persisted with an old environment pool.
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                var owner = requireActiveUserForWrite(userId);
-                validateCompleteSceneBatch(batch);
-                BoardReplacementPreviewDto currentPreview = currentBoardReplacementPreview(userId);
-                if (!hasText(batch.getImpactToken()) || !MessageDigest.isEqual(
-                        currentPreview.getImpactToken().getBytes(StandardCharsets.UTF_8),
-                        batch.getImpactToken().trim().getBytes(StandardCharsets.UTF_8))) {
-                    throw new BoardReplacementStaleException(currentPreview);
-                }
-                List<DeviceTemplateDto> createdTemplates = resolveSceneTemplateSnapshots(
-                        userId, batch.getTemplateSnapshots(), batch.getNodes());
-                validateAuthoredSceneVariableValues(batch.getNodes(), loadTemplateManifestMap(userId));
-                List<DeviceNodeDto> nextNodes = canonicalizeNodes(userId, batch.getNodes());
-                List<RuleDto> nextRules = batch.getRules();
-                List<SpecificationDto> nextSpecs = batch.getSpecs();
-                List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
-                validateNoIdenticalRules(nextRules, nextNodes, templates);
-                validateNoIdenticalSpecifications(nextSpecs, nextNodes, templates);
-                // Every specification here is being written by this request (batch is a full replacement),
-                // so each must state its reading — unlike the shared revalidation below, which also sees
-                // already-stored specifications and tolerates an absent one.
-                safeList(nextSpecs).forEach(this::requireResolvedVariableSource);
-                safeList(nextSpecs).forEach(this::requireSpecWithinDeclaredBounds);
-                safeList(nextRules).forEach(this::requireRuleWithinDeclaredBounds);
-                validateBoardReferences(userId, nextNodes, nextRules, nextSpecs);
-                validateCompleteSceneEnvironment(userId, nextNodes, batch.getEnvironmentVariables());
+        return withBoardWriteTransaction(userId, owner -> {
+            validateCompleteSceneBatch(batch);
+            BoardReplacementPreviewDto currentPreview = currentBoardReplacementPreview(userId);
+            if (!hasText(batch.getImpactToken()) || !MessageDigest.isEqual(
+                    currentPreview.getImpactToken().getBytes(StandardCharsets.UTF_8),
+                    batch.getImpactToken().trim().getBytes(StandardCharsets.UTF_8))) {
+                throw new BoardReplacementStaleException(currentPreview);
+            }
+            List<DeviceTemplateDto> createdTemplates = resolveSceneTemplateSnapshots(
+                    userId, batch.getTemplateSnapshots(), batch.getNodes());
+            validateAuthoredSceneVariableValues(batch.getNodes(), loadTemplateManifestMap(userId));
+            List<DeviceNodeDto> nextNodes = canonicalizeNodes(userId, batch.getNodes());
+            List<RuleDto> nextRules = batch.getRules();
+            List<SpecificationDto> nextSpecs = batch.getSpecs();
+            List<DeviceTemplateDto> templates = getDeviceTemplatesInternal(userId);
+            validateNoIdenticalRules(nextRules, nextNodes, templates);
+            validateNoIdenticalSpecifications(nextSpecs, nextNodes, templates);
+            // Every specification here is being written by this request (batch is a full replacement),
+            // so each must state its reading — unlike the shared revalidation below, which also sees
+            // already-stored specifications and tolerates an absent one.
+            safeList(nextSpecs).forEach(this::requireResolvedVariableSource);
+            safeList(nextSpecs).forEach(this::requireSpecWithinDeclaredBounds);
+            safeList(nextRules).forEach(this::requireRuleWithinDeclaredBounds);
+            validateBoardReferences(userId, nextNodes, nextRules, nextSpecs);
+            validateCompleteSceneEnvironment(userId, nextNodes, batch.getEnvironmentVariables());
 
-                // A full replacement supplies its own pool. Projecting old values into the new
-                // domains here would reject a valid scene before its submitted pool is saved.
-                List<DeviceNodeDto> savedNodes = persistNodesInternal(userId, nextNodes);
-                List<BoardEnvironmentVariableDto> savedEnvironment = saveEnvironmentVariablesInternal(
-                        userId, savedNodes, batch.getEnvironmentVariables(), false);
-                List<RuleDto> savedRules = saveRulesInternal(userId, batch.getRules());
-                List<SpecificationDto> savedSpecs = saveSpecsInternal(userId, batch.getSpecs(), savedNodes);
-                BoardBatchDto result = new BoardBatchDto(savedNodes, savedEnvironment, savedRules, savedSpecs);
-                result.setCreatedTemplates(createdTemplates);
-                // Scene replacement rewrites every collection at once, so no per-record inverse
-                // recorded before it still describes a reachable state. Dropping the journal is
-                // safer than leaving entries that would "restore" a rule into a different scene.
-                editJournal.clear(userId);
-                // Ordinary edits retain task intent; only explicit full-scene replacement changes its scope.
-                owner.setSceneRevision(Math.incrementExact(owner.getSceneRevision()));
-                // A confirmed AI draft is consumed with its scene, so cleanup failure cannot
-                // turn a committed replacement into an ordinary tool failure.
-                afterReplacement.run();
-                return result;
-            });
-        }
+            // A full replacement supplies its own pool. Projecting old values into the new
+            // domains here would reject a valid scene before its submitted pool is saved.
+            List<DeviceNodeDto> savedNodes = persistNodesInternal(userId, nextNodes);
+            List<BoardEnvironmentVariableDto> savedEnvironment = saveEnvironmentVariablesInternal(
+                    userId, savedNodes, batch.getEnvironmentVariables(), false);
+            List<RuleDto> savedRules = saveRulesInternal(userId, batch.getRules());
+            List<SpecificationDto> savedSpecs = saveSpecsInternal(userId, batch.getSpecs(), savedNodes);
+            BoardBatchDto result = new BoardBatchDto(savedNodes, savedEnvironment, savedRules, savedSpecs);
+            result.setCreatedTemplates(createdTemplates);
+            // Scene replacement rewrites every collection at once, so no per-record inverse
+            // recorded before it still describes a reachable state. Dropping the journal is
+            // safer than leaving entries that would "restore" a rule into a different scene.
+            editJournal.clear(userId);
+            // Ordinary edits retain task intent; only explicit full-scene replacement changes its scope.
+            owner.setSceneRevision(Math.incrementExact(owner.getSceneRevision()));
+            // A confirmed AI draft is consumed with its scene, so cleanup failure cannot
+            // turn a committed replacement into an ordinary tool failure.
+            afterReplacement.run();
+            return result;
+        });
     }
 
     private void validateCompleteSceneBatch(BoardBatchDto batch) {
@@ -1865,11 +1801,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private void validateCompleteSceneEnvironment(Long userId,
                                                   List<DeviceNodeDto> nodes,
                                                   List<BoardEnvironmentVariableDto> variables) {
-        Map<String, DeviceManifest> templateManifests = loadTemplateManifestMap(userId);
-        requireActiveEnvironmentDomainConsistency(nodes, templateManifests);
-        Map<String, DeviceManifest.InternalVariable> required = collectRequiredEnvironmentVariables(
-                nodes, templateManifests);
-        validateSubmittedEnvironmentNames(variables, required);
+        Map<String, DeviceManifest.InternalVariable> required = validatedRequiredEnvironmentVariables(
+                nodes, loadTemplateManifestMap(userId));
+        validateSubmittedEnvironmentVariables(variables, required);
         validateCompleteEnvironmentSubmission(variables, required);
         validateEnvironmentVariables(variables, required);
     }
@@ -2148,8 +2082,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             List<DeviceNodeDto> nodes,
             Map<String, DeviceManifest> templateManifests,
             boolean resetValuesOutsideNewDomains) {
-        requireActiveEnvironmentDomainConsistency(nodes, templateManifests);
-        Map<String, DeviceManifest.InternalVariable> required = collectRequiredEnvironmentVariables(
+        Map<String, DeviceManifest.InternalVariable> required = validatedRequiredEnvironmentVariables(
                 nodes, templateManifests);
         List<BoardEnvironmentVariableDto> merged = mergeEnvironmentVariables(
                 List.of(), existing, required);
@@ -2241,11 +2174,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             List<DeviceNodeDto> nodes,
             List<BoardEnvironmentVariableDto> variables,
             boolean preserveExistingValues) {
-        Map<String, DeviceManifest> templateManifests = loadTemplateManifestMap(userId);
-        requireActiveEnvironmentDomainConsistency(nodes, templateManifests);
-        Map<String, DeviceManifest.InternalVariable> required = collectRequiredEnvironmentVariables(
-                nodes, templateManifests);
-        validateSubmittedEnvironmentNames(variables, required);
+        Map<String, DeviceManifest.InternalVariable> required = validatedRequiredEnvironmentVariables(
+                nodes, loadTemplateManifestMap(userId));
+        validateSubmittedEnvironmentVariables(variables, required);
         if (!preserveExistingValues) {
             validateCompleteEnvironmentSubmission(variables, required);
         }
@@ -2255,11 +2186,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return replaceEnvironmentVariablesInternal(userId, merged);
     }
 
-    /**
-     * Applies only non-null fields from each submitted item. Omitted fields retain the materialized
-     * current value, so a UI edit of one label cannot reset the value or the other label.
-     */
-    /** The environment pool after the patches. Its one caller, {@code addNodes}, needs nothing else. */
+    /** Applies non-null fields while keeping this change in the enclosing device journal entry. */
     private List<BoardEnvironmentVariableDto> patchEnvironmentVariablesInternal(
             Long userId,
             List<DeviceNodeDto> nodes,
@@ -2267,18 +2194,16 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (patches == null || patches.isEmpty()) {
             throw new BadRequestException("At least one environment variable patch is required");
         }
-        Map<String, DeviceManifest> templateManifests = loadTemplateManifestMap(userId);
-        requireActiveEnvironmentDomainConsistency(nodes, templateManifests);
-        Map<String, DeviceManifest.InternalVariable> required = collectRequiredEnvironmentVariables(
-                nodes, templateManifests);
-        validateSubmittedEnvironmentNames(patches, required);
+        Map<String, DeviceManifest.InternalVariable> required = validatedRequiredEnvironmentVariables(
+                nodes, loadTemplateManifestMap(userId));
+        validateSubmittedEnvironmentVariables(patches, required);
         validateEnvironmentPatchFields(patches);
 
         List<BoardEnvironmentVariableDto> materializedBefore = mergeEnvironmentVariables(
                 List.of(), getEnvironmentVariablesInternal(userId), required);
         validateEnvironmentVariables(materializedBefore, required);
 
-        return persistEnvironmentVariablePatches(userId, patches, materializedBefore, required);
+        return replaceEnvironmentVariablePatches(userId, patches, materializedBefore, required);
     }
 
     private EnvironmentMutationResultDto compareAndSetEnvironmentVariablesInternal(
@@ -2307,10 +2232,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     normalizeSecurityLabel(desired.getPrivacy())));
         }
 
-        Map<String, DeviceManifest> templateManifests = loadTemplateManifestMap(userId);
-        requireActiveEnvironmentDomainConsistency(nodes, templateManifests);
-        Map<String, DeviceManifest.InternalVariable> required = collectRequiredEnvironmentVariables(
-                nodes, templateManifests);
+        Map<String, DeviceManifest.InternalVariable> required = validatedRequiredEnvironmentVariables(
+                nodes, loadTemplateManifestMap(userId));
         List<BoardEnvironmentVariableDto> persistedBefore = getEnvironmentVariablesInternal(userId);
         List<BoardEnvironmentVariableDto> materializedBefore = mergeEnvironmentVariables(
                 List.of(), persistedBefore, required);
@@ -2327,10 +2250,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         // A complete CAS comparison must finish for every item before any semantic validation
         // can reach persistence. This preserves a deterministic stale response for a removed
         // variable (currentVariable=null) while keeping the final write all-or-nothing.
-        validateSubmittedEnvironmentNames(patches, required);
+        validateSubmittedEnvironmentVariables(patches, required);
         validateEnvironmentVariables(expectedBaselines, required);
         return persistEnvironmentVariableCasPatches(
-                userId, updates, persistedBefore, materializedBefore, required);
+                userId, updates, patches, materializedBefore, required);
     }
 
     private void validateEnvironmentUpdateRequests(List<EnvironmentVariableUpdateRequestDto> updates) {
@@ -2392,26 +2315,13 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
     }
 
-    /**
-     * The environment pool after applying the patches — which is all its one caller reads.
-     *
-     * This used to build a whole {@code EnvironmentMutationResultDto}: an operation label, a change diff, a count,
-     * and a per-patch {@code patchResults} list. `addNodes` (`:238`) takes `.getEnvironmentVariables()` and drops
-     * the rest, so every device-creation request carrying environment patches paid for a
-     * {@code describeEnvironmentVariablePatches} walk whose only destination was the garbage collector.
-     *
-     * Deliberately still does **not** call {@code recordEnvironmentUpdate}, unlike its CAS twin: `addNodes`
-     * records the environment inside its own DEVICE journal entry, because one request is one user action. Adding
-     * a second journal write here would give the user two undo steps for one edit.
-     */
-    private List<BoardEnvironmentVariableDto> persistEnvironmentVariablePatches(
+    private List<BoardEnvironmentVariableDto> replaceEnvironmentVariablePatches(
             Long userId,
             List<BoardEnvironmentVariableDto> patches,
             List<BoardEnvironmentVariableDto> materializedBefore,
             Map<String, DeviceManifest.InternalVariable> required) {
-
-        List<BoardEnvironmentVariableDto> merged = mergeEnvironmentVariablePatches(
-                patches, materializedBefore, required);
+        List<BoardEnvironmentVariableDto> merged =
+                mergeEnvironmentVariablePatches(patches, materializedBefore, required);
         validateEnvironmentVariables(merged, required);
         return replaceEnvironmentVariablesInternal(userId, merged);
     }
@@ -2419,14 +2329,11 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     private EnvironmentMutationResultDto persistEnvironmentVariableCasPatches(
             Long userId,
             List<EnvironmentVariableUpdateRequestDto> updates,
-            List<BoardEnvironmentVariableDto> persistedBefore,
+            List<BoardEnvironmentVariableDto> patches,
             List<BoardEnvironmentVariableDto> materializedBefore,
             Map<String, DeviceManifest.InternalVariable> required) {
-
-        List<BoardEnvironmentVariableDto> merged = mergeEnvironmentVariableCasPatches(
-                updates, materializedBefore, required);
-        validateEnvironmentVariables(merged, required);
-        List<BoardEnvironmentVariableDto> saved = replaceEnvironmentVariablesInternal(userId, merged);
+        List<BoardEnvironmentVariableDto> saved =
+                replaceEnvironmentVariablePatches(userId, patches, materializedBefore, required);
         List<EnvironmentVariableChangeDto> changes = diffEnvironmentVariables(materializedBefore, saved);
         BoardUndoAvailability availability = recordEnvironmentUpdate(userId, materializedBefore, saved);
 
@@ -2568,15 +2475,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             BoardEnvironmentVariableDto patch = patchByName.get(name);
             merged.add(new BoardEnvironmentVariableDto(
                     name,
-                    /*
-                     * Normalised the same way as the CAS twin, which applied `trimToNull` and
-                     * `normalizeSecurityLabel` while this path took the raw value. Nothing broke, because two
-                     * later stages independently repaired it — `validateLiteralValues` compares trimmed and
-                     * case-insensitively, and `environmentToEntity` normalises again before persisting — but
-                     * `backend/CLAUDE.md` is explicit that admission and generation must normalise the same
-                     * string the same way. Relying on a downstream repair means the next case-sensitive
-                     * comparison added between the two paths reproduces only through `POST /api/board/nodes`.
-                     */
                     patch != null && patch.getValue() != null
                             ? trimToNull(patch.getValue()) : current.getValue(),
                     patch != null && patch.getTrust() != null
@@ -2586,42 +2484,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
         return merged;
     }
-
-    private List<BoardEnvironmentVariableDto> mergeEnvironmentVariableCasPatches(
-            List<EnvironmentVariableUpdateRequestDto> updates,
-            List<BoardEnvironmentVariableDto> existing,
-            Map<String, DeviceManifest.InternalVariable> required) {
-        Map<String, BoardEnvironmentVariableDto> existingByName = environmentDtoMap(existing);
-        Map<String, EnvironmentVariableUpdateRequestDto.DesiredPatch> desiredByName = new LinkedHashMap<>();
-        for (EnvironmentVariableUpdateRequestDto update : updates) {
-            desiredByName.put(update.getName().trim(), update.getDesired());
-        }
-
-        List<BoardEnvironmentVariableDto> merged = new ArrayList<>();
-        for (Map.Entry<String, DeviceManifest.InternalVariable> entry : required.entrySet()) {
-            String name = entry.getKey();
-            DeviceManifest.InternalVariable definition = entry.getValue();
-            BoardEnvironmentVariableDto current = existingByName.get(name);
-            if (current == null) {
-                current = new BoardEnvironmentVariableDto(
-                        name,
-                        defaultEnvironmentValue(definition),
-                        normalizeTrustPrivacyOrDefault(definition.getTrust(), "untrusted"),
-                        normalizeTrustPrivacyOrDefault(definition.getPrivacy(), "public"));
-            }
-            EnvironmentVariableUpdateRequestDto.DesiredPatch desired = desiredByName.get(name);
-            merged.add(new BoardEnvironmentVariableDto(
-                    name,
-                    desired != null && desired.getValue() != null
-                            ? trimToNull(desired.getValue()) : current.getValue(),
-                    desired != null && desired.getTrust() != null
-                            ? normalizeSecurityLabel(desired.getTrust()) : current.getTrust(),
-                    desired != null && desired.getPrivacy() != null
-                            ? normalizeSecurityLabel(desired.getPrivacy()) : current.getPrivacy()));
-        }
-        return merged;
-    }
-
 
     private List<EnvironmentVariablePatchResultDto> describeEnvironmentVariableCasPatches(
             List<EnvironmentVariableUpdateRequestDto> updates,
@@ -2691,9 +2553,23 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     private void validateEnvironmentVariables(List<BoardEnvironmentVariableDto> variables,
                                               Map<String, DeviceManifest.InternalVariable> required) {
+        validateEnvironmentVariables(variables, required, false);
+    }
+
+    private void validateSubmittedEnvironmentVariables(List<BoardEnvironmentVariableDto> variables,
+                                                       Map<String, DeviceManifest.InternalVariable> required) {
+        validateEnvironmentVariables(variables, required, true);
+    }
+
+    private void validateEnvironmentVariables(List<BoardEnvironmentVariableDto> variables,
+                                              Map<String, DeviceManifest.InternalVariable> required,
+                                              boolean submitted) {
+        if (variables == null || variables.isEmpty()) {
+            return;
+        }
         Map<String, String> errors = new LinkedHashMap<>();
         Set<String> seen = new HashSet<>();
-        for (int i = 0; i < (variables == null ? 0 : variables.size()); i++) {
+        for (int i = 0; i < variables.size(); i++) {
             BoardEnvironmentVariableDto variable = variables.get(i);
             String prefix = "environmentVariables[" + i + "]";
             if (variable == null) {
@@ -2714,55 +2590,23 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 continue;
             }
             validateNodeTrust(errors, prefix + ".trust", variable.getTrust());
-            validatePrivacyValues(errors, prefix + ".privacy", "=", variable.getPrivacy());
-            String value = trimToNull(variable.getValue());
-            if (hasEnvironmentValueDomain(definition) && value == null) {
-                errors.putIfAbsent(prefix + ".value", "Environment variable value is required for " + name);
-            } else if (value != null) {
-                validateVariableValues(errors, prefix + ".value", definition, "=", value);
-            }
-        }
-        if (!errors.isEmpty()) {
-            throw new ValidationException(errors);
-        }
-    }
-
-    private void validateSubmittedEnvironmentNames(List<BoardEnvironmentVariableDto> submitted,
-                                                   Map<String, DeviceManifest.InternalVariable> required) {
-        if (submitted == null || submitted.isEmpty()) {
-            return;
-        }
-        Map<String, String> errors = new LinkedHashMap<>();
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < submitted.size(); i++) {
-            BoardEnvironmentVariableDto variable = submitted.get(i);
-            String prefix = "environmentVariables[" + i + "]";
-            if (variable == null) {
-                errors.putIfAbsent(prefix, "Environment variable item cannot be null");
-                continue;
-            }
-            String name = trimToNull(variable.getName());
-            if (name == null) {
-                errors.putIfAbsent(prefix + ".name", "Environment variable name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                errors.putIfAbsent(prefix + ".name", "Duplicate environment variable: " + name);
-            }
-            if (!required.containsKey(name)) {
-                errors.putIfAbsent(prefix + ".name",
-                        "Environment variable is not required by the current board: " + name);
-                continue;
-            }
-            validateNodeTrust(errors, prefix + ".trust", variable.getTrust());
-            if (variable.getPrivacy() != null) {
+            if (!submitted || variable.getPrivacy() != null) {
                 validatePrivacyValues(errors, prefix + ".privacy", "=", variable.getPrivacy());
             }
-            if (variable.getValue() != null && !hasText(variable.getValue())) {
-                errors.putIfAbsent(prefix + ".value",
-                        "Environment variable value cannot be blank when provided");
-            } else if (hasText(variable.getValue())) {
-                validateVariableValues(errors, prefix + ".value", required.get(name), "=", variable.getValue());
+            if (submitted) {
+                String value = variable.getValue();
+                if (value != null && !hasText(value)) {
+                    errors.putIfAbsent(prefix + ".value", "Environment variable value cannot be blank when provided");
+                } else if (hasText(value)) {
+                    validateVariableValues(errors, prefix + ".value", definition, "=", value);
+                }
+            } else {
+                String value = trimToNull(variable.getValue());
+                if (hasEnvironmentValueDomain(definition) && value == null) {
+                    errors.putIfAbsent(prefix + ".value", "Environment variable value is required for " + name);
+                } else if (value != null) {
+                    validateVariableValues(errors, prefix + ".value", definition, "=", value);
+                }
             }
         }
         if (!errors.isEmpty()) {
@@ -2818,21 +2662,8 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 || (variable.getLowerBound() != null && variable.getUpperBound() != null);
     }
 
-    private boolean isEnvironmentVariable(DeviceManifest.InternalVariable variable) {
-        return variable != null && !Boolean.TRUE.equals(variable.getIsInside());
-    }
-
     private String defaultEnvironmentValue(DeviceManifest.InternalVariable variable) {
-        if (variable == null) {
-            return null;
-        }
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            return trimToNull(variable.getValues().get(0));
-        }
-        if (variable.getLowerBound() != null && variable.getUpperBound() != null) {
-            return String.valueOf(variable.getLowerBound());
-        }
-        return null;
+        return trimToNull(EnvironmentDomainUtils.rawDefaultValue(variable));
     }
 
     private String normalizeTrustPrivacyOrDefault(String value, String fallback) {
@@ -3204,8 +3035,14 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                     validatePrivacyValues(errors, field + ".currentStatePrivacy", "=", node.getCurrentStatePrivacy());
                 }
             }
-            validateNodeVariables(errors, field + ".variables", node.getVariables(), manifest);
-            validateNodePrivacies(errors, field + ".privacies", node.getPrivacies(), manifest);
+            Function<String, DeviceManifest.InternalVariable> findVariable =
+                    name -> findDeclaredVariable(manifest, name);
+            validateRuntimeVariables(errors, field + ".variables", node.getVariables(), findVariable,
+                    (trustField, trust) -> validateNodeTrust(errors, trustField, trust),
+                    "Environment variable belongs to the board environment pool, not a device instance: ");
+            validateRuntimePrivacies(errors, field + ".privacies", node.getPrivacies(), findVariable,
+                    (name, declaration) -> "Environment variable privacy belongs to the board environment pool, "
+                            + "not a device instance: " + name);
         }
     }
 
@@ -3301,7 +3138,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             if (!hasText(impacted)) {
                 continue;
             }
-            DeviceManifest.InternalVariable sameName = internalVariable(manifest, impacted);
+            DeviceManifest.InternalVariable sameName = findDeclaredVariable(manifest, impacted);
             if (sameName != null && !isEnvironmentVariable(sameName)) {
                 errors.putIfAbsent(field + ".templateName",
                         "Template '" + templateName + "' uses ImpactedVariable '" + impacted
@@ -3428,27 +3265,17 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
     }
 
-    private void requireActiveEnvironmentDomainConsistency(
+    private Map<String, DeviceManifest.InternalVariable> validatedRequiredEnvironmentVariables(
             List<DeviceNodeDto> nodes,
             Map<String, DeviceManifest> templateManifests) {
         Map<String, String> errors = new LinkedHashMap<>();
         validateActiveEnvironmentDomainConsistency(errors, nodes, templateManifests);
-        // Deliberately NOT the pair-wise discrete-writer check. It lives only in
-        // `validateBoardReferences`, which every write route reaches — including scene replacement,
-        // via `saveBoardBatch` at the `validateBoardReferences(userId, nextNodes, nextRules, nextSpecs)`
-        // call. An earlier version of this method also ran it, justified by a claim that scene
-        // replacement reached only here; that claim was false, and it named `applySceneReplacement`,
-        // a method that does not exist.
-        //
-        // The redundancy was not harmless. Of this method's five call sites, one is inside
-        // `projectEnvironmentVariablesForNodes`, reached from `getEnvironmentVariables` — i.e.
-        // `GET /api/board/environment`. A per-declaration consistency check is idempotent and safe to
-        // repeat on a read; a *pair-wise* conflict check is not, because a board persisted before that
-        // check existed then fails a plain read of its own environment pool. Keep pair-wise invariants
-        // on the write path only.
+        // Pool reads share this lookup. Keep discrete-writer agreement in validateBoardReferences
+        // so an existing board with conflicting writers can still display its environment pool.
         if (!errors.isEmpty()) {
             throw new ValidationException(errors);
         }
+        return collectRequiredEnvironmentVariables(nodes, templateManifests);
     }
 
     private void registerActiveEnvironmentDomain(Map<String, String> errors,
@@ -3555,87 +3382,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         validateTrustValues(errors, field, "=", value);
     }
 
-    private void validateNodeVariables(Map<String, String> errors,
-                                       String field,
-                                       List<VariableStateDto> variables,
-                                       DeviceManifest manifest) {
-        if (variables == null) {
-            return;
-        }
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < variables.size(); i++) {
-            VariableStateDto variable = variables.get(i);
-            String prefix = field + "[" + i + "]";
-            if (variable == null) {
-                errors.putIfAbsent(prefix, "Variable item cannot be null");
-                continue;
-            }
-            String name = trimToNull(variable.getName());
-            String value = trimToNull(variable.getValue());
-            if (name == null) {
-                errors.putIfAbsent(prefix + ".name", "Variable name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                errors.putIfAbsent(prefix + ".name", "Duplicate variable override: " + name);
-            }
-            if (value == null) {
-                errors.putIfAbsent(prefix + ".value", "Variable value is required");
-            }
-            validateNodeTrust(errors, prefix + ".trust", variable.getTrust());
-
-            DeviceManifest.InternalVariable manifestVariable = internalVariable(manifest, name);
-            if (manifestVariable == null) {
-                errors.putIfAbsent(prefix + ".name", "Unknown runtime variable for device template: " + name);
-            } else if (isEnvironmentVariable(manifestVariable)) {
-                errors.putIfAbsent(prefix + ".name",
-                        "Environment variable belongs to the board environment pool, not a device instance: " + name);
-            } else if (value != null) {
-                validateVariableValues(errors, prefix + ".value", manifestVariable, "=", value);
-            }
-        }
-    }
-
-    private void validateNodePrivacies(Map<String, String> errors,
-                                       String field,
-                                       List<PrivacyStateDto> privacies,
-                                       DeviceManifest manifest) {
-        if (privacies == null) {
-            return;
-        }
-        Set<String> seen = new HashSet<>();
-        for (int i = 0; i < privacies.size(); i++) {
-            PrivacyStateDto privacy = privacies.get(i);
-            String prefix = field + "[" + i + "]";
-            if (privacy == null) {
-                errors.putIfAbsent(prefix, "Privacy item cannot be null");
-                continue;
-            }
-            String name = trimToNull(privacy.getName());
-            String value = trimToNull(privacy.getPrivacy());
-            if (name == null) {
-                errors.putIfAbsent(prefix + ".name", "Privacy target name is required");
-                continue;
-            }
-            if (!seen.add(name)) {
-                errors.putIfAbsent(prefix + ".name", "Duplicate privacy override: " + name);
-            }
-            if (value == null) {
-                errors.putIfAbsent(prefix + ".privacy", "Privacy value is required");
-            } else {
-                validatePrivacyValues(errors, prefix + ".privacy", "=", value);
-            }
-            DeviceManifest.InternalVariable manifestVariable = internalVariable(manifest, name);
-            if (manifestVariable == null) {
-                errors.putIfAbsent(prefix + ".name",
-                        "Unknown device-local variable privacy target: " + name);
-            } else if (isEnvironmentVariable(manifestVariable)) {
-                errors.putIfAbsent(prefix + ".name",
-                        "Environment variable privacy belongs to the board environment pool, not a device instance: " + name);
-            }
-        }
-    }
-
     private void validateRuleSemantics(Map<String, String> errors,
                                        String field,
                                        RuleDto rule,
@@ -3725,7 +3471,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
         switch (targetType) {
             case "variable" -> {
-                DeviceManifest.InternalVariable variable = conditionSourceVariable(manifest, attribute);
+                DeviceManifest.InternalVariable variable = findConditionVariable(manifest, attribute);
                 if (variable == null) {
                     errors.putIfAbsent(field + ".attribute",
                             "Unknown internal variable for rule condition: " + attribute);
@@ -3818,7 +3564,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 // demands the choice on the authoring paths. See shared-value-semantics.md.
                 return;
             } else if ("environment".equals(variableSource)
-                    && !isEnvironmentVariable(internalVariable(manifest, key))) {
+                    && !isEnvironmentVariable(findDeclaredVariable(manifest, key))) {
                 errors.putIfAbsent(field + ".variableSource",
                         "variableSource=environment needs a shared variable, but '" + key
                                 + "' is declared IsInside=true and exists only inside this device. Ask "
@@ -3859,7 +3605,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 }
             }
             case "variable" -> {
-                DeviceManifest.InternalVariable variable = variableOrEnvKey(manifest, key);
+                DeviceManifest.InternalVariable variable = findConditionVariable(manifest, key);
                 if (variable == null) {
                     errors.putIfAbsent(field + ".key",
                             "Unknown internal or environment variable for specification: " + key);
@@ -3949,16 +3695,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             return null;
         }
         return relation;
-    }
-
-    private void validateEnumRelation(Map<String, String> errors,
-                                      String field,
-                                      String relation,
-                                      String label) {
-        if (!SmvRelationUtils.isEnumRelation(relation)) {
-            errors.putIfAbsent(field,
-                    label + " conditions support only =, !=, IN, and NOT_IN");
-        }
     }
 
     private void validateStateValues(Map<String, String> errors,
@@ -4054,119 +3790,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         }
     }
 
-    private void validateVariableValues(Map<String, String> errors,
-                                        String field,
-                                        DeviceManifest.InternalVariable variable,
-                                        String relation,
-                                        String rawValue) {
-        if (variable == null || !hasText(rawValue)) {
-            return;
-        }
-        List<String> candidates = ("in".equals(relation) || "not in".equals(relation))
-                ? SmvRelationUtils.splitRuleValues(rawValue)
-                : List.of(rawValue.trim());
-        if (candidates.isEmpty()) {
-            errors.putIfAbsent(field, "Variable condition value cannot be empty");
-            return;
-        }
-        if (("=".equals(relation) || "!=".equals(relation)) && candidates.size() != 1) {
-            errors.putIfAbsent(field, "Variable relation '" + relation + "' requires exactly one value");
-            return;
-        }
-
-        if (variable.getValues() != null && !variable.getValues().isEmpty()) {
-            validateEnumRelation(errors, field, relation, "enum variable");
-        }
-        ManifestConditionSemantics.ValueIssue issue =
-                ManifestConditionSemantics.firstInvalidVariableValue(variable, candidates);
-        if (issue == null) return;
-        String message = switch (issue.error()) {
-            case UNKNOWN_ENUM -> "Illegal enum value for variable '" + variable.getName() + "': " + issue.candidate();
-            case OUT_OF_RANGE -> "Variable value out of range for '" + variable.getName() + "': " + issue.candidate()
-                    + " (allowed " + variable.getLowerBound() + ".." + variable.getUpperBound() + ")";
-            case NOT_INTEGER -> "Variable value must be an integer for '" + variable.getName() + "': " + issue.candidate();
-        };
-        errors.putIfAbsent(field, message);
-    }
-
-    private boolean hasApi(DeviceManifest manifest, String apiName) {
-        return findApi(manifest, apiName) != null;
-    }
-
-    private boolean hasContent(DeviceManifest manifest, String contentName) {
-        if (manifest == null || manifest.getContents() == null || !hasText(contentName)) {
-            return false;
-        }
-        for (DeviceManifest.Content content : manifest.getContents()) {
-            if (content != null && contentName.trim().equals(content.getName())) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Existence of a variable a specification may reference by <em>property</em> (trust or privacy).
-     *
-     * <p>Deliberately capability-blind, unlike {@link #conditionSourceVariable}: the device module
-     * declares {@code trust_<name>} and {@code privacy_<name>} for every declared variable, so a trust
-     * label on an affect-only value is something the generated model really permits. Asking about a
-     * label is not reading the value. Narrowing this would reject a specification the model would have
-     * checked, which is the "stricter than the model" failure the backend rules call out.
-     */
-    private boolean hasInternalVariable(DeviceManifest manifest, String variableName) {
-        return internalVariable(manifest, variableName) != null;
-    }
-
-    private boolean hasVariableOrEnvKey(DeviceManifest manifest, String key) {
-        return variableOrEnvKey(manifest, key) != null;
-    }
-
-    private DeviceManifest.InternalVariable variableOrEnvKey(DeviceManifest manifest, String key) {
-        if (!hasText(key)) {
-            return null;
-        }
-        String normalized = key.trim();
-        return conditionSourceVariable(manifest, normalized);
-    }
-
-    /**
-     * Resolves a variable a rule or specification may name as a condition source.
-     *
-     * <p>Deliberately narrower than {@link #internalVariable}: it withholds an affect-only shared
-     * declaration ({@code Reads=false}), because the generator emits no {@code device.name := a_name}
-     * mirror for one, so a condition naming it would reference a value the device never observes.
-     * {@code internalVariable} stays capability-blind on purpose — its other callers ask whether a
-     * declaration <em>exists</em> (domain resolution, runtime overrides), where an affect-only
-     * declaration is a legitimate answer.
-     *
-     * <p>This is the persist-time gate, so it holds for every writer: the REST board endpoints, the
-     * assistant's rule and specification tools, and scene import alike. Without it a rule the UI
-     * refuses to build and the verification request validator refuses to run could still be stored.
-     */
-    private DeviceManifest.InternalVariable conditionSourceVariable(DeviceManifest manifest, String variableName) {
-        DeviceManifest.InternalVariable variable = internalVariable(manifest, variableName);
-        if (variable == null) {
-            return null;
-        }
-        boolean affectOnlyShared = !Boolean.TRUE.equals(variable.getIsInside())
-                && Boolean.FALSE.equals(variable.getReads());
-        return affectOnlyShared ? null : variable;
-    }
-
-    private DeviceManifest.InternalVariable internalVariable(DeviceManifest manifest, String variableName) {
-        if (manifest == null || manifest.getInternalVariables() == null || !hasText(variableName)) {
-            return null;
-        }
-        String normalized = variableName.trim();
-        for (DeviceManifest.InternalVariable variable : manifest.getInternalVariables()) {
-            if (variable != null && normalized.equals(variable.getName())) {
-                return variable;
-            }
-        }
-        return null;
-    }
-
     private boolean hasMode(DeviceManifest manifest, String modeName) {
         if (!hasText(modeName)) {
             return false;
@@ -4183,7 +3806,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             return;
         }
         if ("variable".equals(scope)) {
-            if (!hasInternalVariable(manifest, key)) {
+            if (findDeclaredVariable(manifest, key) == null) {
                 errors.putIfAbsent(field + ".key", "Unknown property variable for specification: " + key);
             }
             return;
@@ -4283,126 +3906,120 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public CollectionMutationResultDto<RuleDto> addRule(Long userId, RuleDto rule) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                RuleDto canonicalRule = canonicalizeRuleRelationsForStorage(rule);
-                requireRuleWithinDeclaredBounds(canonicalRule);
-                canonicalRule.setId(null); // new rule, let DB assign ID
-                List<RuleDto> nextRules = new ArrayList<>(getRulesInternal(userId));
-                requireAdditionalCapacity("rules", nextRules.size(), 1, RequestLimits.MAX_RULES);
-                nextRules.add(canonicalRule);
-                List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
-                validateNoIdenticalRules(userId, nextRules, currentNodes);
-                validateBoardReferences(userId, currentNodes, nextRules, null);
-                RulePo po = ruleMapper.toEntity(canonicalRule, userId);
-                // After deletions, execution_order has gaps — the list size is no longer the next available
-                // slot. Finding the maximum ensures the new rule sorts last, which is what the journal entry
-                // at nextRules.size() - 1 describes. Without this, a rule added after two deletions could sort
-                // before an existing rule, inverting their evaluation order — semantic, not cosmetic.
-                int maxOrder = ruleRepo.findByUserId(userId).stream()
-                        .filter(r -> r.getExecutionOrder() != null)
-                        .mapToInt(RulePo::getExecutionOrder)
-                        .max().orElse(-1);
-                po.setExecutionOrder(maxOrder + 1);
-                RulePo saved = ruleRepo.save(Objects.requireNonNull(po, "rule to save must not be null"));
-                RuleDto created = ruleMapper.toDto(saved);
-                editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.CREATE,
-                        String.valueOf(saved.getId()), null, created, nextRules.size() - 1);
-                return withUndoAvailability(userId,
-                        CollectionMutationResultDto.of("created", created, getRulesInternal(userId)));
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            RuleDto canonicalRule = canonicalizeRuleRelationsForStorage(rule);
+            requireRuleWithinDeclaredBounds(canonicalRule);
+            canonicalRule.setId(null); // new rule, let DB assign ID
+            List<RulePo> currentRules = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
+            List<RuleDto> nextRules = currentRules.stream()
+                    .map(ruleMapper::toDto)
+                    .collect(Collectors.toCollection(ArrayList::new));
+            requireAdditionalCapacity("rules", nextRules.size(), 1, RequestLimits.MAX_RULES);
+            nextRules.add(canonicalRule);
+            List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
+            validateNoIdenticalRules(userId, nextRules, currentNodes);
+            validateBoardReferences(userId, currentNodes, nextRules, null);
+            RulePo po = ruleMapper.toEntity(canonicalRule, userId);
+            // After deletions, execution_order has gaps — the list size is no longer the next available
+            // slot. Finding the maximum ensures the new rule sorts last, which is what the journal entry
+            // at nextRules.size() - 1 describes. Without this, a rule added after two deletions could sort
+            // before an existing rule, inverting their evaluation order — semantic, not cosmetic.
+            int maxOrder = currentRules.stream()
+                    .filter(r -> r.getExecutionOrder() != null)
+                    .mapToInt(RulePo::getExecutionOrder)
+                    .max().orElse(-1);
+            po.setExecutionOrder(maxOrder + 1);
+            RulePo saved = ruleRepo.save(Objects.requireNonNull(po, "rule to save must not be null"));
+            RuleDto created = ruleMapper.toDto(saved);
+            editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.CREATE,
+                    String.valueOf(saved.getId()), null, created, nextRules.size() - 1);
+            return withUndoAvailability(userId,
+                    CollectionMutationResultDto.of("created", created, getRulesInternal(userId)));
+        });
     }
 
     @Override
     public CollectionMutationResultDto<RuleDto> updateRuleIfUnchanged(
             Long userId, long ruleId, RuleDto expected, RuleDto desired) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (ruleId <= 0 || expected == null || desired == null
-                        || !Objects.equals(expected.getId(), ruleId) || !Objects.equals(desired.getId(), ruleId)) {
-                    throw new BadRequestException(
-                            "Expected and desired rule snapshots must identify the rule being edited.");
-                }
-                List<RulePo> records = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
-                RulePo record = records.stream().filter(rule -> Objects.equals(rule.getId(), ruleId))
-                        .findFirst().orElseThrow(() -> new ResourceNotFoundException("Rule", ruleId));
-                RuleDto before = ruleMapper.toDto(record);
-                if (!sameRuleDeletionSnapshot(expected, before)) {
-                    String message = "The rule changed before this edit. Refresh it before saving your changes.";
-                    throw new BoardContentConflictException("RULE_EDIT_STALE", message, Map.of("expected", message));
-                }
-                RuleDto canonical = canonicalizeRuleRelationsForStorage(desired);
-                requireRuleWithinDeclaredBounds(canonical);
-                List<RuleDto> current = records.stream().map(ruleMapper::toDto).toList();
-                int position = records.indexOf(record);
-                List<RuleDto> next = new ArrayList<>(current);
-                next.set(position, canonical);
-                List<DeviceNodeDto> nodes = getNodesInternal(userId);
-                validateNoIdenticalRules(userId, next, nodes);
-                validateBoardReferences(userId, nodes, next, null);
-                if (sameRuleDeletionSnapshot(before, canonical)) {
-                    return withUndoAvailability(userId,
-                            CollectionMutationResultDto.of("unchanged", before, current));
-                }
-                RulePo updated = ruleMapper.toEntity(canonical, userId);
-                updated.setCreatedAt(record.getCreatedAt());
-                updated.setExecutionOrder(record.getExecutionOrder());
-                RuleDto saved = ruleMapper.toDto(ruleRepo.save(updated));
-                editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.UPDATE,
-                        String.valueOf(ruleId), before, saved, position);
+        return withBoardWriteTransaction(userId, () -> {
+            if (ruleId <= 0 || expected == null || desired == null
+                    || !Objects.equals(expected.getId(), ruleId) || !Objects.equals(desired.getId(), ruleId)) {
+                throw new BadRequestException(
+                        "Expected and desired rule snapshots must identify the rule being edited.");
+            }
+            List<RulePo> records = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
+            RulePo record = records.stream().filter(rule -> Objects.equals(rule.getId(), ruleId))
+                    .findFirst().orElseThrow(() -> new ResourceNotFoundException("Rule", ruleId));
+            RuleDto before = ruleMapper.toDto(record);
+            if (!sameRuleDeletionSnapshot(expected, before)) {
+                String message = "The rule changed before this edit. Refresh it before saving your changes.";
+                throw new BoardContentConflictException("RULE_EDIT_STALE", message, Map.of("expected", message));
+            }
+            RuleDto canonical = canonicalizeRuleRelationsForStorage(desired);
+            requireRuleWithinDeclaredBounds(canonical);
+            List<RuleDto> current = records.stream().map(ruleMapper::toDto).toList();
+            int position = records.indexOf(record);
+            List<RuleDto> next = new ArrayList<>(current);
+            next.set(position, canonical);
+            List<DeviceNodeDto> nodes = getNodesInternal(userId);
+            validateNoIdenticalRules(userId, next, nodes);
+            validateBoardReferences(userId, nodes, next, null);
+            if (sameRuleDeletionSnapshot(before, canonical)) {
                 return withUndoAvailability(userId,
-                        CollectionMutationResultDto.of("updated", saved, getRulesInternal(userId)));
-            });
-        }
+                        CollectionMutationResultDto.of("unchanged", before, current));
+            }
+            RulePo updated = ruleMapper.toEntity(canonical, userId);
+            updated.setCreatedAt(record.getCreatedAt());
+            updated.setExecutionOrder(record.getExecutionOrder());
+            RuleDto saved = ruleMapper.toDto(ruleRepo.save(updated));
+            editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.UPDATE,
+                    String.valueOf(ruleId), before, saved, position);
+            return withUndoAvailability(userId,
+                    CollectionMutationResultDto.of("updated", saved, getRulesInternal(userId)));
+        });
     }
 
     @Override
     public CollectionMutationResultDto<RuleDto> reorderRules(
             Long userId, List<Long> expectedRuleIds, List<Long> ruleIds) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                List<RulePo> currentRecords = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
-                List<RuleDto> current = currentRecords.stream().map(ruleMapper::toDto).toList();
-                List<Long> currentIds = current.stream().map(RuleDto::getId).toList();
-                List<Long> expected = validatedRuleOrder(expectedRuleIds, "Expected rule execution order");
-                if (!currentIds.equals(expected)) {
-                    throw new ConflictException(
-                            "The rule execution order changed before this update. Refresh the board and try again.");
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            List<RulePo> currentRecords = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
+            List<RuleDto> current = currentRecords.stream().map(ruleMapper::toDto).toList();
+            List<Long> currentIds = current.stream().map(RuleDto::getId).toList();
+            List<Long> expected = validatedRuleOrder(expectedRuleIds, "Expected rule execution order");
+            if (!currentIds.equals(expected)) {
+                throw new ConflictException(
+                        "The rule execution order changed before this update. Refresh the board and try again.");
+            }
 
-                List<Long> requested = validatedRuleOrder(ruleIds, "Rule execution order");
-                Set<Long> uniqueRequested = new LinkedHashSet<>(requested);
+            List<Long> requested = validatedRuleOrder(ruleIds, "Rule execution order");
+            Set<Long> uniqueRequested = new LinkedHashSet<>(requested);
 
-                Map<Long, RuleDto> currentById = current.stream()
-                        .filter(Objects::nonNull)
-                        .filter(rule -> rule.getId() != null)
-                        .collect(Collectors.toMap(RuleDto::getId, rule -> rule, (first, ignored) -> first,
-                                LinkedHashMap::new));
-                if (requested.size() != current.size()
-                        || !currentById.keySet().equals(uniqueRequested)) {
-                    throw new ConflictException(
-                            "The rule list changed before its execution order was saved. Refresh the board and try again.");
-                }
-                if (requested.equals(expected)) {
-                    throw new BadRequestException(
-                            "Rule execution order must change at least one position.");
-                }
+            Map<Long, RuleDto> currentById = current.stream()
+                    .filter(Objects::nonNull)
+                    .filter(rule -> rule.getId() != null)
+                    .collect(Collectors.toMap(RuleDto::getId, rule -> rule, (first, ignored) -> first,
+                            LinkedHashMap::new));
+            if (requested.size() != current.size()
+                    || !currentById.keySet().equals(uniqueRequested)) {
+                throw new ConflictException(
+                        "The rule list changed before its execution order was saved. Refresh the board and try again.");
+            }
+            if (requested.equals(expected)) {
+                throw new BadRequestException(
+                        "Rule execution order must change at least one position.");
+            }
 
-                renumberSurvivingRules(currentRecords, requested, null);
-                List<RuleDto> saved = requested.stream().map(currentById::get).toList();
-                // Reversing a reorder means restoring the previous ordering, so the journal stores
-                // the id lists rather than a record snapshot. Same transaction as the write.
-                editJournal.record(userId, BoardEditEntityType.RULE_ORDER,
-                        BoardEditOperation.UPDATE, RULE_ORDER_ENTITY_KEY,
-                        new RuleOrderSnapshot(expected), new RuleOrderSnapshot(requested));
-                return withUndoAvailability(userId,
-                        CollectionMutationResultDto.of("reordered", null, saved));
-            });
-        }
+            renumberSurvivingRules(currentRecords, requested, null);
+            List<RuleDto> saved = requested.stream().map(currentById::get).toList();
+            // Reversing a reorder means restoring the previous ordering, so the journal stores
+            // the id lists rather than a record snapshot. Same transaction as the write.
+            editJournal.record(userId, BoardEditEntityType.RULE_ORDER,
+                    BoardEditOperation.UPDATE, RULE_ORDER_ENTITY_KEY,
+                    new RuleOrderSnapshot(expected), new RuleOrderSnapshot(requested));
+            return withUndoAvailability(userId,
+                    CollectionMutationResultDto.of("reordered", null, saved));
+        });
     }
 
     private List<Long> validatedRuleOrder(List<Long> ruleIds, String field) {
@@ -4432,19 +4049,14 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                                            List<DeviceTemplateDto> templates) {
         List<RuleDto> safeRules = rules == null ? List.of() : rules;
         Map<String, Integer> modeCounts = DeviceManifestModes.boardModeCounts(nodes, templates);
-        for (int left = 0; left < safeRules.size(); left++) {
-            RuleDto candidate = safeRules.get(left);
-            for (int right = 0; right < left; right++) {
-                RuleDto existing = safeRules.get(right);
-                if (RuleSemanticSignature.exactlyMatches(candidate, existing,
-                        device -> modeCounts.getOrDefault(device, 0))) {
-                    String reason = "The board cannot contain two identical automation rules: "
-                                    + describeRuleForUser(existing, nodes)
-                                    + ". Change the trigger or action, or remove the duplicate.";
-                    throw new BoardContentConflictException("DUPLICATE_RULE", reason,
-                            Map.of("rules[" + left + "]", reason));
-                }
-            }
+        var duplicate = RuleSemanticSignature.firstDuplicate(safeRules,
+                device -> modeCounts.getOrDefault(device, 0));
+        if (duplicate != null) {
+            String reason = "The board cannot contain two identical automation rules: "
+                    + describeRuleForUser(safeRules.get(duplicate.firstIndex()), nodes)
+                    + ". Change the trigger or action, or remove the duplicate.";
+            throw new BoardContentConflictException("DUPLICATE_RULE", reason,
+                    Map.of("rules[" + duplicate.duplicateIndex() + "]", reason));
         }
     }
 
@@ -4518,18 +4130,17 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                         Map.of("specs[" + index + "].id", reason));
             }
         }
-        for (int left = 0; left < safeSpecs.size(); left++) {
-            SpecificationDto candidate = safeSpecs.get(left);
-            for (int right = 0; right < left; right++) {
-                SpecificationDto existing = safeSpecs.get(right);
-                if (SpecificationSemanticSignature.exactlyMatches(candidate, existing,
-                        device -> modeCounts.getOrDefault(device, 0))) {
-                    String reason = "The board cannot contain two identical specifications: "
-                                    + describeSpecificationForUser(existing, nodes)
-                                    + ". Change a checked condition or remove the duplicate.";
-                    throw new BoardContentConflictException("DUPLICATE_SPECIFICATION", reason,
-                            Map.of("specs[" + left + "]", reason));
-                }
+        Map<SpecificationSemanticSignature.Signature, Integer> firstBySignature = new HashMap<>();
+        for (int index = 0; index < safeSpecs.size(); index++) {
+            var signature = SpecificationSemanticSignature.from(
+                    safeSpecs.get(index), device -> modeCounts.getOrDefault(device, 0));
+            Integer first = firstBySignature.putIfAbsent(signature, index);
+            if (first != null) {
+                String reason = "The board cannot contain two identical specifications: "
+                        + describeSpecificationForUser(safeSpecs.get(first), nodes)
+                        + ". Change a checked condition or remove the duplicate.";
+                throw new BoardContentConflictException("DUPLICATE_SPECIFICATION", reason,
+                        Map.of("specs[" + index + "]", reason));
             }
         }
     }
@@ -4569,35 +4180,32 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     @Override
     public CollectionMutationResultDto<RuleDto> removeRuleIfUnchanged(
             Long userId, long ruleId, RuleDto expected) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (expected == null) {
-                    throw new BadRequestException(
-                            "The confirmed rule snapshot is required for deletion.");
-                }
-                List<RulePo> existing = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
-                RulePo removed = existing.stream()
-                        .filter(rule -> rule.getId() != null && rule.getId() == ruleId)
-                        .findFirst()
-                        .orElseThrow(() -> new ResourceNotFoundException("Rule", ruleId));
-                RuleDto current = ruleMapper.toDto(removed);
-                if (!sameRuleDeletionSnapshot(expected, current)) {
-                    throw new ConflictException(
-                            "The rule changed after confirmation. Review the current rule before deleting it.");
-                }
-                ruleRepo.deleteById(ruleId);
-                // Same transaction as the delete: an undo entry that could commit without its
-                // edit (or the reverse) would describe a state that never existed.
-                // The position goes in the entry, not in RuleDto: undo must restore where the rule sat,
-                // because execution order decides which rule wins when guards overlap.
-                editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.DELETE,
-                        String.valueOf(ruleId), current, null, existing.indexOf(removed));
-                List<RuleDto> remaining = getRulesInternal(userId);
-                return withUndoAvailability(
-                        userId, CollectionMutationResultDto.of("deleted", current, remaining));
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            if (expected == null) {
+                throw new BadRequestException(
+                        "The confirmed rule snapshot is required for deletion.");
+            }
+            List<RulePo> existing = ruleRepo.findByUserIdOrderByExecutionOrderAscIdAsc(userId);
+            RulePo removed = existing.stream()
+                    .filter(rule -> rule.getId() != null && rule.getId() == ruleId)
+                    .findFirst()
+                    .orElseThrow(() -> new ResourceNotFoundException("Rule", ruleId));
+            RuleDto current = ruleMapper.toDto(removed);
+            if (!sameRuleDeletionSnapshot(expected, current)) {
+                throw new ConflictException(
+                        "The rule changed after confirmation. Review the current rule before deleting it.");
+            }
+            ruleRepo.deleteById(ruleId);
+            // Same transaction as the delete: an undo entry that could commit without its
+            // edit (or the reverse) would describe a state that never existed.
+            // The position goes in the entry, not in RuleDto: undo must restore where the rule sat,
+            // because execution order decides which rule wins when guards overlap.
+            editJournal.record(userId, BoardEditEntityType.RULE, BoardEditOperation.DELETE,
+                    String.valueOf(ruleId), current, null, existing.indexOf(removed));
+            List<RuleDto> remaining = getRulesInternal(userId);
+            return withUndoAvailability(
+                    userId, CollectionMutationResultDto.of("deleted", current, remaining));
+        });
     }
 
     @Override
@@ -4631,37 +4239,31 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public BoardEditHistoryClearPreviewDto previewBoardEditHistoryClear(Long userId) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                BoardEditHistoryState state = editJournal.historyState(userId);
-                return BoardEditHistoryClearPreviewDto.builder()
-                        .impactToken(state.impactToken())
-                        .entryCount(state.entryCount())
-                        .canUndo(state.availability().canUndo())
-                        .canRedo(state.availability().canRedo())
-                        .build();
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            BoardEditHistoryState state = editJournal.historyState(userId);
+            return BoardEditHistoryClearPreviewDto.builder()
+                    .impactToken(state.impactToken())
+                    .entryCount(state.entryCount())
+                    .canUndo(state.availability().canUndo())
+                    .canRedo(state.availability().canRedo())
+                    .build();
+        });
     }
 
     @Override
     public BoardUndoResultDto clearBoardEditHistory(Long userId, String expectedImpactToken) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                BoardEditHistoryState state = editJournal.historyState(userId);
-                if (!hasText(expectedImpactToken) || !MessageDigest.isEqual(
-                        state.impactToken().getBytes(StandardCharsets.UTF_8),
-                        expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
-                    throw new ConflictException(
-                            "Undo history changed after confirmation. Review it before clearing.");
-                }
-                editJournal.clear(userId);
-                return journalStatusResult(
-                        "HISTORY_CLEARED", BoardUndoAvailability.EMPTY);
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            BoardEditHistoryState state = editJournal.historyState(userId);
+            if (!hasText(expectedImpactToken) || !MessageDigest.isEqual(
+                    state.impactToken().getBytes(StandardCharsets.UTF_8),
+                    expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
+                throw new ConflictException(
+                        "Undo history changed after confirmation. Review it before clearing.");
+            }
+            editJournal.clear(userId);
+            return journalStatusResult(
+                    "HISTORY_CLEARED", BoardUndoAvailability.EMPTY);
+        });
     }
 
     private BoardUndoResultDto journalStatusResult(
@@ -4689,50 +4291,47 @@ public class BoardStorageServiceImpl implements BoardStorageService {
      * them.
      */
     private BoardUndoResultDto applyJournalDirection(Long userId, boolean undo, String expectedEditHistoryRevision) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                if (expectedEditHistoryRevision != null
-                        && !expectedEditHistoryRevision.equals(editJournal.availability(userId).editHistoryRevision())) {
-                    throw ConflictException.boardEditHistoryChanged();
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            if (expectedEditHistoryRevision != null
+                    && !expectedEditHistoryRevision.equals(editJournal.availability(userId).editHistoryRevision())) {
+                throw ConflictException.boardEditHistoryChanged();
+            }
 
-                BoardEditJournalPo entry = (undo
-                        ? editJournal.nextToUndo(userId)
-                        : editJournal.nextToRedo(userId)).orElse(null);
-                if (entry == null) {
-                    // Nothing left in that direction. Not an error: the user simply pressed the
-                    // shortcut once more than there is history.
-                    return journalResult(userId, false, null, null, "NOTHING_TO_APPLY");
-                }
+            BoardEditJournalPo entry = (undo
+                    ? editJournal.nextToUndo(userId)
+                    : editJournal.nextToRedo(userId)).orElse(null);
+            if (entry == null) {
+                // Nothing left in that direction. Not an error: the user simply pressed the
+                // shortcut once more than there is history.
+                return journalResult(userId, null, "NOTHING_TO_APPLY");
+            }
 
-                String targetJson = undo ? entry.getBeforeJson() : entry.getAfterJson();
-                String expectedJson = undo ? entry.getAfterJson() : entry.getBeforeJson();
+            String targetJson = undo ? entry.getBeforeJson() : entry.getAfterJson();
+            String expectedJson = undo ? entry.getAfterJson() : entry.getBeforeJson();
 
-                if (entry.getEntityType() == null || entry.getOperation() == null) {
-                    throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
-                }
-                switch (entry.getEntityType()) {
-                    case DEVICE -> applyDeviceJournalEntry(userId, entry, undo);
-                    case ENVIRONMENT -> applyEnvironmentJournalEntry(userId, entry, undo);
-                    case RULE -> applyRuleJournalEntry(userId, entry, targetJson, expectedJson);
-                    case SPECIFICATION ->
-                            applySpecJournalEntry(userId, entry, targetJson, expectedJson);
-                    case RULE_ORDER -> applyRuleOrderJournalEntry(userId, entry, undo);
-                    case RULE_SET -> applyRuleCollectionJournalEntry(userId, entry, undo);
-                }
+            if (entry.getEntityType() == null || entry.getOperation() == null) {
+                throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
+            }
+            switch (entry.getEntityType()) {
+                case DEVICE -> applyDeviceJournalEntry(userId, entry, undo);
+                case ENVIRONMENT -> applyEnvironmentJournalEntry(userId, entry, undo);
+                case RULE -> applyRuleJournalEntry(userId, entry, targetJson, expectedJson);
+                case SPECIFICATION ->
+                        applySpecJournalEntry(userId, entry, targetJson, expectedJson);
+                case RULE_ORDER -> applyRuleOrderJournalEntry(userId, entry, undo);
+                case RULE_SET -> applyRuleCollectionJournalEntry(userId, entry, undo);
+            }
 
-                editJournal.markUndone(entry, undo);
-                return journalResult(userId, true, entry, undo, undo ? "UNDONE" : "REDONE");
-            });
-        }
+            editJournal.markUndone(entry, undo);
+            return journalResult(userId, entry, undo ? "UNDONE" : "REDONE");
+        });
     }
 
     private BoardUndoResultDto journalResult(
-            Long userId, boolean applied, BoardEditJournalPo entry, Boolean undo, String reasonCode) {
+            Long userId, BoardEditJournalPo entry, String reasonCode) {
         BoardUndoAvailability availability = editJournal.availability(userId);
         BoardUndoResultDto result = new BoardUndoResultDto();
-        result.setApplied(applied);
+        result.setApplied(entry != null);
         result.setReasonCode(reasonCode);
         if (entry != null) {
             result.setEntityType(entry.getEntityType().name());
@@ -4926,20 +4525,27 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         Set<String> affectedSpecIds = unionSpecIds(target, expected);
 
         if (!matchesExpectedDevices(currentNodes, expected, affectedDeviceIds)
-                || !matchesExpectedRules(currentRules, expected, affectedRuleIds)
-                || !matchesExpectedSpecs(currentSpecs, expected, affectedSpecIds)
+                || !matchesExpectedPositionedEntries(currentRules, expected.getRules(), affectedRuleIds,
+                        RuleDto::getId, DeviceJournalSnapshot.RuleWithPosition::getRule,
+                        DeviceJournalSnapshot.RuleWithPosition::getPosition, this::sameRuleDeletionSnapshot)
+                || !matchesExpectedPositionedEntries(currentSpecs, expected.getSpecs(), affectedSpecIds,
+                        SpecificationDto::getId, DeviceJournalSnapshot.SpecWithPosition::getSpec,
+                        DeviceJournalSnapshot.SpecWithPosition::getPosition, Objects::equals)
                 || !environmentDtoMap(currentEnvironment)
                         .equals(environmentDtoMap(expected.getEnvironmentVariables()))) {
             throw new ConflictException(
                     "The Board changed after this device edit, so reversing it would discard newer work.");
         }
 
-        List<DeviceNodeDto> nextNodes = replacePositionedDevices(
-                currentNodes, affectedDeviceIds, target.getDevices());
-        List<RuleDto> nextRules = replacePositionedRules(
-                currentRules, affectedRuleIds, target.getRules());
-        List<SpecificationDto> nextSpecs = replacePositionedSpecs(
-                currentSpecs, affectedSpecIds, target.getSpecs());
+        List<DeviceNodeDto> nextNodes = replacePositionedEntries(
+                currentNodes, affectedDeviceIds, DeviceNodeDto::getId, target.getDevices(),
+                DeviceJournalSnapshot.DeviceWithPosition::getPosition, DeviceJournalSnapshot.DeviceWithPosition::getDevice);
+        List<RuleDto> nextRules = replacePositionedEntries(
+                currentRules, affectedRuleIds, RuleDto::getId, target.getRules(),
+                DeviceJournalSnapshot.RuleWithPosition::getPosition, DeviceJournalSnapshot.RuleWithPosition::getRule);
+        List<SpecificationDto> nextSpecs = replacePositionedEntries(
+                currentSpecs, affectedSpecIds, SpecificationDto::getId, target.getSpecs(),
+                DeviceJournalSnapshot.SpecWithPosition::getPosition, DeviceJournalSnapshot.SpecWithPosition::getSpec);
         target.getSpecs().forEach(item -> requireRestorableSpecification(item.getSpec()));
 
         requireTotalCapacity("devices", nextNodes.size(), RequestLimits.MAX_DEVICES);
@@ -5146,77 +4752,32 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 .allMatch(item -> sameDeviceForUndo(item.getValue(), currentById.get(item.getKey())));
     }
 
-    private boolean matchesExpectedRules(
-            List<RuleDto> current,
-            DeviceJournalSnapshot expected,
-            Set<Long> affectedIds) {
-        Map<Long, DeviceJournalSnapshot.RuleWithPosition> expectedById = expected.getRules().stream()
-                .collect(Collectors.toMap(item -> item.getRule().getId(), item -> item));
-        for (Long id : affectedIds) {
-            int currentPosition = indexOfRule(current, id);
-            DeviceJournalSnapshot.RuleWithPosition expectedItem = expectedById.get(id);
+    private <T, K, W> boolean matchesExpectedPositionedEntries(
+            List<T> current, List<W> expected, Set<K> affectedIds, Function<T, K> idOf,
+            Function<W, T> itemOf, ToIntFunction<W> positionOf, BiPredicate<T, T> sameSnapshot) {
+        Map<K, W> expectedById = expected.stream()
+                .collect(Collectors.toMap(entry -> idOf.apply(itemOf.apply(entry)), Function.identity()));
+        for (K id : affectedIds) {
+            int currentPosition = indexOfJournalItem(current, id, idOf);
+            W expectedItem = expectedById.get(id);
             if (expectedItem == null) {
                 if (currentPosition >= 0) return false;
-            } else if (currentPosition != expectedItem.getPosition()
-                    || !sameRuleDeletionSnapshot(expectedItem.getRule(), current.get(currentPosition))) {
+            } else if (currentPosition != positionOf.applyAsInt(expectedItem)
+                    || !sameSnapshot.test(itemOf.apply(expectedItem), current.get(currentPosition))) {
                 return false;
             }
         }
         return true;
     }
 
-    private boolean matchesExpectedSpecs(
-            List<SpecificationDto> current,
-            DeviceJournalSnapshot expected,
-            Set<String> affectedIds) {
-        Map<String, DeviceJournalSnapshot.SpecWithPosition> expectedById = expected.getSpecs().stream()
-                .collect(Collectors.toMap(item -> item.getSpec().getId(), item -> item));
-        for (String id : affectedIds) {
-            int currentPosition = indexOfSpecOrMissing(current, id);
-            DeviceJournalSnapshot.SpecWithPosition expectedItem = expectedById.get(id);
-            if (expectedItem == null) {
-                if (currentPosition >= 0) return false;
-            } else if (currentPosition != expectedItem.getPosition()
-                    || !Objects.equals(expectedItem.getSpec(), current.get(currentPosition))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private List<DeviceNodeDto> replacePositionedDevices(
-            List<DeviceNodeDto> current,
-            Set<String> affectedIds,
-            List<DeviceJournalSnapshot.DeviceWithPosition> target) {
-        List<DeviceNodeDto> next = current.stream()
-                .filter(node -> !affectedIds.contains(node.getId()))
+    private <T, K, W> List<T> replacePositionedEntries(
+            List<T> current, Set<K> affectedIds, Function<T, K> idOf,
+            List<W> target, ToIntFunction<W> positionOf, Function<W, T> itemOf) {
+        List<T> next = current.stream()
+                .filter(item -> !affectedIds.contains(idOf.apply(item)))
                 .collect(Collectors.toCollection(ArrayList::new));
-        target.stream().sorted(Comparator.comparingInt(DeviceJournalSnapshot.DeviceWithPosition::getPosition))
-                .forEach(item -> insertAtRecordedPosition(next, item.getPosition(), item.getDevice()));
-        return next;
-    }
-
-    private List<RuleDto> replacePositionedRules(
-            List<RuleDto> current,
-            Set<Long> affectedIds,
-            List<DeviceJournalSnapshot.RuleWithPosition> target) {
-        List<RuleDto> next = current.stream()
-                .filter(rule -> !affectedIds.contains(rule.getId()))
-                .collect(Collectors.toCollection(ArrayList::new));
-        target.stream().sorted(Comparator.comparingInt(DeviceJournalSnapshot.RuleWithPosition::getPosition))
-                .forEach(item -> insertAtRecordedPosition(next, item.getPosition(), item.getRule()));
-        return next;
-    }
-
-    private List<SpecificationDto> replacePositionedSpecs(
-            List<SpecificationDto> current,
-            Set<String> affectedIds,
-            List<DeviceJournalSnapshot.SpecWithPosition> target) {
-        List<SpecificationDto> next = current.stream()
-                .filter(spec -> !affectedIds.contains(spec.getId()))
-                .collect(Collectors.toCollection(ArrayList::new));
-        target.stream().sorted(Comparator.comparingInt(DeviceJournalSnapshot.SpecWithPosition::getPosition))
-                .forEach(item -> insertAtRecordedPosition(next, item.getPosition(), item.getSpec()));
+        target.stream().sorted(Comparator.comparingInt(positionOf))
+                .forEach(item -> insertAtRecordedPosition(next, positionOf.applyAsInt(item), itemOf.apply(item)));
         return next;
     }
 
@@ -5278,16 +4839,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
                 && Objects.equals(expected.getPrivacies(), current.getPrivacies());
     }
 
-    private int indexOfRule(List<RuleDto> rules, Long ruleId) {
-        for (int index = 0; index < rules.size(); index++) {
-            if (Objects.equals(rules.get(index).getId(), ruleId)) return index;
-        }
-        return -1;
-    }
-
-    private int indexOfSpecOrMissing(List<SpecificationDto> specs, String specId) {
-        for (int index = 0; index < specs.size(); index++) {
-            if (Objects.equals(specs.get(index).getId(), specId)) return index;
+    private <T, K> int indexOfJournalItem(List<T> items, K id, Function<T, K> idOf) {
+        for (int index = 0; index < items.size(); index++) {
+            if (Objects.equals(idOf.apply(items.get(index)), id)) return index;
         }
         return -1;
     }
@@ -5377,13 +4931,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         // Reinsert at the recorded position. getRulesInternal returns execution order, so the index is
         // a list position. A position that no longer fits is drift or malformed history, not permission
         // to append the rule to a semantically different execution order.
-        // Every DELETE entry records the position, so a missing one is a journal row written before the
-        // column existed. Appending instead would silently restore the rule to a different board —
-        // execution order decides which rule wins when guards overlap — so reject it rather than
-        // guessing (there is no released compatibility contract for pre-change development data).
-        if (entry.getEntityOrder() == null) {
-            throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
-        }
         int restoreAt = entry.getEntityOrder();
         insertAtRecordedPosition(nextRules, restoreAt, restored);
         List<DeviceNodeDto> currentNodes = getNodesInternal(userId);
@@ -5509,12 +5056,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             target.setId(specId);
             requireAdditionalCapacity(
                     "specifications", existing.size(), 1, RequestLimits.MAX_SPECS);
-            // Reinsert at the recorded list position. As in applyRuleJournalEntry, a missing or
-            // impossible position is not safe to reinterpret as append: that would report success for
-            // a different ordered collection.
-            if (entry.getEntityOrder() == null) {
-                throw new ConflictException(UNREADABLE_JOURNAL_ENTRY_MESSAGE);
-            }
             insertAtRecordedPosition(existing, entry.getEntityOrder(), target);
             validateBoardReferences(userId, currentNodes, null, existing);
         }
@@ -5531,6 +5072,7 @@ public class BoardStorageServiceImpl implements BoardStorageService {
     }
 
     private boolean validSingleRecordJournalTransition(BoardEditJournalPo entry) {
+        // A recorded list position is required to restore the original rule or specification order.
         if (entry.getEntityOrder() == null || entry.getEntityOrder() < 0) return false;
         boolean hasBefore = hasText(entry.getBeforeJson());
         boolean hasAfter = hasText(entry.getAfterJson());
@@ -5675,12 +5217,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public DeviceTemplateDeletionResultDto previewDeviceTemplateDeletion(Long userId, Long templateId) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                return buildTemplateDeletionPlan(userId, templateId).preview();
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            return buildTemplateDeletionPlan(userId, templateId).preview();
+        });
     }
 
     @Override
@@ -5689,42 +5228,39 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (!hasText(expectedImpactToken)) {
             throw new BadRequestException("Template-deletion impact token is required.");
         }
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                DeviceTemplateDeletionPlan plan = buildTemplateDeletionPlan(userId, templateId);
-                DeviceTemplateDeletionResultDto preview = plan.preview();
-                if (!MessageDigest.isEqual(
-                        preview.getImpactToken().getBytes(StandardCharsets.UTF_8),
-                        expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
-                    throw new TemplateDeletionConflictException(
-                            "TEMPLATE_DELETION_PREVIEW_STALE",
-                            "The device type, its usage, or undo history changed after preview. "
-                                    + "Review the current impact before deleting.",
-                            preview);
-                }
-                if (!preview.isCanDelete()) {
-                    throw new TemplateDeletionConflictException(
-                            "TEMPLATE_DELETION_BLOCKED",
-                            "This device type is still used by canvas devices.",
-                            preview);
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            DeviceTemplateDeletionPlan plan = buildTemplateDeletionPlan(userId, templateId);
+            DeviceTemplateDeletionResultDto preview = plan.preview();
+            if (!MessageDigest.isEqual(
+                    preview.getImpactToken().getBytes(StandardCharsets.UTF_8),
+                    expectedImpactToken.trim().getBytes(StandardCharsets.UTF_8))) {
+                throw new TemplateDeletionConflictException(
+                        "TEMPLATE_DELETION_PREVIEW_STALE",
+                        "The device type, its usage, or undo history changed after preview. "
+                                + "Review the current impact before deleting.",
+                        preview);
+            }
+            if (!preview.isCanDelete()) {
+                throw new TemplateDeletionConflictException(
+                        "TEMPLATE_DELETION_BLOCKED",
+                        "This device type is still used by canvas devices.",
+                        preview);
+            }
 
-                deviceTemplateRepo.delete(plan.templatePo());
-                deviceTemplateRepo.flush();
-                editJournal.clear(userId);
-                return DeviceTemplateDeletionResultDto.builder()
-                        .operation("deleted")
-                        .impactToken(preview.getImpactToken())
-                        .canDelete(true)
-                        .editHistoryEntryCount(preview.getEditHistoryEntryCount())
-                        .template(preview.getTemplate())
-                        .deletedTemplate(preview.getTemplate())
-                        .blockers(List.of())
-                        .currentTemplates(getDeviceTemplatesInternal(userId))
-                        .build();
-            });
-        }
+            deviceTemplateRepo.delete(plan.templatePo());
+            deviceTemplateRepo.flush();
+            editJournal.clear(userId);
+            return DeviceTemplateDeletionResultDto.builder()
+                    .operation("deleted")
+                    .impactToken(preview.getImpactToken())
+                    .canDelete(true)
+                    .editHistoryEntryCount(preview.getEditHistoryEntryCount())
+                    .template(preview.getTemplate())
+                    .deletedTemplate(preview.getTemplate())
+                    .blockers(List.of())
+                    .currentTemplates(getDeviceTemplatesInternal(userId))
+                    .build();
+        });
     }
 
     private DeviceTemplateDeletionPlan buildTemplateDeletionPlan(Long userId, Long templateId) {
@@ -5734,49 +5270,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         DeviceTemplatePo po = deviceTemplateRepo.findByIdAndUserId(templateId, userId)
                 .orElseThrow(() -> new ResourceNotFoundException("Template", templateId));
 
-        DeviceTemplateDto target = deviceTemplateMapper.toDto(po);
-        List<DeviceTemplateDeletionBlockerDto> blockers = nodeRepo.findByUserId(userId).stream()
-                .filter(Objects::nonNull)
-                .filter(node -> hasText(node.getTemplateName())
-                        && node.getTemplateName().trim().equalsIgnoreCase(po.getName()))
-                .sorted(Comparator.comparing(DeviceNodePo::getId, Comparator.nullsLast(String.CASE_INSENSITIVE_ORDER)))
-                .map(node -> DeviceTemplateDeletionBlockerDto.builder()
-                        .reasonCode("DEVICE_INSTANCE_USES_TEMPLATE")
-                        .itemId(node.getId())
-                        .itemLabel(firstText(node.getLabel(), node.getId()))
-                        .reason("This canvas device instance uses the device type.")
-                        .build())
-                .toList();
-        List<DeviceTemplateDto> currentTemplates = getDeviceTemplatesInternal(userId);
-        BoardEditHistoryState editHistory = editJournal.historyState(userId);
-        String impactToken = templateDeletionImpactToken(target, blockers, editHistory);
-        DeviceTemplateDeletionResultDto preview = DeviceTemplateDeletionResultDto.builder()
-                .operation("preview")
-                .impactToken(impactToken)
-                .canDelete(blockers.isEmpty())
-                .editHistoryEntryCount(editHistory.entryCount())
-                .template(target)
-                .blockers(blockers)
-                .currentTemplates(currentTemplates)
-                .build();
+        DeviceTemplateDeletionResultDto preview = BoardTemplateImpact.previewDeletion(
+                deviceTemplateMapper.toDto(po), nodeRepo.findByUserId(userId),
+                getDeviceTemplatesInternal(userId), editJournal.historyState(userId));
         return new DeviceTemplateDeletionPlan(po, preview);
-    }
-
-    private String templateDeletionImpactToken(
-            DeviceTemplateDto template,
-            List<DeviceTemplateDeletionBlockerDto> blockers,
-            BoardEditHistoryState editHistory) {
-        Map<String, Object> impact = new LinkedHashMap<>();
-        impact.put("contract", "device-template-deletion-v2");
-        impact.put("template", template);
-        impact.put("blockers", blockers != null ? blockers : List.of());
-        impact.put("editHistoryImpactToken", editHistory.impactToken());
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(JsonUtils.toJson(impact).getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new InternalServerException("Unable to create template-deletion impact token", e);
-        }
     }
 
     private record DeviceTemplateDeletionPlan(
@@ -5785,12 +5282,9 @@ public class BoardStorageServiceImpl implements BoardStorageService {
 
     @Override
     public DefaultTemplateResetResultDto previewDefaultTemplateReset(Long userId) {
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                return buildDefaultTemplateResetPlan(userId).preview();
-            });
-        }
+        return withBoardWriteTransaction(userId, () -> {
+            return buildDefaultTemplateResetPlan(userId).preview();
+        });
     }
 
     @Override
@@ -5798,70 +5292,67 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         if (!hasText(expectedImpactToken)) {
             throw new BadRequestException("Default-template reset impact token is required.");
         }
-        synchronized (getUserWriteLock(userId)) {
-            return transactionTemplate.execute(status -> {
-                requireActiveUserForWrite(userId);
-                DefaultTemplateResetPlan plan = buildDefaultTemplateResetPlan(userId);
-                if (!Objects.equals(plan.preview().getImpactToken(), expectedImpactToken.trim())) {
-                    throw new ConflictException(
-                            "The device types, board, or undo history changed after the reset preview. "
-                                    + "Review the current impact before resetting.");
-                }
-                if (!plan.validationErrors().isEmpty()) {
-                    throw new ValidationException(plan.validationErrors());
-                }
+        return withBoardWriteTransaction(userId, () -> {
+            DefaultTemplateResetPlan plan = buildDefaultTemplateResetPlan(userId);
+            if (!Objects.equals(plan.preview().getImpactToken(), expectedImpactToken.trim())) {
+                throw new ConflictException(
+                        "The device types, board, or undo history changed after the reset preview. "
+                                + "Review the current impact before resetting.");
+            }
+            if (!plan.validationErrors().isEmpty()) {
+                throw new ValidationException(plan.validationErrors());
+            }
 
-                Set<String> defaultNames = plan.defaultDefinitions().stream()
-                        .map(DeviceTemplatePo::getName)
-                        .filter(this::hasText)
-                        .map(name -> name.trim().toLowerCase(Locale.ROOT))
-                        .collect(Collectors.toCollection(LinkedHashSet::new));
-                int deleted = deviceTemplateRepo.deleteDefaultsForReset(userId, List.copyOf(defaultNames));
-                List<DeviceTemplatePo> savedDefaults = deviceTemplateRepo.saveAllAndFlush(
-                        plan.defaultDefinitions());
-                if (savedDefaults.size() != plan.defaultDefinitions().size()) {
-                    throw new InternalServerException(
-                            "Default device type reset was incomplete; the transaction was rolled back.");
-                }
-                log.info("Reset default templates for user {}: deleted {}, imported {}",
-                        userId, deleted, savedDefaults.size());
+            Set<String> defaultNames = plan.defaultDefinitions().stream()
+                    .map(DeviceTemplatePo::getName)
+                    .filter(this::hasText)
+                    .map(name -> name.trim().toLowerCase(Locale.ROOT))
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            int deleted = deviceTemplateRepo.deleteDefaultsForReset(userId, List.copyOf(defaultNames));
+            List<DeviceTemplatePo> savedDefaults = deviceTemplateRepo.saveAllAndFlush(
+                    plan.defaultDefinitions());
+            if (savedDefaults.size() != plan.defaultDefinitions().size()) {
+                throw new InternalServerException(
+                        "Default device type reset was incomplete; the transaction was rolled back.");
+            }
+            log.info("Reset default templates for user {}: deleted {}, imported {}",
+                    userId, deleted, savedDefaults.size());
 
-                for (DeviceTemplatePo saved : savedDefaults) {
-                    DeviceTemplateDto dto = deviceTemplateMapper.toDto(saved);
-                    templateNuSmvValidator.validateTemplateManifestForNuSmv(dto.getName(), dto.getManifest());
-                    templateNuSmvValidator.runTemplateNuSmvPrecheck(userId, dto.getName(), dto.getManifest());
-                }
+            for (DeviceTemplatePo saved : savedDefaults) {
+                DeviceTemplateDto dto = deviceTemplateMapper.toDto(saved);
+                templateNuSmvValidator.validateTemplateManifestForNuSmv(dto.getName(), dto.getManifest());
+                templateNuSmvValidator.runTemplateNuSmvPrecheck(userId, dto.getName(), dto.getManifest());
+            }
 
-                if (!plan.nodesToUpdate().isEmpty()) {
-                    nodeRepo.saveAll(plan.nodesToUpdate().stream()
-                            .map(node -> deviceNodeMapper.toEntity(node, userId))
-                            .toList());
-                }
-                List<DeviceNodeDto> nodes = getNodesInternal(userId);
-                validateBoardReferences(userId, nodes, getRulesInternal(userId), getSpecsInternal(userId));
-                List<BoardEnvironmentVariableDto> savedEnvironment =
-                        replaceEnvironmentVariablesInternal(userId, plan.projectedEnvironment());
-                List<DeviceTemplateDto> currentTemplates = deviceTemplateRepo.findByUserId(userId).stream()
-                        .map(deviceTemplateMapper::toDto)
-                        .toList();
-                editJournal.clear(userId);
+            if (!plan.nodesToUpdate().isEmpty()) {
+                nodeRepo.saveAll(plan.nodesToUpdate().stream()
+                        .map(node -> deviceNodeMapper.toEntity(node, userId))
+                        .toList());
+            }
+            List<DeviceNodeDto> nodes = getNodesInternal(userId);
+            validateBoardReferences(userId, nodes, getRulesInternal(userId), getSpecsInternal(userId));
+            List<BoardEnvironmentVariableDto> savedEnvironment =
+                    replaceEnvironmentVariablesInternal(userId, plan.projectedEnvironment());
+            List<DeviceTemplateDto> currentTemplates = deviceTemplateRepo.findByUserId(userId).stream()
+                    .map(deviceTemplateMapper::toDto)
+                    .toList();
+            editJournal.clear(userId);
 
-                DefaultTemplateResetResultDto preview = plan.preview();
-                return DefaultTemplateResetResultDto.builder()
-                        .operation("reset")
-                        .impactToken(preview.getImpactToken())
-                        .canApply(true)
-                        .editHistoryEntryCount(preview.getEditHistoryEntryCount())
-                        .templateChanges(preview.getTemplateChanges())
-                        .affectedDevices(preview.getAffectedDevices())
-                        .blockers(List.of())
-                        .environmentChanges(preview.getEnvironmentChanges())
-                        .currentTemplates(currentTemplates)
-                        .currentNodes(nodes)
-                        .environmentVariables(savedEnvironment)
-                        .build();
-            });
-        }
+            DefaultTemplateResetResultDto preview = plan.preview();
+            return DefaultTemplateResetResultDto.builder()
+                    .operation("reset")
+                    .impactToken(preview.getImpactToken())
+                    .canApply(true)
+                    .editHistoryEntryCount(preview.getEditHistoryEntryCount())
+                    .templateChanges(preview.getTemplateChanges())
+                    .affectedDevices(preview.getAffectedDevices())
+                    .blockers(List.of())
+                    .environmentChanges(preview.getEnvironmentChanges())
+                    .currentTemplates(currentTemplates)
+                    .currentNodes(nodes)
+                    .environmentVariables(savedEnvironment)
+                    .build();
+        });
     }
 
     private DefaultTemplateResetPlan buildDefaultTemplateResetPlan(Long userId) {
@@ -6019,10 +5510,10 @@ public class BoardStorageServiceImpl implements BoardStorageService {
             e.getErrors().forEach(validationErrors::putIfAbsent);
         }
 
-        List<DefaultTemplateResetBlockerDto> blockers = resetBlockers(
+        List<DefaultTemplateResetBlockerDto> blockers = BoardTemplateImpact.resetBlockers(
                 validationErrors, nodes, rules, specs);
         BoardEditHistoryState editHistory = editJournal.historyState(userId);
-        String impactToken = defaultTemplateResetImpactToken(
+        String impactToken = BoardTemplateImpact.resetImpactToken(
                 currentTemplates, defaultDtos, nodes, rules, specs, previousEnvironment,
                 changes, affectedDevices, environmentChanges, validationErrors, editHistory);
 
@@ -6181,104 +5672,6 @@ public class BoardStorageServiceImpl implements BoardStorageService {
         return manifests;
     }
 
-    private List<DefaultTemplateResetBlockerDto> resetBlockers(
-            Map<String, String> errors,
-            List<DeviceNodeDto> nodes,
-            List<RuleDto> rules,
-            List<SpecificationDto> specs) {
-        if (errors == null || errors.isEmpty()) {
-            return List.of();
-        }
-        LinkedHashMap<String, DefaultTemplateResetBlockerDto> blockers = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : errors.entrySet()) {
-            String reasonCode = resetBlockerReasonCode(entry.getKey());
-            String label = "ENVIRONMENT_POOL_INCOMPATIBLE".equals(reasonCode)
-                    ? "Environment Pool" : resetBlockerLabel(entry.getKey(), nodes, rules, specs);
-            String key = label + "\n" + entry.getValue();
-            blockers.putIfAbsent(key, DefaultTemplateResetBlockerDto.builder()
-                    .itemLabel(label)
-                    .reasonCode(reasonCode)
-                    .reason(entry.getValue())
-                    .build());
-        }
-        return List.copyOf(blockers.values());
-    }
-
-    private String resetBlockerReasonCode(String field) {
-        String normalized = field == null ? "" : field.trim().toLowerCase(Locale.ROOT);
-        if (normalized.startsWith("nodes[")) return "DEVICE_INSTANCE_INCOMPATIBLE";
-        if (normalized.startsWith("rules[")) return "AUTOMATION_RULE_INCOMPATIBLE";
-        if (normalized.startsWith("specs[") || normalized.startsWith("specifications[")) {
-            return "SPECIFICATION_INCOMPATIBLE";
-        }
-        if ("environmentvariables".equals(normalized)
-                || normalized.startsWith("environmentvariables[") || normalized.startsWith("environment.")) {
-            return "ENVIRONMENT_POOL_INCOMPATIBLE";
-        }
-        return "BOARD_MODEL_INCOMPATIBLE";
-    }
-
-    private String resetBlockerLabel(String field,
-                                     List<DeviceNodeDto> nodes,
-                                     List<RuleDto> rules,
-                                     List<SpecificationDto> specs) {
-        java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("^(nodes|rules|specs)\\[(\\d+)]")
-                .matcher(field == null ? "" : field);
-        if (!matcher.find()) {
-            return "Board model";
-        }
-        int index = Integer.parseInt(matcher.group(2));
-        return switch (matcher.group(1)) {
-            case "nodes" -> index < nodes.size() && nodes.get(index) != null
-                    ? "Device: " + firstText(nodes.get(index).getLabel(), nodes.get(index).getTemplateName())
-                    : "Device";
-            case "rules" -> index < rules.size() && rules.get(index) != null
-                    ? "Rule: " + firstText(rules.get(index).getRuleString(), "Rule " + (index + 1))
-                    : "Rule " + (index + 1);
-            case "specs" -> index < specs.size() && specs.get(index) != null
-                    ? "Specification: " + specs.get(index).getName()
-                    : "Specification " + (index + 1);
-            default -> "Board model";
-        };
-    }
-
-    private String firstText(String preferred, String fallback) {
-        return hasText(preferred) ? preferred.trim() : (hasText(fallback) ? fallback.trim() : "Unknown item");
-    }
-
-    private String defaultTemplateResetImpactToken(
-            List<DeviceTemplateDto> currentTemplates,
-            List<DeviceTemplateDto> defaultTemplates,
-            List<DeviceNodeDto> nodes,
-            List<RuleDto> rules,
-            List<SpecificationDto> specs,
-            List<BoardEnvironmentVariableDto> environment,
-            List<DefaultTemplateResetChangeDto> changes,
-            List<DefaultTemplateAffectedDeviceDto> affectedDevices,
-            List<EnvironmentVariableChangeDto> environmentChanges,
-            Map<String, String> validationErrors,
-            BoardEditHistoryState editHistory) {
-        Map<String, Object> impact = new LinkedHashMap<>();
-        impact.put("contract", "default-template-reset-v2");
-        impact.put("currentTemplates", currentTemplates);
-        impact.put("defaultTemplates", defaultTemplates);
-        impact.put("nodes", nodes);
-        impact.put("rules", rules);
-        impact.put("specifications", specs);
-        impact.put("environmentVariables", environment);
-        impact.put("templateChanges", changes);
-        impact.put("affectedDevices", affectedDevices);
-        impact.put("environmentChanges", environmentChanges);
-        impact.put("validationErrors", validationErrors);
-        impact.put("editHistoryImpactToken", editHistory.impactToken());
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(JsonUtils.toJson(impact).getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new InternalServerException("Unable to create default-template reset impact token", e);
-        }
-    }
 
     private record DefaultTemplateResetPlan(
             DefaultTemplateResetResultDto preview,

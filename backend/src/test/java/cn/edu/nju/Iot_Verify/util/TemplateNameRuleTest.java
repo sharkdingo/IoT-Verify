@@ -5,7 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -16,34 +17,34 @@ class TemplateNameRuleTest {
 
     @Test
     void acceptsOrdinaryAsciiNames() {
-        assertTrue(TemplateNameRule.isSafe("Smoke Sensor"));
-        assertTrue(TemplateNameRule.isSafe("AC-2 (living room)"));
+        assertNull(TemplateNameRule.rejectionReason("Smoke Sensor"));
+        assertNull(TemplateNameRule.rejectionReason("AC-2 (living room)"));
     }
 
     @Test
     void acceptsCaselessScripts() {
         // These have no case, so lowercasing is the identity in both engines. Rejecting them was a
         // pure usability loss: device labels on the same board already accept any Unicode.
-        assertTrue(TemplateNameRule.isSafe("温度传感器"), "Chinese template names are legitimate");
-        assertTrue(TemplateNameRule.isSafe("エアコン"), "Japanese template names are legitimate");
-        assertTrue(TemplateNameRule.isSafe("스모크 센서"), "Korean template names are legitimate");
+        assertNull(TemplateNameRule.rejectionReason("温度传感器"), "Chinese template names are legitimate");
+        assertNull(TemplateNameRule.rejectionReason("エアコン"), "Japanese template names are legitimate");
+        assertNull(TemplateNameRule.rejectionReason("스모크 센서"), "Korean template names are legitimate");
     }
 
     @Test
     void stillRejectsCasedNonAsciiLetters() {
         // The actual parity risk: a cased letter outside ASCII may fold differently in MySQL.
-        assertFalse(TemplateNameRule.isSafe("Wärmepumpe"));
-        assertFalse(TemplateNameRule.isSafe("İstanbul"));
-        assertFalse(TemplateNameRule.isSafe("ẛ"));
+        assertNotNull(TemplateNameRule.rejectionReason("Wärmepumpe"));
+        assertNotNull(TemplateNameRule.rejectionReason("İstanbul"));
+        assertNotNull(TemplateNameRule.rejectionReason("ẛ"));
     }
 
     @Test
     void rejectsControlCharactersAndEmptyNames() {
-        assertFalse(TemplateNameRule.isSafe(null));
-        assertFalse(TemplateNameRule.isSafe(""));
-        assertFalse(TemplateNameRule.isSafe("Heater\tunit"));
-        assertFalse(TemplateNameRule.isSafe("Heater\nunit"));
-        assertTrue(TemplateNameRule.isSafe("Heater unit"), "a plain space is allowed");
+        assertNotNull(TemplateNameRule.rejectionReason(null));
+        assertNotNull(TemplateNameRule.rejectionReason(""));
+        assertNotNull(TemplateNameRule.rejectionReason("Heater\tunit"));
+        assertNotNull(TemplateNameRule.rejectionReason("Heater\nunit"));
+        assertNull(TemplateNameRule.rejectionReason("Heater unit"), "a plain space is allowed");
     }
 
     @Test

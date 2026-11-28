@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.dto.simulation;
 
+import cn.edu.nju.Iot_Verify.dto.model.TaskToolState;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelSemanticsDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelRunSnapshotDto;
@@ -20,7 +21,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class SimulationTaskDto {
+public class SimulationTaskDto implements TaskToolState {
 
     private Long id;
     private RunInitiator initiator;

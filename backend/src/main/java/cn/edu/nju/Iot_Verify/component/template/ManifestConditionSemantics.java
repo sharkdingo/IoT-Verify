@@ -2,6 +2,8 @@ package cn.edu.nju.Iot_Verify.component.template;
 
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.data.DeviceSmvDataFactory;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
+import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.util.SmvIntegerLiteral;
 
 import java.util.HashSet;
@@ -59,6 +61,45 @@ public final class ManifestConditionSemantics {
     /** Canonical case for the Boolean literal text of an API specification condition. */
     public static String canonicalApiSignalValue(String value) {
         return value == null ? null : value.trim().toUpperCase(Locale.ROOT);
+    }
+
+    public static boolean specificationRequiresPrivacy(SpecificationDto spec) {
+        return spec != null && (hasPrivacyCondition(spec.getAConditions())
+                || hasPrivacyCondition(spec.getIfConditions())
+                || hasPrivacyCondition(spec.getThenConditions()));
+    }
+
+    private static boolean hasPrivacyCondition(List<SpecConditionDto> conditions) {
+        return conditions != null && conditions.stream().anyMatch(condition -> condition != null
+                && condition.getTargetType() != null && "privacy".equalsIgnoreCase(condition.getTargetType().trim()));
+    }
+
+    /** Whether a change matches an observable API route. Each vector has one normalized token per mode. */
+    public static boolean signalMayObserveChange(
+            List<String> signalStarts, List<String> signalEnds,
+            List<String> changeStarts, List<String> changeEnds) {
+        boolean observedChangePossible = false;
+        for (int i = 0; i < signalEnds.size(); i++) {
+            String signalStart = signalStarts.get(i);
+            String changeStart = changeStarts.get(i);
+            if (!signalStart.isEmpty() && !changeStart.isEmpty() && !signalStart.equals(changeStart)) {
+                return false;
+            }
+
+            String signalEnd = signalEnds.get(i);
+            if (signalEnd.isEmpty()) continue;
+            String changeEnd = changeEnds.get(i);
+            String fixedStart = !signalStart.isEmpty() ? signalStart : changeStart;
+            if (!changeEnd.isEmpty()) {
+                if (!signalEnd.equals(changeEnd)) return false;
+                if (fixedStart.isEmpty() || !fixedStart.equals(signalEnd)) {
+                    observedChangePossible = true;
+                }
+            } else if (!fixedStart.isEmpty() && !fixedStart.equals(signalEnd)) {
+                return false;
+            }
+        }
+        return observedChangePossible;
     }
 
     public static boolean isLegalState(String rawCandidate, List<String> modes,
@@ -130,10 +171,22 @@ public final class ManifestConditionSemantics {
         return findSignalApi(manifest, apiName) != null;
     }
 
+    public static boolean hasContent(DeviceManifest manifest, String contentName) {
+        if (manifest == null || manifest.getContents() == null || !hasText(contentName)) return false;
+        String target = contentName.trim();
+        return manifest.getContents().stream()
+                .anyMatch(content -> content != null && target.equals(content.getName()));
+    }
+
     public static DeviceManifest.InternalVariable findDeclaredVariable(DeviceManifest manifest, String name) {
-        if (manifest == null || manifest.getInternalVariables() == null || !hasText(name)) return null;
+        return findDeclaredVariableIn(manifest == null ? null : manifest.getInternalVariables(), name);
+    }
+
+    public static DeviceManifest.InternalVariable findDeclaredVariableIn(
+            List<DeviceManifest.InternalVariable> variables, String name) {
+        if (variables == null || !hasText(name)) return null;
         String target = name.trim();
-        return manifest.getInternalVariables().stream()
+        return variables.stream()
                 .filter(variable -> variable != null && target.equals(variable.getName()))
                 .findFirst().orElse(null);
     }
@@ -141,10 +194,12 @@ public final class ManifestConditionSemantics {
     /** Affect-only shared declarations have labels, but no device reading usable by value conditions. */
     public static DeviceManifest.InternalVariable findConditionVariable(DeviceManifest manifest, String name) {
         DeviceManifest.InternalVariable variable = findDeclaredVariable(manifest, name);
-        if (variable == null) return null;
-        boolean affectOnlyShared = !Boolean.TRUE.equals(variable.getIsInside())
-                && Boolean.FALSE.equals(variable.getReads());
-        return affectOnlyShared ? null : variable;
+        return canReadConditionValue(variable) ? variable : null;
+    }
+
+    public static boolean canReadConditionValue(DeviceManifest.InternalVariable variable) {
+        return variable != null
+                && (Boolean.TRUE.equals(variable.getIsInside()) || !Boolean.FALSE.equals(variable.getReads()));
     }
 
     public static boolean matchesLiteral(String candidate, Set<String> allowed) {

@@ -24,7 +24,4 @@ public interface PaperEventDomain {
                 .materializeInitialValues(initializationNonce);
     }
 
-    default List<PaperEvent> materializeInitialState(long initializationNonce) {
-        return PaperEventDomainSnapshot.copyOf(this).materializeInitialState(initializationNonce);
-    }
 }

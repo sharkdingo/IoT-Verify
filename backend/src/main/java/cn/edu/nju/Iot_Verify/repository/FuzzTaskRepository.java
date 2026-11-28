@@ -87,8 +87,6 @@ public interface FuzzTaskRepository extends JpaRepository<FuzzTaskPo, Long>, Dat
     Optional<FuzzTaskProgressProjection> findProgressByIdAndUserId(
             @Param("taskId") Long taskId, @Param("userId") Long userId);
 
-    List<FuzzTaskPo> findByUserIdAndStatus(Long userId, FuzzTaskPo.TaskStatus status);
-
     long countByUserId(Long userId);
 
     long countByUserIdAndStatusIn(Long userId, List<FuzzTaskPo.TaskStatus> statuses);

@@ -7,11 +7,11 @@ import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvDeviceModuleBui
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvMainModuleBuilder;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvRuleCommentWriter;
 import cn.edu.nju.Iot_Verify.component.nusmv.generator.module.SmvSpecificationBuilder;
+import cn.edu.nju.Iot_Verify.component.template.ManifestConditionSemantics;
 import cn.edu.nju.Iot_Verify.dto.board.BoardEnvironmentVariableDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto.DeviceManifest;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceVerificationDto;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
-import cn.edu.nju.Iot_Verify.dto.spec.SpecConditionDto;
 import cn.edu.nju.Iot_Verify.dto.spec.SpecificationDto;
 import cn.edu.nju.Iot_Verify.dto.model.ModelGenerationIssueDto;
 import cn.edu.nju.Iot_Verify.dto.model.AttackPointDto;
@@ -33,7 +33,7 @@ import java.util.*;
  * SMV 生成器
  *
  * 职责：协调数据准备 + 各模块构建器，生成完整 NuSMV 模型文件
- * 同时提供 buildDeviceSmvMap（供 trace 解析复用）和 generateSpecString（预览）
+ * 同时提供 buildDeviceSmvMap（供 trace 解析复用）
  */
 @Slf4j
 @Component
@@ -149,15 +149,6 @@ public class SmvGenerator {
                 attackScenario, enablePrivacy, purpose, TempModelContext.direct());
     }
 
-    public GenerateResult generate(Long userId, List<DeviceVerificationDto> devices,
-                                   List<RuleDto> rules, List<SpecificationDto> specs,
-                                   AttackScenarioDto attackScenario, boolean enablePrivacy,
-                                   GeneratePurpose purpose,
-                                   TempModelContext tempModelContext) throws IOException {
-        return generateWithEnvironment(userId, devices, null, rules, specs,
-                attackScenario, enablePrivacy, purpose, tempModelContext);
-    }
-
     public GenerateResult generateWithEnvironment(Long userId,
                                                   List<DeviceVerificationDto> devices,
                                                   List<BoardEnvironmentVariableDto> environmentVariables,
@@ -246,38 +237,17 @@ public class SmvGenerator {
         }
         List<SpecificationDto> safeSpecs = specs != null ? specs : List.of();
         List<RuleDto> safeRules = rules != null ? rules : List.of();
-        Map<String, DeviceSmvData> deviceSmvMap = requireCompleteResolvedDeviceMap(devices, resolvedDeviceSmvMap);
-        applyEnvironmentPoolLabels(deviceSmvMap, environmentVariables);
+        Map<String, DeviceSmvData> deviceSmvMap = prepareResolvedDeviceMap(
+                devices, resolvedDeviceSmvMap, environmentVariables);
         SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smvContent = buildSmvContent(deviceSmvMap, userId, devices, environmentVariables, safeRules, safeSpecs,
-                safeAttackScenario, enablePrivacy, context, guardProbes != null ? guardProbes : List.of());
+        String smvContent = buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables,
+                safeRules, safeSpecs, safeAttackScenario, enablePrivacy, null, context,
+                guardProbes != null ? guardProbes : List.of());
 
-        Path tempDir = Files.createTempDirectory(resolveTempDirPrefix(purpose, userId, tempModelContext));
-        File smvFile = tempDir.resolve("model.smv").toFile();
-
-        try (PrintWriter writer = new PrintWriter(new java.io.OutputStreamWriter(
-                new java.io.FileOutputStream(smvFile), StandardCharsets.UTF_8))) {
-            writer.print(smvContent);
-        }
+        File smvFile = writeModel(smvContent, resolveTempDirPrefix(purpose, userId, tempModelContext));
 
         log.debug("Generated NuSMV model file: {}", smvFile.getAbsolutePath());
         return GenerateResult.from(smvFile, deviceSmvMap, context);
-    }
-
-    /**
-     * 构建设备 SMV 数据映射（供外部直接调用，如无 GenerateResult 可用时）
-     */
-    public Map<String, DeviceSmvData> buildDeviceSmvMap(Long userId,
-                                                         List<DeviceVerificationDto> devices) {
-        return deviceSmvDataFactory.buildDeviceSmvMap(userId, devices);
-    }
-
-    public CapturedDeviceModel captureDeviceModel(Long userId,
-                                                   List<DeviceVerificationDto> devices) {
-        Map<String, DeviceManifest> manifests = new LinkedHashMap<>();
-        Map<String, DeviceSmvData> deviceSmvMap =
-                deviceSmvDataFactory.buildDeviceSmvMap(userId, devices, manifests);
-        return new CapturedDeviceModel(manifests, deviceSmvMap);
     }
 
     /** Resolve only from manifests captured with the submitted board snapshot. */
@@ -311,72 +281,9 @@ public class SmvGenerator {
     }
 
     /**
-     * Generate a parameterized SMV model for ActFeedback §5 fix strategies.
-     * Uses negated spec and FROZENVAR parameterization for threshold/condition solving.
+     * Generate a repair model with a negated specification and FROZENVAR parameters from
+     * the device models captured for this run.
      */
-    public GenerateResult generateParameterized(Long userId, List<DeviceVerificationDto> devices,
-                                                 List<RuleDto> rules, List<SpecificationDto> specs,
-                                                 AttackScenarioDto attackScenario, boolean enablePrivacy,
-                                                 ParameterizationConfig config) throws IOException {
-        return generateParameterizedWithEnvironment(userId, devices, null, rules, specs,
-                attackScenario, enablePrivacy, config, TempModelContext.direct());
-    }
-
-    public GenerateResult generateParameterized(Long userId, List<DeviceVerificationDto> devices,
-                                                 List<RuleDto> rules, List<SpecificationDto> specs,
-                                                 AttackScenarioDto attackScenario, boolean enablePrivacy,
-                                                 ParameterizationConfig config,
-                                                 TempModelContext tempModelContext) throws IOException {
-        return generateParameterizedWithEnvironment(userId, devices, null, rules, specs,
-                attackScenario, enablePrivacy, config, tempModelContext);
-    }
-
-    public GenerateResult generateParameterizedWithEnvironment(Long userId,
-                                                               List<DeviceVerificationDto> devices,
-                                                               List<BoardEnvironmentVariableDto> environmentVariables,
-                                                               List<RuleDto> rules,
-                                                               List<SpecificationDto> specs,
-                                                               AttackScenarioDto attackScenario,
-                                                               boolean enablePrivacy,
-                                                               ParameterizationConfig config) throws IOException {
-        return generateParameterizedWithEnvironment(userId, devices, environmentVariables, rules, specs,
-                attackScenario, enablePrivacy, config, TempModelContext.direct());
-    }
-
-    public GenerateResult generateParameterizedWithEnvironment(Long userId,
-                                                               List<DeviceVerificationDto> devices,
-                                                               List<BoardEnvironmentVariableDto> environmentVariables,
-                                                               List<RuleDto> rules,
-                                                               List<SpecificationDto> specs,
-                                                               AttackScenarioDto attackScenario,
-                                                               boolean enablePrivacy,
-                                                               ParameterizationConfig config,
-                                                               TempModelContext tempModelContext) throws IOException {
-        AttackScenarioDto safeAttackScenario = validateAttackScenario(attackScenario);
-        if (devices == null || devices.isEmpty()) {
-            throw SmvGenerationException.invalidBuilderInput("SmvGenerator", "devices", "must not be null or empty");
-        }
-        List<SpecificationDto> safeSpecs = (specs != null) ? specs : List.of();
-        List<RuleDto> safeRules = (rules != null) ? rules : List.of();
-
-        Map<String, DeviceSmvData> deviceSmvMap = deviceSmvDataFactory.buildDeviceSmvMap(userId, devices);
-        applyEnvironmentPoolLabels(deviceSmvMap, environmentVariables);
-        SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smvContent = buildParameterizedSmvContent(deviceSmvMap, userId, devices, environmentVariables, safeRules, safeSpecs,
-                safeAttackScenario, enablePrivacy, config, context);
-
-        Path tempDir = Files.createTempDirectory(resolveFixTempDirPrefix(userId, tempModelContext));
-        File smvFile = tempDir.resolve("model.smv").toFile();
-
-        try (PrintWriter writer = new PrintWriter(new java.io.OutputStreamWriter(
-                new java.io.FileOutputStream(smvFile), StandardCharsets.UTF_8))) {
-            writer.print(smvContent);
-        }
-
-        log.debug("Generated parameterized NuSMV model: {}", smvFile.getAbsolutePath());
-        return GenerateResult.from(smvFile, deviceSmvMap, context);
-    }
-
     public GenerateResult generateParameterizedWithResolvedDeviceModel(
             Long userId,
             List<DeviceVerificationDto> devices,
@@ -394,19 +301,13 @@ public class SmvGenerator {
         }
         List<SpecificationDto> safeSpecs = specs != null ? specs : List.of();
         List<RuleDto> safeRules = rules != null ? rules : List.of();
-        Map<String, DeviceSmvData> deviceSmvMap = requireCompleteResolvedDeviceMap(devices, resolvedDeviceSmvMap);
-        applyEnvironmentPoolLabels(deviceSmvMap, environmentVariables);
+        Map<String, DeviceSmvData> deviceSmvMap = prepareResolvedDeviceMap(
+                devices, resolvedDeviceSmvMap, environmentVariables);
         SmvGenerationContext context = SmvGenerationContext.collecting();
-        String smvContent = buildParameterizedSmvContent(
-                deviceSmvMap, userId, devices, environmentVariables, safeRules, safeSpecs,
-                safeAttackScenario, enablePrivacy, config, context);
+        String smvContent = buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables,
+                safeRules, safeSpecs, safeAttackScenario, enablePrivacy, config, context, List.of());
 
-        Path tempDir = Files.createTempDirectory(resolveFixTempDirPrefix(userId, tempModelContext));
-        File smvFile = tempDir.resolve("model.smv").toFile();
-        try (PrintWriter writer = new PrintWriter(new java.io.OutputStreamWriter(
-                new java.io.FileOutputStream(smvFile), StandardCharsets.UTF_8))) {
-            writer.print(smvContent);
-        }
+        File smvFile = writeModel(smvContent, resolveFixTempDirPrefix(userId, tempModelContext));
         log.debug("Generated parameterized NuSMV model from captured templates: {}", smvFile.getAbsolutePath());
         return GenerateResult.from(smvFile, deviceSmvMap, context);
     }
@@ -463,9 +364,10 @@ public class SmvGenerator {
         return scenario;
     }
 
-    private Map<String, DeviceSmvData> requireCompleteResolvedDeviceMap(
+    private Map<String, DeviceSmvData> prepareResolvedDeviceMap(
             List<DeviceVerificationDto> devices,
-            Map<String, DeviceSmvData> resolvedDeviceSmvMap) {
+            Map<String, DeviceSmvData> resolvedDeviceSmvMap,
+            List<BoardEnvironmentVariableDto> environmentVariables) {
         if (resolvedDeviceSmvMap == null) {
             throw SmvGenerationException.smvGenerationError("Captured device model is missing");
         }
@@ -476,6 +378,7 @@ public class SmvGenerator {
                         "Captured device model is missing device '" + device.getVarName() + "'");
             }
         }
+        applyEnvironmentPoolLabels(copy, environmentVariables);
         return copy;
     }
 
@@ -521,34 +424,6 @@ public class SmvGenerator {
                 }
             }
         }
-    }
-
-    private String buildSmvContent(Map<String, DeviceSmvData> deviceSmvMap,
-                                   Long userId,
-                                   List<DeviceVerificationDto> devices,
-                                   List<BoardEnvironmentVariableDto> environmentVariables,
-                                   List<RuleDto> rules,
-                                   List<SpecificationDto> specs,
-                                   AttackScenarioDto attackScenario,
-                                   boolean enablePrivacy,
-                                   SmvGenerationContext context,
-                                   List<GuardProbe> guardProbes) {
-        return buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables, rules, specs,
-                attackScenario, enablePrivacy, null, context, guardProbes);
-    }
-
-    private String buildParameterizedSmvContent(Map<String, DeviceSmvData> deviceSmvMap,
-                                                Long userId,
-                                                List<DeviceVerificationDto> devices,
-                                                List<BoardEnvironmentVariableDto> environmentVariables,
-                                                List<RuleDto> rules,
-                                                List<SpecificationDto> specs,
-                                                AttackScenarioDto attackScenario,
-                                                boolean enablePrivacy,
-                                                ParameterizationConfig config,
-                                                SmvGenerationContext context) {
-        return buildSmvContentInternal(deviceSmvMap, userId, devices, environmentVariables, rules, specs,
-                attackScenario, enablePrivacy, config, context, List.of());
     }
 
     private String buildSmvContentInternal(Map<String, DeviceSmvData> deviceSmvMap,
@@ -624,6 +499,16 @@ public class SmvGenerator {
                 : AttackActivation.FIXED_SAFE;
     }
 
+    private static File writeModel(String smvContent, String prefix) throws IOException {
+        Path tempDir = Files.createTempDirectory(prefix);
+        File smvFile = tempDir.resolve("model.smv").toFile();
+        try (PrintWriter writer = new PrintWriter(new java.io.OutputStreamWriter(
+                new java.io.FileOutputStream(smvFile), StandardCharsets.UTF_8))) {
+            writer.print(smvContent);
+        }
+        return smvFile;
+    }
+
     private String resolveTempDirPrefix(GeneratePurpose purpose, Long userId, TempModelContext tempModelContext) {
         String prefix = purpose == GeneratePurpose.SIMULATION ? "nusmv_sim" : "nusmv_verify";
         return prefix + "_user_" + safePart(userId) + "_"
@@ -658,19 +543,9 @@ public class SmvGenerator {
      */
     private void validateNoPrivacySpecs(List<SpecificationDto> specs) {
         for (SpecificationDto spec : specs) {
-            if (spec == null) continue;
-            if (hasPrivacyCondition(spec.getAConditions())
-                    || hasPrivacyCondition(spec.getIfConditions())
-                    || hasPrivacyCondition(spec.getThenConditions())) {
+            if (ManifestConditionSemantics.specificationRequiresPrivacy(spec)) {
                 throw SmvGenerationException.privacySpecWithoutPrivacyEnabled(spec.getId());
             }
         }
-    }
-
-    private boolean hasPrivacyCondition(List<SpecConditionDto> conditions) {
-        if (conditions == null) return false;
-        return conditions.stream().anyMatch(c ->
-                c != null && c.getTargetType() != null
-                        && "privacy".equalsIgnoreCase(c.getTargetType().trim()));
     }
 }

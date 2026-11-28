@@ -16,10 +16,6 @@ public final class FuzzLimitationContract {
     private FuzzLimitationContract() {
     }
 
-    public static List<String> baseCodes() {
-        return BASE_CODES;
-    }
-
     public static List<String> requiredCodes(FuzzExplorationMode mode) {
         if (mode == null) {
             throw new IllegalArgumentException("Exploration mode is required");

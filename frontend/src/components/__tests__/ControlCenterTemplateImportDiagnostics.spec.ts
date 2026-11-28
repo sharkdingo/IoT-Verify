@@ -6,7 +6,7 @@ import { i18n } from '@/assets/i18n'
 import { useAuth } from '@/stores/auth'
 import ControlCenter from '../ControlCenter.vue'
 
-const api = vi.hoisted(() => ({ addDeviceTemplate: vi.fn(), getDeviceTemplates: vi.fn() }))
+const api = vi.hoisted(() => ({ addDeviceTemplate: vi.fn(), getDeviceTemplates: vi.fn(), getSnapshot: vi.fn() }))
 const feedback = vi.hoisted(() => ({
   dismissCompletionNotifications: vi.fn(),
   acknowledgeFailure: vi.fn(), notifyError: vi.fn(), notifyBlocked: vi.fn(), notifySuccess: vi.fn()
@@ -45,6 +45,11 @@ const visibleCause = () => {
   expect(cause.element.closest('[data-testid="failure-technical-details"]')).toBeNull()
   return cause.text()
 }
+
+const created = { id: 9, name: 'New', defaultTemplate: false,
+  manifest: { Name: 'New', Description: 'Test type', InitState: 'off',
+    Modes: ['SwitchState'], WorkingStates: [{ Name: 'off', Trust: 'trusted', Privacy: 'public' }],
+    InternalVariables: [], APIs: [], Transitions: [] } }
 
 describe('template import failure diagnostics', () => {
   it('keeps JSON syntax location and raw cause beside file selection without blocking correction', async () => {
@@ -107,13 +112,33 @@ describe('template import failure diagnostics', () => {
     expect(api.addDeviceTemplate).not.toHaveBeenCalled()
   })
 
-  it('keeps transport failure as an unknown outcome and reconciles the catalog', async () => {
+  it('keeps an absent template unconfirmed and blocks another write of the same name', async () => {
     api.addDeviceTemplate.mockRejectedValue(new TypeError('Failed to fetch'))
-    api.getDeviceTemplates.mockResolvedValue([])
+    const snapshot = { deviceTemplates: [] }
+    api.getSnapshot.mockResolvedValue(snapshot)
     await selectTemplate(async () => '{"Name":"New"}')
-    expect(api.getDeviceTemplates).toHaveBeenCalledOnce()
+    await selectTemplate(async () => '{"Name":" nEW "}')
+    expect(api.addDeviceTemplate).toHaveBeenCalledOnce()
+    expect(api.getSnapshot).toHaveBeenCalledOnce()
+    expect(api.getDeviceTemplates).not.toHaveBeenCalled()
+    expect(wrapper.emitted('replace-board-snapshot')).toEqual([[snapshot]])
     expect(feedback.acknowledgeFailure).not.toHaveBeenCalled()
-    expect(feedback.notifyBlocked).toHaveBeenCalledWith(i18n.global.t('app.templateImportOutcomeUnconfirmedAfterRefresh'))
+    expect(importFeedback().text()).toContain(i18n.global.t('app.templateImportOutcomeUnconfirmedAfterRefresh', { name: 'New' }))
+  })
+
+  it('releases an unconfirmed import after a later catalog shows the recovered template was removed', async () => {
+    api.addDeviceTemplate.mockRejectedValueOnce(new TypeError('Response lost')).mockResolvedValueOnce(created)
+    api.getSnapshot.mockResolvedValue({ deviceTemplates: [created] })
+    api.getDeviceTemplates.mockResolvedValue([created])
+    await selectTemplate(async () => JSON.stringify(created.manifest))
+    expect(importFeedback().text()).toContain(i18n.global.t('app.templateImportOutcomeRefreshed', { name: 'New' }))
+    expect(feedback.notifySuccess).not.toHaveBeenCalled()
+    await wrapper.setProps({ deviceTemplates: [created] })
+    await wrapper.setProps({ deviceTemplates: [] })
+    expect(wrapper.find('[data-testid="template-import-feedback"]').exists()).toBe(false)
+    await selectTemplate(async () => JSON.stringify(created.manifest))
+    expect(api.addDeviceTemplate).toHaveBeenCalledTimes(2)
+    expect(feedback.notifySuccess).toHaveBeenCalledOnce()
   })
 
   it('clears the previous failure immediately when a new file is selected and permits the same file again', async () => {
@@ -160,11 +185,6 @@ describe('template import failure diagnostics', () => {
 })
 
 describe('confirmed template import followed by a failed catalog read', () => {
-  const created = { id: 9, name: 'New', defaultTemplate: false,
-    manifest: { Name: 'New', Description: 'Test type', InitState: 'off',
-      Modes: ['SwitchState'], WorkingStates: [{ Name: 'off', Trust: 'trusted', Privacy: 'public' }],
-      InternalVariables: [], APIs: [], Transitions: [] } }
-
   it('does not call a confirmed import rejected when the following catalog read is unauthorized', async () => {
     api.addDeviceTemplate.mockResolvedValue(created)
     api.getDeviceTemplates.mockRejectedValue({ response: { status: 401,
@@ -220,13 +240,16 @@ describe('confirmed template import followed by a failed catalog read', () => {
     if (outcome === 'confirmed') api.addDeviceTemplate.mockResolvedValue(created)
     else api.addDeviceTemplate.mockRejectedValue(new TypeError('Response lost'))
     let finishCatalog!: (templates: typeof created[]) => void
-    api.getDeviceTemplates.mockReturnValue(new Promise(resolve => { finishCatalog = resolve }))
+    const pendingCatalog = new Promise<typeof created[]>(resolve => { finishCatalog = resolve })
+    if (outcome === 'confirmed') api.getDeviceTemplates.mockReturnValue(pendingCatalog)
+    else api.getSnapshot.mockReturnValue(pendingCatalog.then(deviceTemplates => ({ deviceTemplates })))
     await selectTemplate(async () => JSON.stringify(created.manifest))
-    expect(api.getDeviceTemplates).toHaveBeenCalledOnce()
+    expect(outcome === 'confirmed' ? api.getDeviceTemplates : api.getSnapshot).toHaveBeenCalledOnce()
     useAuth().login('next-session', { userId: 2 } as any)
     finishCatalog([created])
     await flushPromises()
     expect(wrapper.emitted('replace-template-catalog')).toBeUndefined()
+    expect(wrapper.emitted('replace-board-snapshot')).toBeUndefined()
     expect(wrapper.emitted('authoritative-state-unavailable')).toBeUndefined()
     expect(wrapper.find('[data-testid="template-import-feedback"]').exists()).toBe(false)
     expect(feedback.notifySuccess).not.toHaveBeenCalled()

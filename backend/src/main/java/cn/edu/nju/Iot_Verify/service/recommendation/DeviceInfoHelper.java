@@ -1,11 +1,11 @@
 package cn.edu.nju.Iot_Verify.service.recommendation;
 
+import cn.edu.nju.Iot_Verify.component.aitool.RecommendationCapabilityView;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceNodeDto;
 import cn.edu.nju.Iot_Verify.dto.device.DeviceTemplateDto;
 import cn.edu.nju.Iot_Verify.dto.device.PrivacyStateDto;
 import cn.edu.nju.Iot_Verify.dto.device.VariableStateDto;
 import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -15,7 +15,6 @@ import java.util.stream.Collectors;
  * 辅助类：获取设备节点及其对应模板的详细信息
  * 用于规则推荐时获取设备的真实 API 和内部变量
  */
-@Slf4j
 @Component
 public class DeviceInfoHelper {
 
@@ -29,12 +28,12 @@ public class DeviceInfoHelper {
         }
 
         List<DeviceTemplateDto> templates = snapshot.deviceTemplates();
-        Map<String, DeviceTemplateDto> templateMap = buildTemplateMap(templates);
+        Map<String, DeviceTemplateDto> templateMap = RecommendationCapabilityView.indexTemplates(templates);
 
         return nodes.stream()
                 .filter(n -> n != null && n.getTemplateName() != null)
                 .map(n -> {
-                    DeviceTemplateDto template = templateMap.get(normalizeTemplateKey(n.getTemplateName()));
+                    DeviceTemplateDto template = RecommendationCapabilityView.resolveTemplate(templateMap, n.getTemplateName());
                     return new DeviceInfo(
                             n.getId(),
                             n.getLabel(),
@@ -53,39 +52,6 @@ public class DeviceInfoHelper {
                     );
                 })
                 .collect(Collectors.toList());
-    }
-
-    private Map<String, DeviceTemplateDto> buildTemplateMap(List<DeviceTemplateDto> templates) {
-        if (templates == null || templates.isEmpty()) {
-            return Collections.emptyMap();
-        }
-        Map<String, DeviceTemplateDto> templateMap = new HashMap<>();
-        for (DeviceTemplateDto template : templates) {
-            if (template == null) {
-                continue;
-            }
-            putTemplateAlias(templateMap, template.getName(), template);
-            if (template.getManifest() != null) {
-                putTemplateAlias(templateMap, template.getManifest().getName(), template);
-            }
-        }
-        return templateMap;
-    }
-
-    private void putTemplateAlias(Map<String, DeviceTemplateDto> templateMap,
-                                  String rawName,
-                                  DeviceTemplateDto template) {
-        String key = normalizeTemplateKey(rawName);
-        if (key != null) {
-            templateMap.putIfAbsent(key, template);
-        }
-    }
-
-    private String normalizeTemplateKey(String rawName) {
-        if (rawName == null || rawName.isBlank()) {
-            return null;
-        }
-        return rawName.trim().toLowerCase(Locale.ROOT);
     }
 
     /**

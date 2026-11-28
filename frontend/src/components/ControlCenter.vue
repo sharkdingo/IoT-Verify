@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import FieldSelect from '@/components/common/FieldSelect.vue'
+import TemplateRuntimeFields from '@/components/TemplateRuntimeFields.vue'
 import HintTooltip from '@/components/common/HintTooltip.vue'
 import RuleBuilder from '@/components/RuleBuilder.vue'
 import deviceImportJsonTemplateUrl from '@/assets/examples/device-list-template.json?url&no-inline'
 import deviceImportCsvTemplateUrl from '@/assets/examples/device-list-template.csv?url&no-inline'
 import type { RuleForm } from '@/types/rule'
-import { ref, reactive, computed, nextTick, onBeforeUnmount, onMounted, useAttrs, watch } from 'vue'
+import { ref, shallowRef, reactive, computed, nextTick, onBeforeUnmount, onMounted, useAttrs, watch, type Ref } from 'vue'
 import { 
   specTemplateDetails, 
   relationOperators, 
@@ -18,26 +19,20 @@ import type {
   SpecSide,
   Specification,
 } from '@/types/spec'
-import type { DeviceTemplate, InternalVariable } from '@/types/device'
+import type { DeviceTemplate } from '@/types/device'
 import type { DeviceNode } from '@/types/node'
 import { useI18n } from 'vue-i18n'
 import { getDeviceIconUrl } from '@/utils/device'
 import {
-  PRIVACY_OPTIONS,
-  TRUST_OPTIONS,
   buildDeviceRuntimeConfig,
   createDeviceRuntimeDraft,
-  findTemplateStatePrivacy,
-  findTemplateStateTrust,
   getTemplateEnvironmentVariables,
   getTemplateLocalVariables,
-  getTemplateVariableDefaultValue,
   templateVariableIsStateDerived,
   syncStateDerivedVariables,
   getTemplateWorkingStates,
   materializeDeviceRuntimeConfig,
   resetDeviceRuntimeDraft,
-  templateVariableHasEnumValues,
   templateVariableUsesNumericBounds,
   validateDeviceRuntimeConfig,
   validateTemplateVariableValue,
@@ -71,6 +66,7 @@ import type { ModelEnvironmentVariable } from '@/types/model'
 import type { ModelTokenSource } from '@/types/modelToken'
 import { deviceLabelKey, reserveUniqueDeviceLabel } from '@/utils/canvas/nodeCreate'
 import { errorDetails, localizedErrorMessage } from '@/utils/userMessage'
+import { readBoardWriteReceipt } from '@/utils/boardWriteReceipt'
 import { diagnoseJsonParseError } from '@/utils/jsonParseDiagnostics'
 import { DEVICE_IMPORT_TEMPLATE_ALIASES, DEVICE_IMPORT_NAME_ALIASES, parseDeviceImportCsv,
   decodeDeviceImportFile, DeviceImportEncodingError, type DeviceImportEncoding,
@@ -86,6 +82,7 @@ import { useRovingTablist } from '@/composables/useRovingTablist'
 import InfoTooltip from '@/components/common/InfoTooltip.vue'
 import FailureDetails from '@/components/FailureDetails.vue'
 import { useAuth } from '@/stores/auth'
+import { useUnconfirmedBoardItemEdit } from '@/composables/useUnconfirmedBoardItemEdit'
 import type { ApiErrorDetails } from '@/utils/userMessage'
 
 defineOptions({ inheritAttrs: false })
@@ -230,10 +227,13 @@ const deviceForm = reactive({
 const singleDeviceRuntime = reactive(createDeviceRuntimeDraft())
 const creatingSingleDevice = ref(false)
 const singleDeviceSaveFailure = ref<ApiErrorDetails | null>(null)
+const singleDeviceSaveUnconfirmed = computed(() => singleDeviceSaveFailure.value?.reasonCode === 'DEVICE_CREATE_OUTCOME_UNKNOWN')
 const singleDeviceSaveFailureElement = ref<HTMLElement | null>(null)
 const singleDeviceSaveActionElement = ref<HTMLElement | null>(null)
 let singleDeviceSaveVersion = 0
+let singleDeviceDraftVersion = 0
 watch([deviceForm, singleDeviceRuntime], () => {
+  singleDeviceDraftVersion += 1
   singleDeviceSaveVersion += 1
   singleDeviceSaveFailure.value = null
 }, { deep: true, flush: 'sync' })
@@ -241,10 +241,11 @@ const creatingMultipleDevices = ref(false)
 const creatingSpecification = ref(false)
 
 const deviceCreateMode = ref<DeviceCreateMode>('single')
-watch(deviceCreateMode, () => {
+const retireSingleDeviceSaveFeedback = () => {
   singleDeviceSaveVersion += 1
-  singleDeviceSaveFailure.value = null
-}, { flush: 'sync' })
+  if (!singleDeviceSaveUnconfirmed.value) singleDeviceSaveFailure.value = null
+}
+watch(deviceCreateMode, retireSingleDeviceSaveFeedback, { flush: 'sync' })
 const batchDeviceForm = reactive({
   type: '',
   prefix: '',
@@ -270,6 +271,12 @@ const importDeviceText = computed({
   get: () => selectedDeviceImportDraft.value[deviceImportSource.value],
   set: (text: string) => { selectedDeviceImportDraft.value[deviceImportSource.value] = text }
 })
+// Reconciliation can change the suffixes in the preview while the submitted draft stays the same.
+const deviceGroupDraftKey = computed(() => deviceCreateMode.value === 'batch'
+  ? `batch:${JSON.stringify([batchDeviceForm.type, normalizeName(batchDeviceForm.prefix), Number(batchDeviceForm.count)])}`
+  : `${deviceImportFormat.value}:${importDeviceText.value.trim()}`)
+const unconfirmedDeviceGroupWrites = reactive(new Map<string, string>())
+const deviceGroupSaveUnconfirmed = computed(() => unconfirmedDeviceGroupWrites.get(deviceGroupDraftKey.value))
 const deviceImportFileFailure = ref<ApiErrorDetails | 'encoding' | null>(null)
 const deviceImportFileInput = ref<HTMLInputElement | null>(null)
 let deviceImportReadVersion = 0
@@ -402,18 +409,6 @@ const resetSingleDeviceRuntime = () => {
 }
 
 watch(() => deviceForm.type, resetSingleDeviceRuntime)
-
-const variableInputPlaceholder = (variable: InternalVariable) => {
-  if (templateVariableUsesNumericBounds(variable)) {
-    const lower = variable.LowerBound ?? '-∞'
-    const upper = variable.UpperBound ?? '∞'
-    const defaultValue = getTemplateVariableDefaultValue(variable)
-    return defaultValue
-      ? `${t('app.useTemplateDefaultWithValue', { value: defaultValue })} / ${lower} - ${upper}`
-      : `${lower} - ${upper}`
-  }
-  return t('app.enterValuePlaceholder')
-}
 
 const buildRuntimeConfig = (template: DeviceTemplate, runtime = singleDeviceRuntime): DeviceRuntimeConfig | undefined => {
   return buildDeviceRuntimeConfig(template, runtime, { variableScope: 'local' })
@@ -756,30 +751,6 @@ const getTemplatePreviewSections = (template: any) => [
 ]
 
 // Precomputed formatted values for v-for loops (optimization to avoid repeated function calls)
-const formattedSelectedWorkingStates = computed(() =>
-  selectedWorkingStates.value.map(state => ({
-    name: state.Name,
-    label: formatTemplateModelToken(selectedDeviceTemplate.value, state.Name)
-  }))
-)
-
-const formattedSelectedInternalVariables = computed(() =>
-  selectedInternalVariables.value.map(variable => ({
-    ...variable,
-    formattedName: formatTemplateModelToken(selectedDeviceTemplate.value, variable.Name),
-    formattedDefaultValue: formatTemplateModelToken(
-      selectedDeviceTemplate.value,
-      getTemplateVariableDefaultValue(variable, selectedDeviceTemplate.value, singleDeviceRuntime.state)
-    ),
-    formattedValues: variable.Values
-      ? variable.Values.map((val: unknown) => ({
-          raw: String(val),
-          formatted: formatTemplateModelToken(selectedDeviceTemplate.value, val)
-        }))
-      : []
-  }))
-)
-
 const activeTemplatePreview = computed(() => {
   const key = pinnedTemplatePreviewId.value
   if (key === null) return null
@@ -1066,6 +1037,11 @@ const specForm = reactive({
 })
 const specSaveFailure = ref<ApiErrorDetails | null>(null)
 const editingSpecBaseline = ref<Specification | null>(null)
+const specificationSaveDraftKey = computed(() => JSON.stringify([
+  editingSpecBaseline.value?.id ?? null, specForm.name.trim(),
+  buildSpecificationSemanticKey({ ...specForm, templateId: specForm.templateId as SpecTemplateId })
+]))
+const { message: unconfirmedSpecSave, capture: captureSpecSaveReceipt } = useUnconfirmedBoardItemEdit(() => specificationSaveDraftKey.value)
 const specificationTargetChanged = computed(() => editingSpecBaseline.value !== null
   && buildSpecificationSemanticKey({ ...specForm, templateId: specForm.templateId as SpecTemplateId }, deviceModeCount)
     !== buildSpecificationSemanticKey(editingSpecBaseline.value, deviceModeCount))
@@ -1124,16 +1100,6 @@ const currentTemplateDetail = computed(() => {
 })
 
 const templateMessage = (key: string | undefined, fallback: string) => key ? t(key) : fallback
-
-// Get required sides for current template
-const requiredSides = computed(() => {
-  return currentTemplateDetail.value?.requiredSides || []
-})
-
-// Check if a side is required for current template
-const isSideRequired = (side: SpecSide) => {
-  return requiredSides.value.includes(side)
-}
 
 // Get conditions for a specific side
 const getConditionsForSide = (side: SpecSide): SpecCondition[] => {
@@ -1255,30 +1221,13 @@ const saveCondition = () => {
     value: editingConditionData.value || ''
   }
   
-  switch (editingConditionSide.value) {
-    case 'a':
-      if (editingConditionIndex.value >= 0) {
-        specForm.aConditions[editingConditionIndex.value] = condition
-      } else {
-        specForm.aConditions.push(condition)
-      }
-      break
-    case 'if':
-      if (editingConditionIndex.value >= 0) {
-        specForm.ifConditions[editingConditionIndex.value] = condition
-      } else {
-        specForm.ifConditions.push(condition)
-      }
-      break
-    case 'then':
-      if (editingConditionIndex.value >= 0) {
-        specForm.thenConditions[editingConditionIndex.value] = condition
-      } else {
-        specForm.thenConditions.push(condition)
-      }
-      break
+  const conditions = getConditionsForSide(editingConditionSide.value)
+  if (editingConditionIndex.value >= 0) {
+    conditions[editingConditionIndex.value] = condition
+  } else {
+    conditions.push(condition)
   }
-  
+
   showSpecDialog.value = false
   updateFormula()
 }
@@ -1286,17 +1235,7 @@ const saveCondition = () => {
 // Remove condition
 const removeCondition = (side: SpecSide, index: number) => {
   if (!ensureWritable()) return
-  switch (side) {
-    case 'a':
-      specForm.aConditions.splice(index, 1)
-      break
-    case 'if':
-      specForm.ifConditions.splice(index, 1)
-      break
-    case 'then':
-      specForm.thenConditions.splice(index, 1)
-      break
-  }
+  getConditionsForSide(side).splice(index, 1)
   updateFormula()
 }
 
@@ -1602,43 +1541,26 @@ const naturalLanguageRule = computed(() => describeSpecification({
   thenConditions: specForm.thenConditions
 }, specificationPresentationContext()))
 
-// Precomputed formatted condition data for v-for loops (optimization)
-const formattedAConditions = computed(() =>
-  specForm.aConditions.map(condition => ({
-    ...condition,
-    deviceLabel: getDeviceLabel(condition.deviceId),
-    propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition),
-    variableSourceLabel: formatConditionVariableSourceLabel(condition),
-    relationLabel: getRelationLabel(condition.relation || '='),
-    isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
-    isVariableSourceUnresolved: isSpecConditionVariableSourceUnresolved(condition)
-  }))
-)
+const specConditionSides = [
+  { side: 'a', label: 'app.aConditions' },
+  { side: 'if', label: 'app.ifConditions' },
+  { side: 'then', label: 'app.thenConditions' }
+] as const
 
-const formattedIfConditions = computed(() =>
-  specForm.ifConditions.map(condition => ({
-    ...condition,
-    deviceLabel: getDeviceLabel(condition.deviceId),
-    propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition),
-    variableSourceLabel: formatConditionVariableSourceLabel(condition),
-    relationLabel: getRelationLabel(condition.relation || '='),
-    isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
-    isVariableSourceUnresolved: isSpecConditionVariableSourceUnresolved(condition)
-  }))
-)
-
-const formattedThenConditions = computed(() =>
-  specForm.thenConditions.map(condition => ({
-    ...condition,
-    deviceLabel: getDeviceLabel(condition.deviceId),
-    propertyLabel: formatConditionPropertyLabel(condition),
-    formattedValue: formatConditionValue(condition),
-    variableSourceLabel: formatConditionVariableSourceLabel(condition),
-    relationLabel: getRelationLabel(condition.relation || '='),
-    isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
-    isVariableSourceUnresolved: isSpecConditionVariableSourceUnresolved(condition)
+const specificationConditionGroups = computed(() => specConditionSides
+  .filter(({ side }) => currentTemplateDetail.value?.requiredSides.includes(side))
+  .map(group => ({
+    ...group,
+    conditions: getConditionsForSide(group.side).map(condition => ({
+      ...condition,
+      deviceLabel: getDeviceLabel(condition.deviceId),
+      propertyLabel: formatConditionPropertyLabel(condition),
+      formattedValue: formatConditionValue(condition),
+      variableSourceLabel: formatConditionVariableSourceLabel(condition),
+      relationLabel: getRelationLabel(condition.relation || '='),
+      isDeviceMissing: isSpecConditionDeviceMissing(condition.deviceId),
+      isVariableSourceUnresolved: isSpecConditionVariableSourceUnresolved(condition)
+    }))
   }))
 )
 
@@ -1713,10 +1635,12 @@ const validateSpecification = () => {
 // Create specification
 const createSpecification = async () => {
   if (!ensureWritable()) return
-  if (creatingSpecification.value || !validateSpecification()) return
+  if (creatingSpecification.value || unconfirmedSpecSave.value || !validateSpecification()) return
   specSaveFailure.value = null
   const submittedVersion = specSaveVersion
   const submittedDraftEpoch = specDraftEpoch
+  const submittedDraftKey = specificationSaveDraftKey.value
+  const rememberUnconfirmed = captureSpecSaveReceipt()
   const ownerToken = getToken()
 
   const cloneConditions = (conditions: SpecCondition[]) =>
@@ -1740,7 +1664,7 @@ const createSpecification = async () => {
       ...submittedForm,
       expected: editingSpecBaseline.value ? cloneSpecification(editingSpecBaseline.value) : undefined,
       complete: (saved, failure) => {
-        if (!saved && failure && submittedVersion === specSaveVersion
+        if (!rememberUnconfirmed(failure) && !saved && failure && submittedVersion === specSaveVersion
           && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) specSaveFailure.value = failure
         resolve(saved)
       }
@@ -1748,6 +1672,7 @@ const createSpecification = async () => {
   })
   creatingSpecification.value = false
   if (saved && submittedDraftEpoch === specDraftEpoch
+    && submittedDraftKey === specificationSaveDraftKey.value
     && !controlCenterDisposed && isCurrentSessionToken(ownerToken)) {
     if (editingSpecBaseline.value) emit('finish-spec-edit')
     resetSpecForm()
@@ -1805,7 +1730,7 @@ const cancelSpecificationEdit = () => {
 
 const handleCreateDevice = async () => {
   if (!ensureWritable()) return
-  if (creatingSingleDevice.value) return
+  if (creatingSingleDevice.value || singleDeviceSaveUnconfirmed.value) return
   if (singleDeviceBlockedReason.value) return
 
   // Find the selected template from backend templates
@@ -1829,9 +1754,11 @@ const handleCreateDevice = async () => {
 
   singleDeviceSaveFailure.value = null
   const submittedVersion = singleDeviceSaveVersion
+  const submittedDraftVersion = singleDeviceDraftVersion
   const ownerToken = getToken()
-  const ownsSubmittedDraft = () => submittedVersion === singleDeviceSaveVersion
+  const ownsUnchangedDraft = () => submittedDraftVersion === singleDeviceDraftVersion
     && !controlCenterDisposed && isCurrentSessionToken(ownerToken)
+  const ownsSubmittedDraft = () => submittedVersion === singleDeviceSaveVersion && ownsUnchangedDraft()
   creatingSingleDevice.value = true
   const saved = await new Promise<boolean>(resolve => {
     emit('create-device', {
@@ -1839,14 +1766,15 @@ const handleCreateDevice = async () => {
       customName: deviceForm.name,
       runtime: buildRuntimeConfig(template as DeviceTemplate),
       complete: (saved, failure) => {
-        if (!saved && failure && ownsSubmittedDraft()) singleDeviceSaveFailure.value = failure
+        if (!saved && failure && (failure.reasonCode === 'DEVICE_CREATE_OUTCOME_UNKNOWN'
+          ? ownsUnchangedDraft() : ownsSubmittedDraft())) singleDeviceSaveFailure.value = failure
         resolve(saved)
       }
     })
   })
   if (!controlCenterDisposed && isCurrentSessionToken(ownerToken)) creatingSingleDevice.value = false
   const failure = singleDeviceSaveFailure.value
-  if (!saved && failure && ownsSubmittedDraft()) {
+  if (!saved && failure && !singleDeviceSaveUnconfirmed.value && ownsSubmittedDraft()) {
     await nextTick()
     if (ownsSubmittedDraft() && singleDeviceSaveFailure.value === failure) {
       singleDeviceSaveFailureElement.value?.focus({ preventScroll: true })
@@ -1859,9 +1787,27 @@ const handleCreateDevice = async () => {
   }
 }
 
+const submitDeviceGroup = async (items: DeviceCreateItem[], environmentVariables?: ModelEnvironmentVariable[]) => {
+  const key = deviceGroupDraftKey.value
+  const token = getToken()
+  const isCurrent = () => !controlCenterDisposed && isCurrentSessionToken(token)
+  creatingMultipleDevices.value = true
+  await new Promise<void>(resolve => emit('create-devices', {
+    items,
+    environmentVariables,
+    complete: (_saved, failure) => {
+      if (isCurrent() && failure?.reasonCode === 'DEVICE_CREATE_OUTCOME_UNKNOWN') {
+        unconfirmedDeviceGroupWrites.set(key, failure.cause ?? t('app.deviceCreateOutcomeUnknown'))
+      }
+      resolve()
+    }
+  }))
+  if (isCurrent()) creatingMultipleDevices.value = false
+}
+
 const handleCreateBatchDevices = async () => {
   if (!ensureWritable()) return
-  if (creatingMultipleDevices.value) return
+  if (creatingMultipleDevices.value || deviceGroupSaveUnconfirmed.value) return
   // The count error is shown inline, and an empty preview (missing template, blank prefix, or
   // an invalid count) already disables the submit button, so nothing needs announcing here.
   if (batchDeviceCountError.value) return
@@ -1869,14 +1815,12 @@ const handleCreateBatchDevices = async () => {
   const items = batchDevicePreview.value
   if (items.length === 0) return
 
-  creatingMultipleDevices.value = true
-  await new Promise<boolean>(resolve => emit('create-devices', { items, complete: resolve }))
-  creatingMultipleDevices.value = false
+  await submitDeviceGroup(items)
 }
 
 const handleCreateImportedDevices = async () => {
   if (!ensureWritable()) return
-  if (creatingMultipleDevices.value) return
+  if (creatingMultipleDevices.value || deviceGroupSaveUnconfirmed.value) return
   /*
    * These conditions also drive the button's `:disabled`, and every state they describe is already
    * listed above it — so to the *user* there is nothing left to announce, which is why this stays a
@@ -1909,19 +1853,11 @@ const handleCreateImportedDevices = async () => {
     return
   }
 
-  creatingMultipleDevices.value = true
-  await new Promise<boolean>(resolve => {
-    emit('create-devices', {
-      items: validImportedDevices.value.map((item: any) => ({
-        template: item.template,
-        customName: item.customName,
-        runtime: item.runtime
-      })),
-      environmentVariables: importedEnvironmentMerge.value.merged,
-      complete: resolve
-    })
-  })
-  creatingMultipleDevices.value = false
+  await submitDeviceGroup(validImportedDevices.value.map((item: any) => ({
+    template: item.template,
+    customName: item.customName,
+    runtime: item.runtime
+  })), importedEnvironmentMerge.value.merged)
 }
 
 const handleDeviceImportFile = async (event: Event) => {
@@ -2012,8 +1948,7 @@ const activeSection = computed<ControlCenterSection>({
 watch(() => [activeSection.value, isCollapsed.value], () => {
   if (activeSection.value !== 'templates' || isCollapsed.value) closeTemplatePreview()
   if (activeSection.value !== 'devices' || isCollapsed.value) {
-    singleDeviceSaveVersion += 1
-    singleDeviceSaveFailure.value = null
+    retireSingleDeviceSaveFeedback()
   }
   if (activeSection.value !== 'specs' || isCollapsed.value) {
     specSaveVersion += 1
@@ -2051,11 +1986,6 @@ const createDevice = () => {
   handleCreateDevice()
 }
 
-const isDefinitiveTemplateMutationRejection = (error: any): boolean => {
-  const status = Number(error?.response?.status || 0)
-  return status >= 400 && status < 500
-}
-
 const templateMutationErrorMessage = (error: any, fallback: string): string => {
   if (error?.code === BOARD_RESPONSE_INCOMPLETE_CODE) {
     return t('app.boardMutationResponseIncomplete')
@@ -2063,34 +1993,100 @@ const templateMutationErrorMessage = (error: any, fallback: string): string => {
   return localizedErrorMessage(error, fallback, locale.value)
 }
 
-const refreshTemplateCatalogForReconciliation = async (
-  ownsCurrentSession: () => boolean = () => true
-): Promise<DeviceTemplate[] | null> => {
-  try {
-    const current = await boardApi.getDeviceTemplates()
-    if (!ownsCurrentSession()) return null
-    emit('replace-template-catalog', current)
-    return current
-  } catch (error) {
-    console.error('Failed to reconcile device type catalog:', error)
-    return null
+const unconfirmedTemplatePreviews = reactive(new Map<string, string>())
+const templateDeleteWarning = computed(() => unconfirmedTemplatePreviews.get(templateDeletePreview.value?.impactToken ?? ''))
+const defaultTemplateResetWarning = computed(() => unconfirmedTemplatePreviews.get(defaultTemplateResetPreview.value?.impactToken ?? ''))
+
+const canReviewTemplatePreview = (impactToken: string): boolean => {
+  if (!unconfirmedTemplatePreviews.has(impactToken)) return true
+  notifyBlocked(t('app.templatePreviewUnconfirmed'))
+  return false
+}
+
+const captureTemplateSession = () => {
+  const token = getToken()
+  return () => !controlCenterDisposed && isCurrentSessionToken(token)
+}
+
+const captureWritableTemplateSession = () => {
+  const admittedReadOnlyEpoch = readOnlyEpoch
+  const ownsSession = captureTemplateSession()
+  return {
+    ownsSession,
+    isStillWritable: () => ownsSession() && !props.readOnly && admittedReadOnlyEpoch === readOnlyEpoch
   }
 }
 
-const templateImportFile = ref<HTMLInputElement | null>(null)
-const templateImportFeedback = ref<(ApiErrorDetails & {
+const runQueuedTemplateMutation = async (
+  pending: Ref<boolean>,
+  ownsPreview: () => boolean,
+  work: (ownsSession: () => boolean) => Promise<void>
+) => {
+  const { ownsSession, isStillWritable } = captureWritableTemplateSession()
+  pending.value = true
+  try {
+    await runBoardMutation(() => isStillWritable() && ownsPreview() ? work(ownsSession) : Promise.resolve())
+  } catch (error) {
+    if (ownsSession()) throw error
+  } finally {
+    pending.value = false
+  }
+}
+
+const readTemplateMutationReceipt = async <T,>(
+  write: () => Promise<T>,
+  ownsSession: () => boolean,
+  unavailableKeys: Array<'nodes' | 'templates' | 'environment'>,
+  refreshOnRejection?: (error: unknown) => boolean
+) => {
+  let snapshot: BoardWorkspaceSnapshot | undefined
+  const receipt = await readBoardWriteReceipt(write, ownsSession, {
+    refreshOnRejection,
+    reconcile: async () => {
+      try {
+        const current = await boardApi.getSnapshot()
+        if (!ownsSession()) return false
+        snapshot = current
+        emit('replace-board-snapshot', current)
+        return true
+      } catch (error) {
+        if (!ownsSession()) return false
+        console.error('Failed to reconcile template change:', error)
+        emit('authoritative-state-unavailable', unavailableKeys)
+        return false
+      }
+    }
+  })
+  return receipt ? { receipt, snapshot } : null
+}
+
+type TemplateImportFeedback = ApiErrorDetails & {
   title: string
   message: string
   suggestion: string
   confirmedTemplateId?: number
-}) | null>(null)
+}
+
+const templateImportFile = ref<HTMLInputElement | null>(null)
+const templateImportFeedback = shallowRef<TemplateImportFeedback | null>(null)
+const unconfirmedTemplateImports = new Map<string, TemplateImportFeedback>()
 let templateImportVersion = 0
 let controlCenterDisposed = false
 
-watch(() => props.deviceTemplates, current => {
+watch(() => props.deviceTemplates, (current, previous) => {
   const confirmedId = templateImportFeedback.value?.confirmedTemplateId
   if (confirmedId !== undefined && current.some(template => template.id === confirmedId)) {
     templateImportFeedback.value = null
+  }
+  if (!unconfirmedTemplateImports.size) return
+  const currentNames = new Set(current.map(template => normalizeTemplateLookupName(template.name)))
+  // An absence only retires the guard once the catalog has previously shown that name.
+  for (const template of previous) {
+    const name = normalizeTemplateLookupName(template.name)
+    if (currentNames.has(name)) continue
+    const unresolved = unconfirmedTemplateImports.get(name)
+    if (unresolved === templateImportFeedback.value) templateImportFeedback.value = null
+    unconfirmedTemplateImports.delete(name)
   }
 })
 
@@ -2104,7 +2100,13 @@ watch(() => [authState.token, authState.user?.userId], () => {
   singleDeviceSaveVersion += 1
   singleDeviceSaveFailure.value = null
   creatingSingleDevice.value = false
+  unconfirmedDeviceGroupWrites.clear()
+  creatingMultipleDevices.value = false
   templateImportFeedback.value = null
+  unconfirmedTemplateImports.clear()
+  unconfirmedTemplatePreviews.clear()
+  closeTemplateDeleteConfirm(true)
+  closeResetDefaultsConfirm(true)
   deviceImportFileFailure.value = null
   specSaveFailure.value = null
 }, { flush: 'sync' })
@@ -2151,27 +2153,21 @@ const readTemplateDeletionConflictPreview = (
 
 const handleImportTemplate = async (event: Event) => {
   const target = event.target as HTMLInputElement
-  if (!ensureWritable()) {
-    target.value = ''
-    return
-  }
-  const admittedReadOnlyEpoch = readOnlyEpoch
   const file = target.files?.[0]
-  if (!file) return
+  target.value = ''
+  if (!file || !ensureWritable()) return
+  const admittedReadOnlyEpoch = readOnlyEpoch
   const requestVersion = ++templateImportVersion
-  const ownerToken = getToken()
-  const ownsCurrentSession = () => !controlCenterDisposed && isCurrentSessionToken(ownerToken)
+  const ownsCurrentSession = captureTemplateSession()
   const ownsCurrentSelection = () => ownsCurrentSession() && requestVersion === templateImportVersion
   templateImportFeedback.value = null
 
   if (file.size > MAX_TEMPLATE_IMPORT_BYTES) {
     notifyError(t('app.importFileTooLarge', { size: '512 KiB' }))
-    target.value = ''
     return
   }
 
   let manifest: DeviceTemplate['manifest']
-  let requestedName: string
   let source: string
   try {
     source = await file.text()
@@ -2182,13 +2178,9 @@ const handleImportTemplate = async (event: Event) => {
       suggestion: t('app.templateFileReadCorrectionHint'),
       ...errorDetails(error)
     }
-    target.value = ''
     return
   }
-  if (!ownsCurrentSelection()) {
-    target.value = ''
-    return
-  }
+  if (!ownsCurrentSelection()) return
   try {
     manifest = JSON.parse(source)
   } catch (error: unknown) {
@@ -2202,52 +2194,57 @@ const handleImportTemplate = async (event: Event) => {
       details: diagnostic.reason ? [diagnostic.reason] : [],
       fields: {}
     }
-    target.value = ''
     return
   }
-  requestedName = typeof manifest?.Name === 'string' ? manifest.Name.trim() : ''
+  const requestedName = typeof manifest?.Name === 'string' ? manifest.Name.trim() : ''
+  const nameKey = normalizeTemplateLookupName(requestedName)
 
   // The scene can enter playback/replacement while the file is being parsed.
   // Re-check immediately before starting the network mutation so a late file
   // read cannot write after the UI became read-only.
-  if (!ownsCurrentSelection() || admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) {
-    target.value = ''
-    return
-  }
+  if (!ownsCurrentSelection() || admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) return
 
   await runBoardMutation(async () => {
     if (!ownsCurrentSelection() || admittedReadOnlyEpoch !== readOnlyEpoch || !ensureWritable()) return
-    let confirmedTemplate: DeviceTemplate
-    try {
-      confirmedTemplate = await boardApi.addDeviceTemplate({ name: requestedName, manifest })
-    } catch (error: any) {
-      if (!ownsCurrentSession()) return
-      if (!isDefinitiveTemplateMutationRejection(error)) {
-        const current = await refreshTemplateCatalogForReconciliation(ownsCurrentSession)
-        if (!ownsCurrentSession()) return
-        if (!current) {
-          emit('authoritative-state-unavailable', ['templates'])
-          notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
-        } else if (current.some(template =>
-          String(template.name || template.manifest?.Name || '').trim().toLocaleLowerCase()
-            === requestedName.toLocaleLowerCase())) {
-          notifyBlocked(t('app.templateImportOutcomeRefreshed', { name: requestedName }))
-        } else {
-          notifyBlocked(t('app.templateImportOutcomeUnconfirmedAfterRefresh'))
+    const unresolved = unconfirmedTemplateImports.get(nameKey)
+    if (unresolved) {
+      templateImportFeedback.value = unresolved
+      return
+    }
+
+    const outcome = await readTemplateMutationReceipt(
+      () => boardApi.addDeviceTemplate({ name: requestedName, manifest }), ownsCurrentSession, ['templates']
+    )
+    if (!outcome) return
+    const { receipt, snapshot } = outcome
+    if (receipt.status !== 'confirmed') {
+      if (receipt.status === 'unconfirmed') {
+        const exists = snapshot?.deviceTemplates.some(template => normalizeTemplateLookupName(template.name) === nameKey)
+        const message = t(!snapshot ? 'app.templateImportRecoveryFailed'
+          : exists ? 'app.templateImportOutcomeRefreshed' : 'app.templateImportOutcomeUnconfirmedAfterRefresh',
+          { name: requestedName })
+        const feedback = {
+          title: t('app.templateImportUnconfirmedTitle'),
+          message,
+          suggestion: nameKey ? t('app.templateImportUnconfirmedHint') : '',
+          ...errorDetails(receipt.error)
         }
-      } else {
-        const definitionInvalid = error?.response?.status === 400 || error?.response?.status === 422
-        if (ownsCurrentSelection()) templateImportFeedback.value = {
+        if (nameKey) unconfirmedTemplateImports.set(nameKey, feedback)
+        if (ownsCurrentSelection()) templateImportFeedback.value = feedback
+        if (!ownsCurrentSelection() || isCollapsed.value || activeSection.value !== 'templates') notifyBlocked(message)
+      } else if (ownsCurrentSelection()) {
+        const status = (receipt.error as { response?: { status?: number } })?.response?.status
+        const definitionInvalid = status === 400 || status === 422
+        templateImportFeedback.value = {
           title: t(definitionInvalid ? 'app.templateDefinitionInvalidTitle' : 'app.templateImportRejectedTitle'),
           message: t(definitionInvalid ? 'app.templateDefinitionInvalidMessage' : 'app.templateImportRejectedMessage'),
           suggestion: t(definitionInvalid ? 'app.templateDefinitionCorrectionHint' : 'app.templateImportRejectedHint'),
-          ...errorDetails(error)
+          ...errorDetails(receipt.error)
         }
       }
       return
     }
 
-    if (!ownsCurrentSession()) return
     try {
       const current = await boardApi.getDeviceTemplates()
       if (!ownsCurrentSession()) return
@@ -2261,14 +2258,13 @@ const handleImportTemplate = async (event: Event) => {
         title: t('app.templateCatalogRefreshFailedTitle'),
         message: t('app.templateCatalogRefreshFailedMessage'),
         suggestion: '',
-        confirmedTemplateId: confirmedTemplate.id,
+        confirmedTemplateId: receipt.mutation.id,
         ...errorDetails(error)
       }
     }
+  }).catch(error => {
+    if (ownsCurrentSession()) throw error
   })
-
-  // 清空 input 以便重新选择同一文件
-  target.value = ''
 }
 
 const downloadTemplateSchema = async () => {
@@ -2297,7 +2293,7 @@ const closeTemplateDeleteConfirm = (force = false) => {
 const openDeleteConfirm = async (template: any) => {
   if (!ensureWritable()) return
   if (isLoadingTemplateDeletePreview.value) return
-  const admittedReadOnlyEpoch = readOnlyEpoch
+  const { ownsSession, isStillWritable } = captureWritableTemplateSession()
   closeTemplatePreview()
   const templateId = Number(template?.id)
   if (!Number.isSafeInteger(templateId) || templateId <= 0) {
@@ -2307,11 +2303,12 @@ const openDeleteConfirm = async (template: any) => {
   isLoadingTemplateDeletePreview.value = true
   try {
     const preview = await boardApi.previewDeviceTemplateDeletion(templateId)
-    if (props.readOnly || admittedReadOnlyEpoch !== readOnlyEpoch) return
+    if (!isStillWritable() || !canReviewTemplatePreview(preview.impactToken)) return
     templateToDelete.value = preview.template
     templateDeletePreview.value = preview
     showDeleteConfirmDialog.value = true
   } catch (error: any) {
+    if (!ownsSession()) return
     console.error('Failed to preview template deletion:', error)
     notifyError(templateMutationErrorMessage(error, t('app.templateDeletePreviewFailed')))
   } finally {
@@ -2338,15 +2335,16 @@ const {
 const openResetDefaultsConfirm = async () => {
   if (!ensureWritable()) return
   if (isLoadingDefaultTemplateResetPreview.value) return
-  const admittedReadOnlyEpoch = readOnlyEpoch
+  const { ownsSession, isStillWritable } = captureWritableTemplateSession()
   closeTemplatePreview()
   isLoadingDefaultTemplateResetPreview.value = true
   try {
     const preview = await boardApi.previewDefaultTemplateReset()
-    if (props.readOnly || admittedReadOnlyEpoch !== readOnlyEpoch) return
+    if (!isStillWritable() || !canReviewTemplatePreview(preview.impactToken)) return
     defaultTemplateResetPreview.value = preview
     showResetDefaultsConfirmDialog.value = true
   } catch (error: any) {
+    if (!ownsSession()) return
     console.error('Failed to preview default template reset:', error)
     notifyError(templateMutationErrorMessage(error, t('app.defaultTemplateResetPreviewFailed')))
   } finally {
@@ -2356,71 +2354,61 @@ const openResetDefaultsConfirm = async () => {
 
 const confirmResetDefaultTemplates = async () => {
   if (!ensureWritable()) return
-  if (isResettingDefaultTemplates.value) return
+  if (isResettingDefaultTemplates.value || defaultTemplateResetWarning.value) return
   const preview = defaultTemplateResetPreview.value
   if (!preview?.impactToken || !preview.canApply) return
-  const ownerToken = getToken()
-  const ownsCurrentSession = () => !controlCenterDisposed && isCurrentSessionToken(ownerToken)
-  isResettingDefaultTemplates.value = true
-  try {
-    await runBoardMutation(async () => {
-      if (!ownsCurrentSession()) return
-      try {
-        const result = await boardApi.resetDefaultTemplates(preview.impactToken)
-        if (!ownsCurrentSession()) return
-        emit('replace-template-state', {
-          templates: result.currentTemplates,
-          nodes: result.currentNodes,
-          environmentVariables: result.environmentVariables
-        })
-        emit('edit-history-cleared')
-        const successMessageKey = defaultTemplateResetChangesBoardModel(result)
-          ? 'app.defaultTemplatesResetSuccessReverificationRequired'
-          : 'app.defaultTemplatesResetSuccess'
+  await runQueuedTemplateMutation(isResettingDefaultTemplates, () => preview === defaultTemplateResetPreview.value, async ownsSession => {
+    const outcome = await readTemplateMutationReceipt(
+      () => boardApi.resetDefaultTemplates(preview.impactToken), ownsSession, ['nodes', 'templates', 'environment']
+    )
+    if (!outcome) return
+    const { receipt } = outcome
+    if (receipt.status === 'confirmed') {
+      const { mutation: result } = receipt
+      emit('replace-template-state', {
+        templates: result.currentTemplates,
+        nodes: result.currentNodes,
+        environmentVariables: result.environmentVariables
+      })
+      emit('edit-history-cleared')
+      const successMessageKey = defaultTemplateResetChangesBoardModel(result)
+        ? 'app.defaultTemplatesResetSuccessReverificationRequired'
+        : 'app.defaultTemplatesResetSuccess'
+      closeResetDefaultsConfirm(true)
+      notifySuccess(t(successMessageKey, {
+          types: result.templateChanges.length,
+          devices: result.affectedDevices.length,
+          variables: result.environmentChanges.length
+        }))
+      return
+    }
+    if (receipt.status === 'unconfirmed') {
+      const message = t(receipt.snapshotRefreshed
+        ? 'app.templateResetOutcomeRefreshed' : 'app.templateMutationOutcomeUnknownRefreshFailed')
+      unconfirmedTemplatePreviews.set(preview.impactToken, message)
+      if (receipt.snapshotRefreshed) {
         closeResetDefaultsConfirm(true)
-        notifySuccess(t(successMessageKey, {
-            types: result.templateChanges.length,
-            devices: result.affectedDevices.length,
-            variables: result.environmentChanges.length
-          }))
-      } catch (error: any) {
-        if (!ownsCurrentSession()) return
-        console.error('Failed to reset default templates:', error)
-        if (!isDefinitiveTemplateMutationRejection(error)) {
-          try {
-            const snapshot = await boardApi.getSnapshot()
-            if (!ownsCurrentSession()) return
-            emit('replace-board-snapshot', snapshot)
-            closeResetDefaultsConfirm(true)
-            notifyBlocked(t('app.templateResetOutcomeRefreshed'))
-          } catch (refreshError) {
-            if (!ownsCurrentSession()) return
-            console.error('Failed to reconcile default template reset:', refreshError)
-            emit('authoritative-state-unavailable', ['nodes', 'templates', 'environment'])
-            notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
-          }
-        } else if (Number(error?.response?.status) === 409) {
-          try {
-            const nextPreview = await boardApi.previewDefaultTemplateReset()
-            if (!ownsCurrentSession()) return
-            defaultTemplateResetPreview.value = nextPreview
-            notifyBlocked(t('app.defaultTemplateResetPreviewChanged'))
-          } catch (previewError) {
-            if (!ownsCurrentSession()) return
-            console.error('Failed to refresh default template reset preview:', previewError)
-            notifyError(t('app.defaultTemplateResetPreviewFailed'))
-          }
-        } else {
-          const errorMessage = templateMutationErrorMessage(error, t('app.unknownError'))
-          notifyError(t('app.resetDefaultTemplatesFailedWithReason', { reason: errorMessage }))
-        }
+        notifyBlocked(message)
       }
-    })
-  } catch (error) {
-    if (ownsCurrentSession()) throw error
-  } finally {
-    isResettingDefaultTemplates.value = false
-  }
+      return
+    }
+    if ((receipt.error as { response?: { status?: number } })?.response?.status === 409) {
+      try {
+        const nextPreview = await boardApi.previewDefaultTemplateReset()
+        if (!ownsSession()) return
+        defaultTemplateResetPreview.value = nextPreview
+        notifyBlocked(t('app.defaultTemplateResetPreviewChanged'))
+      } catch (previewError) {
+        if (!ownsSession()) return
+        console.error('Failed to refresh default template reset preview:', previewError)
+        closeResetDefaultsConfirm(true)
+        notifyError(t('app.defaultTemplateResetPreviewFailed'))
+      }
+      return
+    }
+    const errorMessage = templateMutationErrorMessage(receipt.error, t('app.unknownError'))
+    notifyError(t('app.resetDefaultTemplatesFailedWithReason', { reason: errorMessage }))
+  })
 }
 
 const defaultTemplateResetChangeLabel = (changeType: string): string => {
@@ -2520,66 +2508,74 @@ const formatDefaultTemplateResetEnvironmentChange = (change: EnvironmentVariable
 
 const confirmDeleteTemplate = async () => {
   if (!ensureWritable()) return
-  if (!templateToDelete.value || !templateDeletePreview.value || isDeletingTemplate.value) return
+  const preview = templateDeletePreview.value
+  const template = templateToDelete.value
+  if (!template || !preview || templateDeleteWarning.value || isDeletingTemplate.value) return
 
-  const templateId = Number(templateToDelete.value.id)
-  const templateName = String(templateToDelete.value.name || templateToDelete.value.manifest?.Name || '').trim()
+  const templateId = Number(template.id)
+  const templateName = String(template.name || template.manifest?.Name || '').trim()
   if (!Number.isSafeInteger(templateId) || templateId <= 0) {
     notifyError(t('app.invalidTemplateId'))
     return
   }
 
-  if (!templateDeletePreview.value.canDelete) {
+  if (!preview.canDelete) {
     notifyBlocked(t('app.templateDeleteBlocked'))
     return
   }
 
-  isDeletingTemplate.value = true
-  try {
-    await runBoardMutation(async () => {
-    try {
-      const result = await boardApi.deleteDeviceTemplate(
-        templateId,
-        templateDeletePreview.value!.impactToken
-      )
-      emit('replace-template-catalog', result.currentTemplates)
+  await runQueuedTemplateMutation(isDeletingTemplate, () => preview === templateDeletePreview.value, async ownsSession => {
+    let conflict: ReturnType<typeof readTemplateDeletionConflictPreview> | undefined
+    const outcome = await readTemplateMutationReceipt(
+      () => boardApi.deleteDeviceTemplate(templateId, preview.impactToken), ownsSession, ['templates'], error => {
+        conflict = readTemplateDeletionConflictPreview(error, templateId)
+        return conflict.conflictPayload && !conflict.preview
+          || (error as { response?: { status?: number } })?.response?.status === 404
+      }
+    )
+    if (!outcome) return
+    const { receipt, snapshot } = outcome
+    if (receipt.status === 'confirmed') {
+      const { mutation } = receipt
+      emit('replace-template-catalog', mutation.currentTemplates)
       emit('edit-history-cleared')
       closeTemplateDeleteConfirm(true)
-      notifySuccess(t('app.templateDeleted', { name: result.deletedTemplate?.name || templateName }))
-    } catch (error: any) {
-      console.error('Failed to delete template:', error)
-      const conflict = readTemplateDeletionConflictPreview(error, templateId)
-      if (conflict.preview) {
-        templateDeletePreview.value = conflict.preview
-        templateToDelete.value = conflict.preview.template
-        notifyBlocked(t('app.templateDeletePreviewChanged'))
+      notifySuccess(t('app.templateDeleted', { name: mutation.deletedTemplate?.name || templateName }))
+      return
+    }
+    const templateMissing = snapshot && !snapshot.deviceTemplates.some(item => Number(item.id) === templateId)
+    if (receipt.status === 'unconfirmed') {
+      const message = t(!receipt.snapshotRefreshed ? 'app.templateMutationOutcomeUnknownRefreshFailed'
+        : templateMissing ? 'app.templateDeleteOutcomeRefreshed' : 'app.templateDeleteOutcomeUnconfirmedAfterRefresh',
+        { name: templateName })
+      unconfirmedTemplatePreviews.set(preview.impactToken, message)
+      if (templateMissing) {
+        closeTemplateDeleteConfirm(true)
+        notifyBlocked(message)
+      }
+      return
+    }
+    if (conflict?.preview) {
+      templateDeletePreview.value = conflict.preview
+      templateToDelete.value = conflict.preview.template
+      notifyBlocked(t('app.templateDeletePreviewChanged'))
+      return
+    }
+    if (conflict?.conflictPayload || (receipt.error as { response?: { status?: number } })?.response?.status === 404) {
+      closeTemplateDeleteConfirm(true)
+      if (!receipt.snapshotRefreshed) {
+        notifyBlocked(t('app.templateDeleteRejectedRefreshFailed'))
         return
       }
-      if (conflict.conflictPayload || !isDefinitiveTemplateMutationRejection(error)) {
-        const current = await refreshTemplateCatalogForReconciliation()
-        if (!current) {
-          emit('authoritative-state-unavailable', ['templates'])
-          if (conflict.conflictPayload) closeTemplateDeleteConfirm(true)
-          notifyBlocked(t('app.templateMutationOutcomeUnknownRefreshFailed'))
-        } else if (!current.some(template => Number(template.id) === templateId)) {
-          closeTemplateDeleteConfirm(true)
-          notifyBlocked(t('app.templateDeleteOutcomeRefreshed', { name: templateName }))
-        } else if (conflict.conflictPayload) {
-          const errorMessage = t('app.boardMutationResponseIncomplete')
-          closeTemplateDeleteConfirm(true)
-          notifyError(t('app.deleteFailedWithReason', { reason: errorMessage }))
-        } else {
-          notifyBlocked(t('app.templateDeleteOutcomeUnconfirmedAfterRefresh'))
-        }
-      } else {
-        const errorMessage = templateMutationErrorMessage(error, t('app.unknownError'))
-        notifyError(t('app.deleteFailedWithReason', { reason: errorMessage }))
+      if (templateMissing) {
+        notifyBlocked(t('app.templateDeleteAlreadyAbsent', { name: templateName }))
+        return
       }
     }
-    })
-  } finally {
-    isDeletingTemplate.value = false
-  }
+    const errorMessage = conflict?.conflictPayload ? t('app.boardMutationResponseIncomplete')
+      : templateMutationErrorMessage(receipt.error, t('app.unknownError'))
+    notifyError(t('app.deleteFailedWithReason', { reason: errorMessage }))
+  })
 }
 
 // Enhanced error handling utility with concise messages
@@ -2614,8 +2610,7 @@ watch(() => props.readOnly, readOnly => {
   templateImportVersion += 1
   deviceImportReadVersion += 1
   specSaveVersion += 1
-  singleDeviceSaveVersion += 1
-  singleDeviceSaveFailure.value = null
+  retireSingleDeviceSaveFeedback()
   templateImportFeedback.value = null
   deviceImportFileFailure.value = null
   specSaveFailure.value = null
@@ -2820,126 +2815,24 @@ watch(() => props.readOnly, readOnly => {
                 {{ t('app.initialValuesHint') }}
               </p>
 
-              <div v-if="selectedTemplateHasModes" class="board-field-grid mt-3">
-                <label class="min-w-0">
-                  <span class="board-form-label mb-1 block">{{ t('app.initialState') }}</span>
-                  <FieldSelect
-                    v-model="singleDeviceRuntime.state"
-                    data-testid="single-device-state"
-                  >
-                    <option v-for="state in formattedSelectedWorkingStates" :key="state.name" :value="state.name">{{ state.label }}</option>
-                  </FieldSelect>
-                </label>
-
-                <label class="min-w-0">
-                  <span class="board-form-label mb-1 block">{{ t('app.stateTrust') }}</span>
-                  <FieldSelect
-                    v-model="singleDeviceRuntime.currentStateTrust"
-                    data-testid="single-device-state-trust"
-                  >
-                    <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStateTrust(selectedDeviceTemplate, singleDeviceRuntime.state) || 'trusted'}`) }) }}</option>
-                    <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                  </FieldSelect>
-                </label>
-
-                <label class="min-w-0">
-                  <span class="board-form-label mb-1 block">{{ t('app.statePrivacy') }}</span>
-                  <FieldSelect
-                    v-model="singleDeviceRuntime.currentStatePrivacy"
-                    data-testid="single-device-state-privacy"
-                  >
-                    <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${findTemplateStatePrivacy(selectedDeviceTemplate, singleDeviceRuntime.state) || 'public'}`) }) }}</option>
-                    <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                  </FieldSelect>
-                </label>
-              </div>
-
-              <div v-if="formattedSelectedInternalVariables.length > 0" class="mt-3 space-y-2">
-                <div
-                  v-for="variable in formattedSelectedInternalVariables"
-                  :key="variable.Name"
-                  class="rounded-lg border board-border-subtle board-bg-muted p-2"
-                >
-                  <div class="mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                    <span class="max-w-full break-words text-xs font-semibold board-text-strong" :title="variable.formattedName">{{ variable.formattedName }}</span>
-                    <span v-if="templateVariableUsesNumericBounds(variable)" class="max-w-full break-words text-xs font-semibold board-text-muted">
-                      {{ variableInputPlaceholder(variable) }}
-                    </span>
-                  </div>
-
-                  <div class="board-field-grid">
-                    <label class="min-w-0">
-                      <span class="board-form-label mb-1 block">{{ t('app.variableValue') }}</span>
-                      <!-- A variable every state constrains is the state's consequence, not an instance
-                           choice: see `templateVariableIsStateDerived`. Editing it here would be discarded
-                           one step into the model, and the writers refuse a pair that disagrees. -->
-                      <div
-                        v-if="templateVariableIsStateDerived(selectedDeviceTemplate, variable.Name)"
-                        :data-testid="`single-device-variable-derived-${variable.Name}`"
-                        class="flex min-w-0 items-center gap-2 rounded-lg border border-dashed board-border-subtle board-bg-muted px-2 py-1.5"
-                      >
-                        <span class="min-w-0 break-words text-xs font-medium board-text-strong">
-                          {{ formatTemplateModelToken(selectedDeviceTemplate, singleDeviceRuntime.variables[variable.Name]) }}
-                        </span>
-                        <span class="shrink-0 text-xs board-text-muted">{{ t('app.variableFollowsState') }}</span>
-                      </div>
-                      <FieldSelect
-                        v-else-if="templateVariableHasEnumValues(variable)"
-                        v-model="singleDeviceRuntime.variables[variable.Name]"
-                        :data-testid="`single-device-variable-${variable.Name}`"
-                        :aria-invalid="singleDeviceValueFailures[variable.Name] ? 'true' : undefined"
-                        :aria-describedby="singleDeviceValueFailures[variable.Name] ? `single-device-value-error-${encodeURIComponent(variable.Name)}` : undefined"
-                      >
-                        <option value="">{{ t('app.useTemplateDefaultWithValue', { value: variable.formattedDefaultValue }) }}</option>
-                        <option v-for="val in variable.formattedValues" :key="val.raw" :value="val.raw">{{ val.formatted }}</option>
-                      </FieldSelect>
-                      <input
-                        v-else
-                        v-model="singleDeviceRuntime.variables[variable.Name]"
-                        @input="revealSingleDeviceValueFailure($event, variable.Name)"
-                        :data-testid="`single-device-variable-${variable.Name}`"
-                        :aria-invalid="singleDeviceValueFailures[variable.Name] ? 'true' : undefined"
-                        :aria-describedby="singleDeviceValueFailures[variable.Name] ? `single-device-value-error-${encodeURIComponent(variable.Name)}` : undefined"
-                        class="board-field"
-                        :placeholder="variableInputPlaceholder(variable)"
-                        type="text"
-                      />
-                      <span v-if="singleDeviceValueFailures[variable.Name]"
-                        :id="`single-device-value-error-${encodeURIComponent(variable.Name)}`"
-                        :data-testid="`single-device-value-error-${variable.Name}`" role="alert"
-                        class="mt-1 block text-sm board-text-danger">
-                        {{ singleDeviceValueFailures[variable.Name] }}
-                      </span>
-                    </label>
-
-                    <label class="min-w-0">
-                      <span class="board-form-label mb-1 block">{{ t('app.variableTrust') }}</span>
-                      <FieldSelect
-                        v-model="singleDeviceRuntime.variableTrusts[variable.Name]"
-                        :data-testid="`single-device-variable-trust-${variable.Name}`"
-                      >
-                        <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Trust || 'trusted'}`) }) }}</option>
-                        <option v-for="trust in TRUST_OPTIONS" :key="trust" :value="trust">{{ t(`app.${trust}`) }}</option>
-                      </FieldSelect>
-                    </label>
-
-                    <label class="min-w-0">
-                      <span class="board-form-label mb-1 block">{{ t('app.privacy') }}</span>
-                      <FieldSelect
-                        v-model="singleDeviceRuntime.privacies[variable.Name]"
-                        :data-testid="`single-device-privacy-${variable.Name}`"
-                      >
-                        <option value="">{{ t('app.useTemplateDefaultWithValue', { value: t(`app.${variable.Privacy || 'public'}`) }) }}</option>
-                        <option v-for="privacy in PRIVACY_OPTIONS" :key="privacy" :value="privacy">{{ t(`app.${privacy}`) }}</option>
-                      </FieldSelect>
-                    </label>
-                  </div>
-                </div>
-              </div>
+              <TemplateRuntimeFields
+                variant="single-device"
+                :template="selectedDeviceTemplate"
+                :draft="singleDeviceRuntime"
+                :working-states="selectedTemplateHasModes ? selectedWorkingStates : []"
+                :variables="selectedInternalVariables"
+                :format-token="formatTemplateModelToken"
+                :value-failures="singleDeviceValueFailures"
+                @value-input="revealSingleDeviceValueFailure"
+              />
             </details>
 
             <div ref="singleDeviceSaveActionElement" class="space-y-3">
-              <div v-if="singleDeviceSaveFailure" ref="singleDeviceSaveFailureElement" data-testid="single-device-save-failure" role="alert" tabindex="-1" class="text-sm board-text-danger">
+              <p v-if="singleDeviceSaveUnconfirmed" id="single-device-save-unconfirmed"
+                data-testid="single-device-save-unconfirmed" role="status" class="text-sm board-text-warning">
+                {{ singleDeviceSaveFailure?.cause }}
+              </p>
+              <div v-else-if="singleDeviceSaveFailure" ref="singleDeviceSaveFailureElement" data-testid="single-device-save-failure" role="alert" tabindex="-1" class="text-sm board-text-danger">
                 <p class="font-semibold">{{ t('app.saveNodesFailed') }}</p>
                 <FailureDetails v-bind="singleDeviceSaveFailure" suggestion="" />
               </div>
@@ -2948,8 +2841,8 @@ watch(() => props.readOnly, readOnly => {
               <button
                 @click="createDevice()"
                 data-testid="single-device-create"
-                :disabled="creatingSingleDevice || Boolean(singleDeviceBlockedReason)"
-                :aria-describedby="singleDeviceNameConflict ? 'single-device-name-conflict'
+                :disabled="creatingSingleDevice || singleDeviceSaveUnconfirmed || Boolean(singleDeviceBlockedReason)"
+                :aria-describedby="singleDeviceSaveUnconfirmed ? 'single-device-save-unconfirmed' : singleDeviceNameConflict ? 'single-device-name-conflict'
                   : singleDeviceBlockedReason ? 'single-device-readiness' : undefined"
                 class="board-panel-submit board-action-disarmed"
               >
@@ -3016,7 +2909,7 @@ watch(() => props.readOnly, readOnly => {
               </div>
             </div>
 
-            <div class="device-preview-box">
+            <div v-if="!deviceGroupSaveUnconfirmed" class="device-preview-box">
               <div class="device-preview-box__header">
                 <span>{{ t('app.deviceBatchPreview') }}</span>
                 <strong>{{ batchDevicePreview.length }}</strong>
@@ -3033,10 +2926,15 @@ watch(() => props.readOnly, readOnly => {
               <p v-else class="device-preview-empty">{{ t('app.configureBatchDevicesFirst') }}</p>
             </div>
 
+            <p v-if="deviceGroupSaveUnconfirmed" id="device-group-save-unconfirmed"
+              data-testid="device-group-save-unconfirmed" role="status" class="text-sm board-text-warning">
+              {{ deviceGroupSaveUnconfirmed }}
+            </p>
             <button
               @click="handleCreateBatchDevices"
               data-testid="batch-device-create"
-              :disabled="Boolean(batchDeviceCountError) || batchDevicePreview.length === 0 || creatingMultipleDevices"
+              :disabled="Boolean(deviceGroupSaveUnconfirmed) || Boolean(batchDeviceCountError) || batchDevicePreview.length === 0 || creatingMultipleDevices"
+              :aria-describedby="deviceGroupSaveUnconfirmed ? 'device-group-save-unconfirmed' : undefined"
               class="board-panel-submit board-action-disarmed"
             >
               <span class="material-symbols-outlined text-sm">playlist_add</span>
@@ -3138,7 +3036,7 @@ watch(() => props.readOnly, readOnly => {
               <FailureDetails v-if="deviceImportFileFailure !== 'encoding'" :suggestion="t('app.deviceImportFileReadFailedHint')" v-bind="deviceImportFileFailure" />
             </div>
 
-            <div v-if="parsedImportedDevices.length > 0 && !deviceImportSyntaxFailure" data-testid="device-import-preview" class="device-preview-box">
+            <div v-if="!deviceGroupSaveUnconfirmed && parsedImportedDevices.length > 0 && !deviceImportSyntaxFailure" data-testid="device-import-preview" class="device-preview-box">
               <div class="device-preview-box__header">
                 <span>{{ t('app.parsedDevices') }}</span>
                 <strong>{{ validImportedDevices.length }}/{{ parsedImportedDevices.length }}</strong>
@@ -3178,11 +3076,16 @@ watch(() => props.readOnly, readOnly => {
               data-testid="device-import-blocked-reason" class="board-caption board-text-danger">
               {{ t('app.deviceImportResolveErrors') }}
             </p>
+            <p v-if="deviceGroupSaveUnconfirmed" id="device-group-save-unconfirmed"
+              data-testid="device-group-save-unconfirmed" role="status" class="text-sm board-text-warning">
+              {{ deviceGroupSaveUnconfirmed }}
+            </p>
             <button
               @click="handleCreateImportedDevices"
               data-testid="device-import-create"
-              :disabled="importPreviewStale || validImportedDevices.length === 0 || importedDevicesHaveErrors || importedEnvironmentMerge.conflicts.length > 0 || creatingMultipleDevices"
-              :aria-describedby="importedDevicesHaveErrors && !deviceImportSyntaxFailure ? 'device-import-blocked-reason' : undefined"
+              :disabled="Boolean(deviceGroupSaveUnconfirmed) || importPreviewStale || validImportedDevices.length === 0 || importedDevicesHaveErrors || importedEnvironmentMerge.conflicts.length > 0 || creatingMultipleDevices"
+              :aria-describedby="deviceGroupSaveUnconfirmed ? 'device-group-save-unconfirmed'
+                : importedDevicesHaveErrors && !deviceImportSyntaxFailure ? 'device-import-blocked-reason' : undefined"
               class="board-panel-submit board-action-disarmed"
             >
               <span class="material-symbols-outlined text-sm">library_add</span>
@@ -3632,118 +3535,24 @@ watch(() => props.readOnly, readOnly => {
             <div v-if="specForm.templateId" class="space-y-2">
               <label class="board-form-label block">{{ t('app.configureConditions') }}</label>
 
-              <!-- A Conditions (Always/Forall) -->
-              <div v-if="isSideRequired('a')" class="relative overflow-hidden rounded-lg board-card p-2.5">
+              <div v-for="group in specificationConditionGroups" :key="group.side"
+                class="relative overflow-hidden rounded-lg board-card p-2.5">
                 <div class="relative flex items-center justify-between mb-2">
                   <div class="flex items-center gap-2">
                     <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
-                      <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                      <svg v-if="group.side === 'a'" class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
                       </svg>
-                    </span>
-                    <span class="board-form-label">{{ t('app.aConditions') }}</span>
-                  </div>
-                  <button
-                    @click="openConditionDialog('a')"
-                    data-testid="spec-add-condition-a"
-                    class="board-action-inline"
-                  >
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-                    </svg>
-                    {{ t('app.add') }}
-                  </button>
-                </div>
-                <div class="space-y-1.5 max-h-36 iot-scroll-region pr-1">
-                  <div
-                    v-for="(condition, index) in formattedAConditions"
-                    :key="condition.id"
-                    class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
-                  >
-                    <div class="flex items-center gap-2 overflow-hidden flex-1">
-                      <div class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center flex-shrink-0">
-                        <svg class="w-3.5 h-3.5 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
-                        </svg>
-                      </div>
-                      <div class="flex items-center gap-1 overflow-hidden flex-1 min-w-0">
-                        <span
-                          class="text-xs font-medium truncate min-w-0"
-                          :class="condition.isDeviceMissing
- ? 'board-text-danger line-through'
- : 'board-text-strong'"
-                          :title="condition.deviceLabel"
-                        >
-                          {{ condition.deviceLabel }}
-                        </span>
-                        <span class="board-text-muted flex-shrink-0">·</span>
-                        <span class="text-xs board-text-muted font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
-                        <!-- Which of the two variable questions this row asks. A row with no
-                             recorded choice is marked unresolved rather than shown as either. -->
-                        <span
-                          v-if="condition.targetType === 'variable'"
-                          class="text-xs px-1 py-0.5 rounded flex-shrink-0 border"
-                          :class="condition.isVariableSourceUnresolved
-                            ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'board-text-muted board-bg-control board-border-subtle'"
-                          :title="condition.variableSourceLabel || ''"
-                          data-testid="spec-condition-row-variable-source"
-                        >{{ condition.variableSourceLabel }}</span>
-                        <span class="text-xs board-text-muted board-bg-control px-1 py-0.5 rounded flex-shrink-0">
-                          {{ condition.relationLabel }}
-                        </span>
-                        <span class="text-xs board-card board-text-muted px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
-                          {{ condition.formattedValue }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="flex gap-1 ml-2 flex-shrink-0">
-                      <HintTooltip :content="t('app.edit')">
-                        <button
-                          type="button"
-                          @click="openConditionDialog('a', index)"
-                          class="p-1 board-text-muted hover:board-text-strong hover:board-control-hover rounded transition-colors"
-                          :aria-label="t('app.editConditionNumbered', { number: index + 1 })"
-                        >
-                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                          </svg>
-                        </button>
-                      </HintTooltip>
-                      <HintTooltip :content="t('app.delete')">
-                        <button
-                          type="button"
-                          @click="removeCondition('a', index)"
-                          class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
-                          :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
-                        >
-                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                          </svg>
-                        </button>
-                      </HintTooltip>
-                    </div>
-                  </div>
-                  <div v-if="specForm.aConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
-                    {{ t('app.noConditionsAdded') }}
-                  </div>
-                </div>
-              </div>
-
-              <!-- IF Conditions (Antecedent) -->
-              <div v-if="isSideRequired('if')" class="relative overflow-hidden rounded-lg board-card p-2.5">
-                <div class="relative flex items-center justify-between mb-2">
-                  <div class="flex items-center gap-2">
-                    <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
-                      <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                      <svg v-else class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          :d="group.side === 'if' ? 'M13 10V3L4 14h7v7l9-11h-7z' : 'M17 8l4 4m0 0l-4 4m4-4H3'"/>
                       </svg>
                     </span>
-                    <span class="board-form-label">{{ t('app.ifConditions') }}</span>
+                    <span class="board-form-label">{{ t(group.label) }}</span>
                   </div>
                   <button
-                    @click="openConditionDialog('if')"
-                    data-testid="spec-add-condition-if"
+                    @click="openConditionDialog(group.side)"
+                    :data-testid="`spec-add-condition-${group.side}`"
                     class="board-action-inline"
                   >
                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3754,7 +3563,7 @@ watch(() => props.readOnly, readOnly => {
                 </div>
                 <div class="space-y-1.5 max-h-36 iot-scroll-region pr-1">
                   <div
-                    v-for="(condition, index) in formattedIfConditions"
+                    v-for="(condition, index) in group.conditions"
                     :key="condition.id"
                     class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
                   >
@@ -3799,7 +3608,7 @@ watch(() => props.readOnly, readOnly => {
                       <HintTooltip :content="t('app.edit')">
                         <button
                           type="button"
-                          @click="openConditionDialog('if', index)"
+                          @click="openConditionDialog(group.side, index)"
                           class="p-1 board-text-muted hover:board-text-strong hover:board-control-hover rounded transition-colors"
                           :aria-label="t('app.editConditionNumbered', { number: index + 1 })"
                         >
@@ -3811,7 +3620,7 @@ watch(() => props.readOnly, readOnly => {
                       <HintTooltip :content="t('app.delete')">
                         <button
                           type="button"
-                          @click="removeCondition('if', index)"
+                          @click="removeCondition(group.side, index)"
                           class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
                           :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
                         >
@@ -3822,112 +3631,18 @@ watch(() => props.readOnly, readOnly => {
                       </HintTooltip>
                     </div>
                   </div>
-                  <div v-if="specForm.ifConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
-                    {{ t('app.noConditionsAdded') }}
-                  </div>
-                </div>
-              </div>
-
-              <!-- THEN Conditions (Consequent) -->
-              <div v-if="isSideRequired('then')" class="relative overflow-hidden rounded-lg board-card p-2.5">
-                <div class="relative flex items-center justify-between mb-2">
-                  <div class="flex items-center gap-2">
-                    <span class="w-6 h-6 bg-[color:var(--accent-fill)] rounded-md flex items-center justify-center">
-                      <svg class="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3"/>
-                      </svg>
-                    </span>
-                    <span class="board-form-label">{{ t('app.thenConditions') }}</span>
-                  </div>
-                  <button
-                    @click="openConditionDialog('then')"
-                    data-testid="spec-add-condition-then"
-                    class="board-action-inline"
-                  >
-                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-                    </svg>
-                    {{ t('app.add') }}
-                  </button>
-                </div>
-                <div class="space-y-1.5 max-h-36 iot-scroll-region pr-1">
-                  <div
-                    v-for="(condition, index) in formattedThenConditions"
-                    :key="condition.id"
-                    class="flex items-center justify-between board-bg-elevated rounded-md px-2.5 py-1.5 border border-[color:var(--border)] shadow-sm hover:shadow-md transition-all"
-                  >
-                    <div class="flex items-center gap-2 overflow-hidden flex-1">
-                      <div class="w-6 h-6 board-meta-chip rounded-md flex items-center justify-center flex-shrink-0">
-                        <svg class="w-3.5 h-3.5 board-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/>
-                        </svg>
-                      </div>
-                      <div class="flex items-center gap-1 overflow-hidden flex-1 min-w-0">
-                        <span
-                          class="text-xs font-medium truncate min-w-0"
-                          :class="condition.isDeviceMissing
- ? 'board-text-danger line-through'
- : 'board-text-strong'"
-                          :title="condition.deviceLabel"
-                        >
-                          {{ condition.deviceLabel }}
-                        </span>
-                        <span class="board-text-muted flex-shrink-0">·</span>
-                        <span class="text-xs board-text-muted font-medium truncate flex-shrink-0" :title="condition.propertyLabel">{{ condition.propertyLabel }}</span>
-                        <!-- Which of the two variable questions this row asks. A row with no
-                             recorded choice is marked unresolved rather than shown as either. -->
-                        <span
-                          v-if="condition.targetType === 'variable'"
-                          class="text-xs px-1 py-0.5 rounded flex-shrink-0 border"
-                          :class="condition.isVariableSourceUnresolved
-                            ? 'board-chip-danger board-text-danger border-[color:var(--danger-border)]'
-                            : 'board-text-muted board-bg-control board-border-subtle'"
-                          :title="condition.variableSourceLabel || ''"
-                          data-testid="spec-condition-row-variable-source"
-                        >{{ condition.variableSourceLabel }}</span>
-                        <span class="text-xs board-text-muted board-bg-control px-1 py-0.5 rounded flex-shrink-0">
-                          {{ condition.relationLabel }}
-                        </span>
-                        <span class="text-xs board-card board-text-muted px-1 py-0.5 rounded truncate max-w-[60px] flex-shrink-0" :title="condition.formattedValue">
-                          {{ condition.formattedValue }}
-                        </span>
-                      </div>
-                    </div>
-                    <div class="flex gap-1 ml-2 flex-shrink-0">
-                      <HintTooltip :content="t('app.edit')">
-                        <button
-                          type="button"
-                          @click="openConditionDialog('then', index)"
-                          class="p-1 board-text-muted hover:board-text-strong hover:board-control-hover rounded transition-colors"
-                          :aria-label="t('app.editConditionNumbered', { number: index + 1 })"
-                        >
-                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                          </svg>
-                        </button>
-                      </HintTooltip>
-                      <HintTooltip :content="t('app.delete')">
-                        <button
-                          type="button"
-                          @click="removeCondition('then', index)"
-                          class="p-1 board-text-muted hover:board-text-danger hover:board-chip-danger rounded transition-colors"
-                          :aria-label="t('app.removeConditionNumbered', { number: index + 1 })"
-                        >
-                          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-                          </svg>
-                        </button>
-                      </HintTooltip>
-                    </div>
-                  </div>
-                  <div v-if="specForm.thenConditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
+                  <div v-if="group.conditions.length === 0" class="text-center py-2 text-xs board-text-muted italic board-bg-elevated rounded border border-dashed border-[color:var(--border)]">
                     {{ t('app.noConditionsAdded') }}
                   </div>
                 </div>
               </div>
             </div>
 
-            <div v-if="specSaveFailure" data-testid="spec-save-failure" role="alert"
+            <p v-if="unconfirmedSpecSave" id="spec-save-outcome-unknown" data-testid="spec-save-outcome-unknown"
+              role="status" class="rounded-lg board-surface-warning px-3 py-3 text-sm board-text-warning">
+              {{ unconfirmedSpecSave }}
+            </p>
+            <div v-else-if="specSaveFailure" data-testid="spec-save-failure" role="alert"
               class="rounded-lg board-surface-danger px-3 py-3 text-sm board-text-danger">
               <p class="font-semibold">{{ t(specSaveFailure.reasonCode === 'DUPLICATE_SPECIFICATION'
                 ? 'app.specDuplicate' : 'app.saveSpecsFailed') }}</p>
@@ -3990,8 +3705,8 @@ watch(() => props.readOnly, readOnly => {
             <button
               @click="createSpecification"
               data-testid="spec-create"
-              :disabled="Boolean(specificationBlockedReason) || creatingSpecification"
-              :aria-describedby="specificationBlockedReason ? 'spec-create-blocked-reason'
+              :disabled="Boolean(specificationBlockedReason) || creatingSpecification || Boolean(unconfirmedSpecSave)"
+              :aria-describedby="unconfirmedSpecSave ? 'spec-save-outcome-unknown' : specificationBlockedReason ? 'spec-create-blocked-reason'
                 : specificationTargetChanged ? 'spec-target-change-notice' : undefined"
               class="board-panel-submit board-action-disarmed"
             >
@@ -4453,6 +4168,9 @@ watch(() => props.readOnly, readOnly => {
           historyEntries: templateDeletePreview.editHistoryEntryCount
         }) }}
       </p>
+      <p v-if="templateDeleteWarning" id="template-delete-unconfirmed" role="status" class="iot-dialog__consequence">
+        {{ templateDeleteWarning }}
+      </p>
       </div>
 
       <div class="iot-dialog__footer">
@@ -4465,7 +4183,8 @@ watch(() => props.readOnly, readOnly => {
         </button>
         <button
           @click="confirmDeleteTemplate"
-          :disabled="props.readOnly || isDeletingTemplate || !templateDeletePreview?.canDelete"
+          :disabled="props.readOnly || isDeletingTemplate || !templateDeletePreview?.canDelete || !!templateDeleteWarning"
+          :aria-describedby="templateDeleteWarning ? 'template-delete-unconfirmed' : undefined"
           data-testid="template-delete-confirm"
           class="iot-dialog-btn iot-dialog-btn--danger"
         >
@@ -4606,6 +4325,9 @@ watch(() => props.readOnly, readOnly => {
           {{ t('app.defaultTemplateResetReverificationRequired') }}
         </p>
       </template>
+      <p v-if="defaultTemplateResetWarning" id="default-template-reset-unconfirmed" role="status" class="iot-dialog__consequence">
+        {{ defaultTemplateResetWarning }}
+      </p>
 
       </div>
 
@@ -4623,7 +4345,8 @@ watch(() => props.readOnly, readOnly => {
           type="button"
           class="iot-dialog-btn iot-dialog-btn--primary"
           data-testid="default-template-reset-confirm"
-          :disabled="props.readOnly || isResettingDefaultTemplates || !defaultTemplateResetPreview?.canApply"
+          :disabled="props.readOnly || isResettingDefaultTemplates || !defaultTemplateResetPreview?.canApply || !!defaultTemplateResetWarning"
+          :aria-describedby="defaultTemplateResetWarning ? 'default-template-reset-unconfirmed' : undefined"
           @click="confirmResetDefaultTemplates"
         >
           <span v-if="isResettingDefaultTemplates" class="iot-dialog-btn__spinner" aria-hidden="true"></span>
@@ -5082,7 +4805,8 @@ details > summary::-webkit-details-marker {
 
 /* Input focus animation */
 input:focus,
-select:focus {
+select:focus,
+:where(.device-runtime-box) :deep(:is(input, select).board-field:focus) {
   animation: focus-ring 0.3s ease-out;
 }
 

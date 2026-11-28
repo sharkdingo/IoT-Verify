@@ -264,6 +264,12 @@ export const getTemplateVariableDefaultValue = (
   return ''
 }
 
+export const formatDeviceRuntimeVariablePlaceholder = (variable: InternalVariable, t: Translate): string => {
+  if (!templateVariableUsesNumericBounds(variable)) return t('app.enterValuePlaceholder')
+  const defaultLabel = t('app.useTemplateDefaultWithValue', { value: getTemplateVariableDefaultValue(variable) })
+  return `${defaultLabel} / ${variable.LowerBound} - ${variable.UpperBound}`
+}
+
 export const resetDeviceRuntimeDraft = (
   draft: DeviceRuntimeDraft,
   template?: DeviceTemplate | null,

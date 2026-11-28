@@ -1,6 +1,6 @@
 import { defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, type RouteRecordRaw } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import { i18n } from '@/assets/i18n'
@@ -24,6 +24,15 @@ vi.mock('@/api/chat', async importOriginal => ({
   requestSessionStop: chatApi.requestSessionStop
 }))
 
+const createTestRouter = (routes: RouteRecordRaw[]) =>
+  createRouter({ history: createMemoryHistory(), routes })
+
+const loginAsAlice = () => {
+  const auth = useAuth()
+  auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+  return auth
+}
+
 describe('App route lifecycle', () => {
   beforeEach(() => {
     chatApi.getSessionList.mockReset().mockResolvedValue([])
@@ -39,10 +48,10 @@ describe('App route lifecycle', () => {
 
   it('notifies other tabs of a received assistant edit even when this Board cannot reload', async () => {
     let finishRefresh!: (value: boolean) => void
-    const refreshRules = vi.fn(() => new Promise<boolean>(resolve => { finishRefresh = resolve }))
+    const refreshBoardSnapshot = vi.fn(() => new Promise<boolean>(resolve => { finishRefresh = resolve }))
     const BoardRoute = defineComponent({
       setup(_, { expose }) {
-        expose({ refreshRules })
+        expose({ refreshBoardSnapshot })
         return () => h('div', 'board')
       }
     })
@@ -51,11 +60,11 @@ describe('App route lifecycle', () => {
       emits: ['stream-command-received'],
       setup: () => () => h('div', 'conversation')
     })
-    const router = createRouter({ history: createMemoryHistory(), routes: [
-      { path: '/board', name: 'board', component: BoardRoute }
-    ] })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([
+      { path: '/board', name: 'board', component: BoardRoute },
+      { path: '/account', name: 'account', component: defineComponent(() => () => h('div', 'account')) }
+    ])
+    const auth = loginAsAlice()
     await router.push('/board')
     const wrapper = mount(App, { global: { plugins: [router, i18n], stubs: { ChatView: ChatViewStub } } })
     const store = useChatStore()
@@ -64,23 +73,37 @@ describe('App route lifecycle', () => {
       await flushPromises()
       const chat = wrapper.getComponent(ChatViewStub)
       const command = { type: 'REFRESH_DATA', payload: { target: 'rule_list' } } satisfies StreamCommand
-      const execute = chat.props('executeCommand') as (command: StreamCommand, source: 'stream') => Promise<boolean>
+      const execute = chat.props('executeCommand') as (command: StreamCommand, source?: 'stream') => Promise<boolean>
 
       chat.vm.$emit('stream-command-received', command, 2)
       expect(boardInvalidation.publishBoardInvalidation).not.toHaveBeenCalled()
       chat.vm.$emit('stream-command-received', command, 1)
       expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledExactlyOnceWith(1, 'chat-tool', 'board')
-      expect(refreshRules).not.toHaveBeenCalled()
+      expect(refreshBoardSnapshot).not.toHaveBeenCalled()
 
       const refresh = execute(command, 'stream')
+      expect(refreshBoardSnapshot).toHaveBeenCalledOnce()
       finishRefresh(false)
       await expect(refresh).resolves.toBe(false)
+      expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledOnce()
+
+      const successfulStreamRefresh = execute(command, 'stream')
+      finishRefresh(true)
+      await expect(successfulStreamRefresh).resolves.toBe(true)
       expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledOnce()
 
       chat.vm.$emit('stream-command-received', {
         type: 'REFRESH_DATA', payload: { target: 'run_history', assistantAction: 'RUN_HISTORY_UPDATED' }
       } satisfies StreamCommand, 1)
       expect(boardInvalidation.publishBoardInvalidation).toHaveBeenLastCalledWith(1, 'chat-tool', 'run-history')
+
+      boardInvalidation.publishBoardInvalidation.mockClear()
+      const localRefresh = execute(command)
+      await router.push('/account')
+      await flushPromises()
+      finishRefresh(true)
+      await expect(localRefresh).resolves.toBe(true)
+      expect(boardInvalidation.publishBoardInvalidation).not.toHaveBeenCalled()
     } finally {
       wrapper.unmount()
       store.closeChat()
@@ -105,12 +128,8 @@ describe('App route lifecycle', () => {
         }
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }]
-    })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     await router.push('/board')
     await router.isReady()
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
@@ -164,12 +183,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }]
-    })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     await router.push('/board')
     await router.isReady()
     const running = {
@@ -225,14 +240,10 @@ describe('App route lifecycle', () => {
   })
 
   it('keeps a queued hidden-session refresh within its authenticated account', async () => {
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: defineComponent({
-        setup: () => () => h('div', 'board')
-      }) }]
-    })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: defineComponent({
+      setup: () => () => h('div', 'board')
+    }) }])
+    const auth = loginAsAlice()
     await router.push('/board')
     await router.isReady()
     let resolveAlice!: (value: unknown) => void
@@ -265,17 +276,15 @@ describe('App route lifecycle', () => {
   })
 
   it('restores persistent assistant activity before the panel is opened', async () => {
-    const BoardRoute = defineComponent({ setup: () => () => h('div', 'board') })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
+    const refreshAllBoardState = vi.fn().mockResolvedValue(true)
+    const BoardRoute = defineComponent({
+      setup(_, { expose }) {
+        expose({ refreshAllBoardState })
+        return () => h('div', 'board')
+      }
     })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     chatApi.getSessionList.mockResolvedValue([
       {
         id: 'finished-session',
@@ -310,18 +319,15 @@ describe('App route lifecycle', () => {
     expect(store.state.activeCount).toBe(1)
     expect(store.state.unreadCount).toBe(1)
     expect(store.state.streaming).toBe(false)
+    expect(refreshAllBoardState).not.toHaveBeenCalled()
     wrapper.unmount()
     auth.logout()
   })
 
   it('hands the last observed account baseline to the lazily mounted conversation', async () => {
     const BoardRoute = defineComponent({ setup: () => () => h('div', 'board') })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     chatApi.getSessionList.mockResolvedValue([{
       id: 'running-session', userId: 1, title: 'Still running', updatedAt: '2026-10-07T12:00:00Z',
       active: true, latestTerminalMessageId: 17, latestExecutionStatus: 'COMPLETED', hasUnreadUpdate: false
@@ -361,16 +367,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'account')
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/account', name: 'account', component: AccountRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/account', name: 'account', component: AccountRoute }])
+    const auth = loginAsAlice()
     const activeSession = {
       id: 'session-from-another-tab',
       userId: 1,
@@ -394,14 +392,21 @@ describe('App route lifecycle', () => {
     const wrapper = mount(App, { global: { plugins: [router, i18n] } })
     await flushPromises()
 
-    await expect(prepareForLogout()).resolves.toBe('ready')
-    expect(chatApi.requestSessionStop).toHaveBeenCalledWith(
-      activeSession.id, undefined, 'alice-token')
-    expect(chatApi.getSessionActivity).toHaveBeenCalledWith(activeSession.id)
-    expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledExactlyOnceWith(1, 'chat-tool')
+    try {
+      chatApi.getSessionActivity.mockRejectedValueOnce(new Error('Temporary activity read failure'))
+      await expect(prepareForLogout()).resolves.toBe('outcome-unknown')
+      expect(chatApi.getSessionActivity).toHaveBeenCalledOnce()
+      expect(boardInvalidation.publishBoardInvalidation).not.toHaveBeenCalled()
 
-    wrapper.unmount()
-    auth.logout()
+      await expect(prepareForLogout()).resolves.toBe('ready')
+      expect(chatApi.requestSessionStop).toHaveBeenCalledWith(
+        activeSession.id, undefined, 'alice-token')
+      expect(chatApi.getSessionActivity).toHaveBeenCalledWith(activeSession.id)
+      expect(boardInvalidation.publishBoardInvalidation).toHaveBeenCalledExactlyOnceWith(1, 'chat-tool')
+    } finally {
+      wrapper.unmount()
+      auth.logout()
+    }
   })
 
   it.each(['session list', 'stop', 'activity'] as const)(
@@ -414,12 +419,8 @@ describe('App route lifecycle', () => {
           return () => h('div', 'account')
         }
       })
-      const router = createRouter({
-        history: createMemoryHistory(),
-        routes: [{ path: '/account', name: 'account', component: AccountRoute }],
-      })
-      const auth = useAuth()
-      auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+      const router = createTestRouter([{ path: '/account', name: 'account', component: AccountRoute }])
+      const auth = loginAsAlice()
       const activeSession = {
         id: 'alice-session', userId: 1, title: 'Alice work', active: true,
         updatedAt: '2026-10-08T00:00:00Z', latestTerminalMessageId: null,
@@ -470,11 +471,10 @@ describe('App route lifecycle', () => {
         return () => h('div', 'account')
       }
     })
-    const router = createRouter({ history: createMemoryHistory(), routes: [
+    const router = createTestRouter([
       { path: '/account', name: 'account', component: AccountRoute }
-    ] })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    ])
+    const auth = loginAsAlice()
     await router.push('/account')
     const wrapper = mount(App, { global: { plugins: [router, i18n] } })
     try {
@@ -532,12 +532,11 @@ describe('App route lifecycle', () => {
         return () => h('div', 'conversation')
       }
     })
-    const router = createRouter({ history: createMemoryHistory(), routes: [
+    const router = createTestRouter([
       { path: '/board', name: 'board', component: BoardRoute },
       { path: '/account', name: 'account', component: AccountRoute }
-    ] })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    ])
+    const auth = loginAsAlice()
     await router.push('/board?run=verification:7&trace=15')
     const wrapper = mount(App, { global: { plugins: [router, i18n], stubs: { ChatView: ChatViewStub } } })
     const store = useChatStore()
@@ -599,11 +598,10 @@ describe('App route lifecycle', () => {
 
   it('reconciles a hidden completion on the account page by invalidating persisted Board state', async () => {
     const AccountRoute = defineComponent({ setup: () => () => h('div', 'account') })
-    const router = createRouter({ history: createMemoryHistory(), routes: [
+    const router = createTestRouter([
       { path: '/account', name: 'account', component: AccountRoute }
-    ] })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    ])
+    const auth = loginAsAlice()
     const runningSession = {
       id: 'background-session', userId: 1, title: 'Background work', active: true,
       updatedAt: '2026-10-09T00:00:00Z', latestTerminalMessageId: null,
@@ -635,7 +633,7 @@ describe('App route lifecycle', () => {
     }
   })
 
-  it('reconciles the Board when a hidden observer sees a background session finish', async () => {
+  it.each(['finished', 'settled without a terminal message', 'removed'] as const)('reconciles a hidden background session that is %s', async outcome => {
     const refreshAllBoardState = vi.fn().mockResolvedValue(true)
     const BoardRoute = defineComponent({
       setup(_, { expose }) {
@@ -643,16 +641,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     const runningSession = {
       id: 'background-session',
       userId: 1,
@@ -663,13 +653,14 @@ describe('App route lifecycle', () => {
       latestExecutionStatus: null,
       hasUnreadUpdate: false
     }
+    const finished = outcome === 'finished'
     chatApi.getSessionList
       .mockResolvedValueOnce([runningSession])
-      .mockResolvedValue([{ ...runningSession,
+      .mockResolvedValue(outcome === 'removed' ? [] : [{ ...runningSession,
         active: false,
-        latestTerminalMessageId: 21,
-        latestExecutionStatus: 'COMPLETED',
-        hasUnreadUpdate: true
+        latestTerminalMessageId: finished ? 21 : null,
+        latestExecutionStatus: finished ? 'COMPLETED' : null,
+        hasUnreadUpdate: finished
       }])
     const store = useChatStore()
     store.closeChat()
@@ -685,7 +676,7 @@ describe('App route lifecycle', () => {
 
     expect(refreshAllBoardState).toHaveBeenCalledOnce()
     expect(store.state.activeCount).toBe(0)
-    expect(store.state.unreadCount).toBe(1)
+    expect(store.state.unreadCount).toBe(finished ? 1 : 0)
     expect(store.state.reconciliationRequired).toBe(false)
     wrapper.unmount()
     auth.logout()
@@ -699,16 +690,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     chatApi.getSessionList
       .mockResolvedValueOnce([])
       .mockResolvedValue([{
@@ -748,16 +731,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       }
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
     const runningSession = {
       id: 'retry-session',
       userId: 1,
@@ -809,20 +784,12 @@ describe('App route lifecycle', () => {
     const PublicRoute = defineComponent({
       setup: () => () => h('div', 'public'),
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/board', name: 'board', component: BoardRoute },
-        { path: '/', name: 'landing', component: PublicRoute, meta: { public: true } },
-      ],
-    })
+    const router = createTestRouter([
+      { path: '/board', name: 'board', component: BoardRoute },
+      { path: '/', name: 'landing', component: PublicRoute, meta: { public: true } },
+    ])
 
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const auth = loginAsAlice()
     useChatStore().closeChat()
     await router.push('/board')
     await router.isReady()
@@ -847,16 +814,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       },
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
 
     await router.push('/board')
     await router.isReady()
@@ -890,16 +849,8 @@ describe('App route lifecycle', () => {
         return () => h('div', 'board')
       },
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/board', name: 'board', component: BoardRoute }],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([{ path: '/board', name: 'board', component: BoardRoute }])
+    const auth = loginAsAlice()
 
     await router.push('/board')
     await router.isReady()
@@ -950,19 +901,11 @@ describe('App route lifecycle', () => {
     const LandingRoute = defineComponent({
       setup: () => () => h('div', 'login'),
     })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/board', name: 'board', component: BoardRoute },
-        { path: '/', name: 'landing', component: LandingRoute, meta: { public: true } },
-      ],
-    })
-    const auth = useAuth()
-    auth.login('alice-token', {
-      userId: 1,
-      phone: '13800138000',
-      username: 'alice',
-    })
+    const router = createTestRouter([
+      { path: '/board', name: 'board', component: BoardRoute },
+      { path: '/', name: 'landing', component: LandingRoute, meta: { public: true } },
+    ])
+    const auth = loginAsAlice()
     await router.push('/board')
     await router.isReady()
     const wrapper = mount(App, { global: { plugins: [router, i18n] } })
@@ -984,15 +927,11 @@ describe('App route lifecycle', () => {
     let rejectPage!: (error: Error) => void
     const page = new Promise<never>((_resolve, reject) => { rejectPage = reject })
     const RecoveredRoute = defineComponent({ setup: () => () => h('p', 'Recovered route') })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', name: 'board', component: () => page },
-        { path: '/recovered', name: 'recovered', component: RecoveredRoute, meta: { public: true } }
-      ]
-    })
-    const auth = useAuth()
-    auth.login('alice-token', { userId: 1, phone: '13800138000', username: 'alice' })
+    const router = createTestRouter([
+      { path: '/', name: 'board', component: () => page },
+      { path: '/recovered', name: 'recovered', component: RecoveredRoute, meta: { public: true } }
+    ])
+    const auth = loginAsAlice()
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const wrapper = mount(App, { global: { plugins: [router, i18n] } })
@@ -1028,13 +967,10 @@ describe('App route lifecycle', () => {
   it('leaves a later route rejection to the current view and removes its router handlers on unmount', async () => {
     const cause = new Error('Failed to fetch dynamically imported module: /assets/Board-test.js')
     const LandingRoute = defineComponent({ setup: () => () => h('p', 'Current login view') })
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/', name: 'landing', component: LandingRoute, meta: { public: true } },
-        { path: '/board', name: 'board', component: () => Promise.reject(cause) }
-      ]
-    })
+    const router = createTestRouter([
+      { path: '/', name: 'landing', component: LandingRoute, meta: { public: true } },
+      { path: '/board', name: 'board', component: () => Promise.reject(cause) }
+    ])
     await router.push('/')
     await router.isReady()
     const removedErrorHandler = vi.fn()

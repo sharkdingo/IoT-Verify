@@ -2,6 +2,7 @@ package cn.edu.nju.Iot_Verify.component.aitool.rule;
 
 import cn.edu.nju.Iot_Verify.component.ai.PromptCompletionService;
 import cn.edu.nju.Iot_Verify.dto.rule.RuleDto;
+import cn.edu.nju.Iot_Verify.dto.board.BoardSemanticSnapshotDto;
 import cn.edu.nju.Iot_Verify.security.UserContextHolder;
 import cn.edu.nju.Iot_Verify.service.BoardStorageService;
 import cn.edu.nju.Iot_Verify.service.recommendation.RecommendationResultParser;
@@ -57,7 +58,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void typedSimilarityRequiresReviewForHighScoreEvenWithoutModelFlags() {
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(7L)).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"isSimilar":false,"isDuplicate":false,"similarity":0.86,
@@ -66,6 +67,7 @@ class CheckRuleSimilarityToolTest {
 
         RuleDto newRule = existingCameraRule();
         newRule.setId(null);
+        newRule.getConditions().get(0).setValue("false");
         var result = service.checkSimilarity(7L, newRule);
 
         assertFalse(result.isSimilar());
@@ -73,7 +75,7 @@ class CheckRuleSimilarityToolTest {
         assertTrue(result.isRequiresReview());
         assertEquals("AI_HIGH_SCORE_REVIEW", result.getReasonCode());
         assertEquals("Camera.capture", result.getMatchedRule());
-        verify(boardStorageService).getRules(7L);
+        verify(boardStorageService).getSemanticSnapshot(7L);
     }
 
     @Test
@@ -87,7 +89,9 @@ class CheckRuleSimilarityToolTest {
         candidate.getConditions().get(0).setValue(" true ");
         candidate.getCommand().setDeviceName(" Camera ");
         candidate.getCommand().setAction(" capture ");
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        RuleDto saved = existingCameraRule();
+        saved.getConditions().get(0).setValue("false");
+        when(boardStorageService.getSemanticSnapshot(7L)).thenReturn(snapshot(List.of(saved)));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenAnswer(invocation -> {
                     String prompt = invocation.getArgument(1);
@@ -118,7 +122,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void editingTheOnlyRuleDoesNotCompareItWithItself() {
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(7L)).thenReturn(snapshot(List.of(existingCameraRule())));
         var result = service.checkSimilarity(7L, existingCameraRule());
         assertFalse(result.isDuplicate());
         assertFalse(result.isRequiresReview());
@@ -131,7 +135,7 @@ class CheckRuleSimilarityToolTest {
         RuleDto other = existingCameraRule();
         other.setId(10L);
         other.getCommand().setAction("send");
-        when(boardStorageService.getRules(7L)).thenReturn(List.of(existingCameraRule(), other));
+        when(boardStorageService.getSemanticSnapshot(7L)).thenReturn(snapshot(List.of(existingCameraRule(), other)));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenAnswer(invocation -> {
                     String prompt = invocation.getArgument(1);
@@ -164,7 +168,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_whenNoExistingRules_returnsNotSimilarWithoutCallingAi() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of());
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of()));
 
         String result = tool.execute("""
                 {
@@ -188,7 +192,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_promptPreservesTypedConditionSemantics() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {
@@ -224,7 +228,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_aiResponseReturnsStableSimilarityFields() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         ```json
@@ -242,7 +246,7 @@ class CheckRuleSimilarityToolTest {
                 {
                   "newRule":{
                     "conditions":[
-                      {"deviceName":"Door Sensor","attribute":"open","targetType":"variable","relation":"=","value":"true"}
+                      {"deviceName":"Door Sensor","attribute":"open","targetType":"variable","relation":"=","value":"false"}
                     ],
                     "command":{"deviceName":"Camera","action":"capture"}
                   }
@@ -262,7 +266,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_unusableAiResponse_isFailureNotNoSimilarityResult() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("{}");
 
@@ -270,7 +274,7 @@ class CheckRuleSimilarityToolTest {
                 {
                   "newRule":{
                     "conditions":[
-                      {"deviceName":"Door Sensor","attribute":"open","targetType":"variable","relation":"=","value":"true"}
+                      {"deviceName":"Door Sensor","attribute":"open","targetType":"variable","relation":"=","value":"false"}
                     ],
                     "command":{"deviceName":"Camera","action":"capture"}
                   }
@@ -285,7 +289,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_outOfRangeScore_isFailure() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"isSimilar":true,"isDuplicate":false,"similarity":1.4,
@@ -294,7 +298,7 @@ class CheckRuleSimilarityToolTest {
 
         JsonNode json = objectMapper.readTree(tool.execute("""
                 {"newRule":{"conditions":[{"deviceName":"Door Sensor","attribute":"open",
-                 "targetType":"variable","relation":"=","value":"true"}],
+                 "targetType":"variable","relation":"=","value":"false"}],
                  "command":{"deviceName":"Camera","action":"capture"}}}
                 """));
 
@@ -304,7 +308,7 @@ class CheckRuleSimilarityToolTest {
 
     @Test
     void checkSimilarity_duplicateNotMarkedSimilar_isFailure() throws Exception {
-        when(boardStorageService.getRules(anyLong())).thenReturn(List.of(existingCameraRule()));
+        when(boardStorageService.getSemanticSnapshot(anyLong())).thenReturn(snapshot(List.of(existingCameraRule())));
         when(promptCompletionService.complete(anyString(), anyString(), anyDouble(), anyInt()))
                 .thenReturn("""
                         {"isSimilar":false,"isDuplicate":true,"similarity":1.0,
@@ -313,12 +317,16 @@ class CheckRuleSimilarityToolTest {
 
         JsonNode json = objectMapper.readTree(tool.execute("""
                 {"newRule":{"conditions":[{"deviceName":"Door Sensor","attribute":"open",
-                 "targetType":"variable","relation":"=","value":"true"}],
+                 "targetType":"variable","relation":"=","value":"false"}],
                  "command":{"deviceName":"Camera","action":"capture"}}}
                 """));
 
         assertEquals("AI_RESPONSE_INVALID", json.path("errorCode").asText());
         assertEquals(502, json.path("status").asInt());
+    }
+
+    private BoardSemanticSnapshotDto snapshot(List<RuleDto> rules) {
+        return new BoardSemanticSnapshotDto(List.of(), List.of(), rules, List.of(), List.of());
     }
 
     private RuleDto existingCameraRule() {

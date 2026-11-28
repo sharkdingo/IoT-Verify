@@ -97,8 +97,7 @@ public class SmvTraceParser {
                 if (currentState != null) {
                     finalizeModeStates(currentState, deviceSmvMap, modeValuesByDevice);
                     materializeCompleteState(currentState, previousCompleteState);
-                    finalizeTriggeredRules(currentState, ruleExecutionValues, rules);
-                    finalizeCompromisedAutomationLinks(currentState, automationLinkAttackValues, rules);
+                    finalizeRuleProbes(currentState, ruleExecutionValues, automationLinkAttackValues, rules);
                     states.add(currentState);
                     previousCompleteState = currentState;
                 }
@@ -136,8 +135,7 @@ public class SmvTraceParser {
         if (currentState != null) {
             finalizeModeStates(currentState, deviceSmvMap, modeValuesByDevice);
             materializeCompleteState(currentState, previousCompleteState);
-            finalizeTriggeredRules(currentState, ruleExecutionValues, rules);
-            finalizeCompromisedAutomationLinks(currentState, automationLinkAttackValues, rules);
+            finalizeRuleProbes(currentState, ruleExecutionValues, automationLinkAttackValues, rules);
             states.add(currentState);
         }
         markLoopBackState(states, loopStartState);
@@ -337,47 +335,26 @@ public class SmvTraceParser {
         }
     }
 
-    private void finalizeTriggeredRules(TraceStateDto state,
-                                        Map<Integer, Boolean> ruleExecutionValues,
-                                        List<RuleDto> rules) {
-        List<TraceTriggeredRuleDto> triggeredRules = new ArrayList<>();
-        ruleExecutionValues.entrySet().stream()
-                .filter(entry -> Boolean.TRUE.equals(entry.getValue()))
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(entry -> {
-                    int index = entry.getKey();
-                    if (rules == null || index < 0 || index >= rules.size()) {
-                        log.warn("Trace rule probe {} has no matching submitted rule snapshot", index);
-                        return;
-                    }
-                    RuleDto rule = rules.get(index);
-                    if (rule == null) {
-                        return;
-                    }
-                    String label = rule.getRuleString();
-                    if (label != null && label.isBlank()) {
-                        label = null;
-                    }
-                    triggeredRules.add(TraceTriggeredRuleDto.builder()
-                            .ruleIndex(index)
-                            .ruleId(rule.getId() != null ? String.valueOf(rule.getId()) : null)
-                            .ruleLabel(label)
-                            .build());
-                });
-        state.setTriggeredRules(triggeredRules);
+    private void finalizeRuleProbes(TraceStateDto state,
+                                    Map<Integer, Boolean> ruleExecutionValues,
+                                    Map<Integer, Boolean> automationLinkAttackValues,
+                                    List<RuleDto> rules) {
+        state.setTriggeredRules(projectRuleProbes(ruleExecutionValues, rules,
+                "Trace rule probe {} has no matching submitted rule snapshot"));
+        state.setCompromisedAutomationLinks(projectRuleProbes(automationLinkAttackValues, rules,
+                "Trace automation-link attack choice {} has no matching submitted rule snapshot"));
     }
 
-    private void finalizeCompromisedAutomationLinks(TraceStateDto state,
-                                                      Map<Integer, Boolean> attackValues,
-                                                      List<RuleDto> rules) {
-        List<TraceTriggeredRuleDto> compromisedLinks = new ArrayList<>();
-        attackValues.entrySet().stream()
+    private List<TraceTriggeredRuleDto> projectRuleProbes(
+            Map<Integer, Boolean> activeValues, List<RuleDto> rules, String missingRuleWarning) {
+        List<TraceTriggeredRuleDto> activeRules = new ArrayList<>();
+        activeValues.entrySet().stream()
                 .filter(entry -> Boolean.TRUE.equals(entry.getValue()))
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(entry -> {
                     int index = entry.getKey();
                     if (rules == null || index < 0 || index >= rules.size()) {
-                        log.warn("Trace automation-link attack choice {} has no matching submitted rule snapshot", index);
+                        log.warn(missingRuleWarning, index);
                         return;
                     }
                     RuleDto rule = rules.get(index);
@@ -388,13 +365,13 @@ public class SmvTraceParser {
                     if (label != null && label.isBlank()) {
                         label = null;
                     }
-                    compromisedLinks.add(TraceTriggeredRuleDto.builder()
+                    activeRules.add(TraceTriggeredRuleDto.builder()
                             .ruleIndex(index)
                             .ruleId(rule.getId() != null ? String.valueOf(rule.getId()) : null)
                             .ruleLabel(label)
                             .build());
                 });
-        state.setCompromisedAutomationLinks(compromisedLinks);
+        return activeRules;
     }
 
     /** NuSMV emits deltas after the first state; API trace states are complete snapshots. */

@@ -20,6 +20,11 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.indexLocalVariables;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.normalizePrivacy;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.normalizeTrust;
+import static cn.edu.nju.Iot_Verify.service.recommendation.RecommendationDeviceRuntime.readLocalPrivacies;
+
 /**
  * 智能设备推荐服务
  * 根据用户画布中现有的所有设备，从系统可用模板中推荐最合适的设备来完善整个物联网系统
@@ -121,20 +126,9 @@ public class DeviceRecommendationService {
         }
 
         if (templates.isEmpty()) {
-            Map<String, Object> emptyResult = new LinkedHashMap<>();
-            emptyResult.put("message", recommendationMessage(language, "noTemplates", 0));
-            emptyResult.put("count", 0);
-            emptyResult.put("requestedCount", maxRecommendations);
-            emptyResult.put("validatedCount", 0);
-            emptyResult.put("filteredCount", 0);
-            emptyResult.put("filteredItems", Collections.emptyList());
-            emptyResult.put("adjustedCount", 0);
-            emptyResult.put("adjustedItems", Collections.emptyList());
-            emptyResult.put("rawCandidateCount", 0);
-            emptyResult.put("inspectedCount", 0);
-            emptyResult.put("truncatedCount", 0);
-            emptyResult.put("recommendations", Collections.emptyList());
-            return resultParser.parseRecommendationResponse(emptyResult, DeviceRecommendationDto.class, true, "AI device recommendation");
+            return resultParser.standaloneResponse(DeviceRecommendationDto.class, "AI device recommendation",
+                    recommendationMessage(language, "noTemplates", 0), maxRecommendations,
+                    List.of(), List.of(), List.of(), 0, 0);
         }
 
         // 构建当前画布设备信息
@@ -174,19 +168,9 @@ public class DeviceRecommendationService {
             Map<String, DeviceTemplateDto> templatesByName =
                     RecommendationCapabilityView.indexTemplates(templates);
             for (DeviceInfoHelper.DeviceInfo device : devices) {
-                Map<String, Object> deviceMap = new LinkedHashMap<>();
-                deviceMap.put("deviceId", device.nodeId());
-                deviceMap.put("label", device.label());
-                deviceMap.put("templateName", device.templateName());
-                deviceMap.put("currentState", device.currentState());
-                deviceMap.put("currentStateTrust", device.currentStateTrust());
-                deviceMap.put("currentStatePrivacy", device.currentStatePrivacy());
-                deviceMap.put("initialVariables", device.instanceVariables() != null ? device.instanceVariables() : Collections.emptyList());
-                deviceMap.put("initialPrivacies", device.instancePrivacies() != null ? device.instancePrivacies() : Collections.emptyList());
                 DeviceTemplateDto template = RecommendationCapabilityView.resolveTemplate(
                         templatesByName, device.templateName());
-                deviceMap.put("capabilities", RecommendationCapabilityView.fromManifest(
-                        template == null ? null : template.getManifest()));
+                Map<String, Object> deviceMap = RecommendationPromptContext.currentDevice(device, template);
                 devicesList.add(deviceMap);
             }
             return objectMapper.writeValueAsString(Map.of(
@@ -248,17 +232,7 @@ public class DeviceRecommendationService {
             int maxRecommendations,
             String language) {
         try {
-            // 清理 AI 返回的内容
-            String cleanedResponse = aiResponse.trim();
-            if (cleanedResponse.startsWith("```")) {
-                int firstNewline = cleanedResponse.indexOf('\n');
-                if (firstNewline > 0) {
-                    cleanedResponse = cleanedResponse.substring(firstNewline).trim();
-                }
-            }
-            if (cleanedResponse.endsWith("```")) {
-                cleanedResponse = cleanedResponse.substring(0, cleanedResponse.lastIndexOf("```")).trim();
-            }
+            String cleanedResponse = RecommendationProviderOutput.stripCodeFence(aiResponse);
 
             // Canonical template names shown to the user and consumed by the frontend.
             Map<String, DeviceTemplateDto> availableTemplateByName = new HashMap<>();
@@ -274,16 +248,8 @@ public class DeviceRecommendationService {
             }
             log.debug("Loaded {} existing device recommendation instance key(s)", existingInstanceKeys.size());
 
-            // 解析 JSON
-            JsonNode root = objectMapper.readTree(cleanedResponse);
-
-            JsonNode recommendationsNode = root.path("recommendations");
-            if (recommendationsNode.isMissingNode() && root.isArray()) {
-                recommendationsNode = root;
-            }
-            if (!recommendationsNode.isArray()) {
-                throw new IllegalArgumentException("AI response must contain a recommendations array");
-            }
+            JsonNode recommendationsNode =
+                    RecommendationProviderOutput.requireRecommendationArray(objectMapper, cleanedResponse);
 
             List<Map<String, Object>> recommendations = new ArrayList<>();
             List<Map<String, Object>> filteredItems = new ArrayList<>();
@@ -390,8 +356,8 @@ public class DeviceRecommendationService {
                         filteredItems.add(filteredItem(inspected, "invalidInitialRuntime", language, suggestedLabel));
                         continue;
                     }
-                    List<Map<String, Object>> initialPrivacies = normalizeInitialPrivacies(
-                            template, initialPrivaciesNode, appliedDefaults);
+                    List<Map<String, Object>> initialPrivacies = template.getManifest() == null
+                            ? Collections.emptyList() : readLocalPrivacies(template, initialPrivaciesNode, true);
                     if (initialPrivacies == null) {
                         filteredItems.add(filteredItem(inspected, "invalidInitialRuntime", language, suggestedLabel));
                         continue;
@@ -413,26 +379,12 @@ public class DeviceRecommendationService {
                 }
             }
 
-            Map<String, Object> result = new LinkedHashMap<>();
-            if (recommendations.isEmpty()) {
-                result.put("message", recommendationMessage(
-                        language, rawCandidateCount == 0 ? "noCandidates" : "empty", 0));
-            } else {
-                result.put("message", recommendationMessage(language, "found", recommendations.size()));
-            }
-            result.put("count", recommendations.size());
-            result.put("requestedCount", maxRecommendations);
-            result.put("validatedCount", recommendations.size());
-            result.put("filteredCount", filteredItems.size());
-            result.put("filteredItems", filteredItems);
-            result.put("adjustedCount", adjustedItems.size());
-            result.put("adjustedItems", adjustedItems);
-            result.put("rawCandidateCount", rawCandidateCount);
-            result.put("inspectedCount", inspected);
-            result.put("truncatedCount", Math.max(0, rawCandidateCount - inspected));
-            result.put("recommendations", recommendations);
-
-            return resultParser.parseRecommendationResponse(result, DeviceRecommendationDto.class, true, "AI device recommendation");
+            String messageKey = recommendations.isEmpty()
+                    ? (rawCandidateCount == 0 ? "noCandidates" : "empty")
+                    : "found";
+            return resultParser.standaloneResponse(DeviceRecommendationDto.class, "AI device recommendation",
+                    recommendationMessage(language, messageKey, recommendations.size()), maxRecommendations,
+                    recommendations, filteredItems, adjustedItems, rawCandidateCount, inspected);
 
         } catch (Exception e) {
             log.error("Failed to parse AI response: exception={}", e.getClass().getName());
@@ -545,7 +497,7 @@ public class DeviceRecommendationService {
             Map<String, Object> appliedDefaults) {
         if (template == null || template.getManifest() == null) return Collections.emptyList();
         if (isPresentNode(variablesNode) && !variablesNode.isArray()) return null;
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = localVariableMap(template);
+        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = indexLocalVariables(template);
         List<Map<String, Object>> variables = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         if (variablesNode.isArray()) for (JsonNode row : variablesNode) {
@@ -590,47 +542,6 @@ public class DeviceRecommendationService {
                 && !template.getManifest().getWorkingStates().isEmpty();
     }
 
-    private List<Map<String, Object>> normalizeInitialPrivacies(
-            DeviceTemplateDto template,
-            JsonNode privaciesNode,
-            Map<String, Object> appliedDefaults) {
-        if (template == null || template.getManifest() == null) return Collections.emptyList();
-        if (isPresentNode(privaciesNode) && !privaciesNode.isArray()) return null;
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariables = localVariableMap(template);
-        List<Map<String, Object>> privacies = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        if (privaciesNode.isArray()) for (JsonNode row : privaciesNode) {
-            if (!row.isObject()) return null;
-            String name = text(row.path("name"), "");
-            if (name.isBlank() || !seen.add(name.toLowerCase(Locale.ROOT))) return null;
-            DeviceTemplateDto.DeviceManifest.InternalVariable variable = localVariables.get(name.toLowerCase(Locale.ROOT));
-            if (variable == null) return null;
-            JsonNode privacyNode = row.path("privacy");
-            String normalizedPrivacy = normalizePrivacy(privacyNode.asText(""));
-            if (isPresentNode(privacyNode) && normalizedPrivacy == null) return null;
-            if (normalizedPrivacy != null) {
-                Map<String, Object> normalized = new LinkedHashMap<>();
-                normalized.put("name", variable.getName());
-                normalized.put("privacy", normalizedPrivacy);
-                privacies.add(normalized);
-            }
-        }
-        return privacies;
-    }
-
-    private Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> localVariableMap(DeviceTemplateDto template) {
-        Map<String, DeviceTemplateDto.DeviceManifest.InternalVariable> variables = new LinkedHashMap<>();
-        if (template.getManifest() == null || template.getManifest().getInternalVariables() == null) {
-            return variables;
-        }
-        for (DeviceTemplateDto.DeviceManifest.InternalVariable variable : template.getManifest().getInternalVariables()) {
-            if (variable.getName() != null && Boolean.TRUE.equals(variable.getIsInside())) {
-                variables.put(variable.getName().toLowerCase(Locale.ROOT), variable);
-            }
-        }
-        return variables;
-    }
-
     /**
      * Local defaults follow the chosen initial state, which can differ from the template's InitState.
      */
@@ -671,28 +582,8 @@ public class DeviceRecommendationService {
         return value;
     }
 
-    private boolean isProvided(JsonNode node) {
-        return node != null && !node.isMissingNode() && !node.isNull() && !node.asText("").trim().isEmpty();
-    }
-
     private boolean isPresentNode(JsonNode node) {
         return node != null && !node.isMissingNode() && !node.isNull();
-    }
-
-    private String normalizeTrust(String value) {
-        if (value == null) {
-            return null;
-        }
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        return "trusted".equals(normalized) || "untrusted".equals(normalized) ? normalized : null;
-    }
-
-    private String normalizePrivacy(String value) {
-        if (value == null) {
-            return null;
-        }
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        return "public".equals(normalized) || "private".equals(normalized) ? normalized : null;
     }
 
     private String languageInstruction(String language) {

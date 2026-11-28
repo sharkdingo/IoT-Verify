@@ -54,52 +54,23 @@ public class SimulateModelAsyncTool extends AbstractAiTool {
     @Override
     protected String doExecute(Long userId, String argsJson) {
         try {
-            JsonNode args;
-            try {
-                args = parseArgs(argsJson);
-            } catch (ArgParseException e) {
-                return e.getErrorResponse();
-            }
+            JsonNode args = parseArgs(argsJson);
             requireOnlyFields(args, "arguments", Set.of(
                     "steps", "attackMode", "attackPoints", "enablePrivacy"));
-            int steps = intArgInRange(args, "steps", 10, 1, 100);
-            AttackScenarioDto attackScenario = attackScenarioArg(args, false);
-            boolean enablePrivacy = booleanArg(args, "enablePrivacy", false);
-
-            SimulationRequestDto request = new SimulationRequestDto();
-            request.setSteps(steps);
-            request.setAttackScenario(attackScenario);
-            request.setEnablePrivacy(enablePrivacy);
+            SimulationRequestDto request = simulationRequest(args);
+            AttackScenarioDto attackScenario = request.getAttackScenario();
             Long taskId = simulationService.submitSimulation(userId, request);
-            if (taskId == null || taskId <= 0) {
-                throw new IllegalStateException("Simulation submission returned no usable task id");
-            }
-            try {
-                var task = simulationService.getTask(userId, taskId);
-                if (task == null) {
-                    throw new IllegalStateException("Accepted simulation task was not readable");
-                }
-
-                Map<String, Object> response = new java.util.LinkedHashMap<>();
-                response.put("message", "Simulation task accepted. Its current status is authoritative; completion is not implied.");
-                response.put("taskAccepted", true);
-                response.put("taskId", taskId);
-                response.put("taskStatus", task.getStatus());
-                response.put("progress", task.getProgress());
-                response.put("requestedSteps", task.getRequestedSteps());
-                response.put("isAttack", task.getIsAttack());
-                response.put("attackBudget", task.getAttackBudget());
-                response.put("attackScenario", attackScenario);
-                response.put("enablePrivacy", task.getEnablePrivacy());
-                response.put("modelSnapshot", task.getModelSnapshot());
-                response.put("modelSemantics", task.getModelSemantics());
-                return acceptedAsyncTaskJson(
-                        response, taskId, "simulate_task_status");
-            } catch (Exception e) {
-                log.error("Simulation task {} was accepted, but its status response is unavailable",
-                        taskId, e);
-                return acceptedAsyncTaskResultUnavailable(taskId, "simulate_task_status");
-            }
+            return acceptedAsyncTaskJson(taskId, "Simulation", "simulate_task_status",
+                    "Simulation task accepted. Its current status is authoritative; completion is not implied.",
+                    () -> simulationService.getTask(userId, taskId), (response, task) -> {
+                        response.put("requestedSteps", task.getRequestedSteps());
+                        response.put("isAttack", task.getIsAttack());
+                        response.put("attackBudget", task.getAttackBudget());
+                        response.put("attackScenario", attackScenario);
+                        response.put("enablePrivacy", task.getEnablePrivacy());
+                        response.put("modelSnapshot", task.getModelSnapshot());
+                        response.put("modelSemantics", task.getModelSemantics());
+                    });
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (AsyncTaskDispatchOutcomeUnknownException e) {

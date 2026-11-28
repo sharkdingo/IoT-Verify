@@ -100,18 +100,15 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(BadRequestException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleBadRequestException(BadRequestException e) {
         log.warn("Bad request: {}", e.getMessage());
-        Result<Map<String, Object>> result = Result.badRequest(e.getMessage());
-        if (!e.getErrors().isEmpty()) result.setData(Map.of("errors", e.getErrors()));
-        return json(HttpStatus.BAD_REQUEST)
-                .body(result);
+        Map<String, Object> data = e.getErrors().isEmpty() ? null : Map.of("errors", e.getErrors());
+        return jsonError(HttpStatus.BAD_REQUEST, e.getMessage(), data);
     }
 
     @ExceptionHandler(FixSuggestionStaleException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleFixSuggestionStaleException(FixSuggestionStaleException e) {
         log.warn("Automatic-fix suggestion rejected as stale or invalid");
-        Result<Map<String, Object>> result = Result.badRequest(e.getMessage());
-        result.setData(Map.of("reasonCode", FixSuggestionStaleException.REASON_CODE));
-        return json(HttpStatus.BAD_REQUEST).body(result);
+        return jsonError(HttpStatus.BAD_REQUEST, e.getMessage(),
+                Map.of("reasonCode", FixSuggestionStaleException.REASON_CODE));
     }
 
     @ExceptionHandler(UnauthorizedException.class)
@@ -139,58 +136,47 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Map<String, Object>>> handleBoardReplacementStaleException(
             BoardReplacementStaleException e) {
         log.warn("Board replacement confirmation became stale");
-        Result<Map<String, Object>> result = Result.error(HttpStatus.CONFLICT.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), Map.of(
                 "reasonCode", "BOARD_REPLACEMENT_STALE",
                 "currentPreview", e.getCurrentPreview()));
-        return json(HttpStatus.CONFLICT).body(result);
     }
 
     @ExceptionHandler(DeviceRuntimeConflictException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleDeviceRuntimeConflictException(
             DeviceRuntimeConflictException e) {
         log.warn("Device runtime compare-and-set conflict");
-        Result<Map<String, Object>> result = Result.error(HttpStatus.CONFLICT.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), Map.of(
                 "reasonCode", DeviceRuntimeConflictException.REASON_CODE,
                 "currentDevice", e.getCurrentDevice()));
-        return json(HttpStatus.CONFLICT).body(result);
     }
 
     @ExceptionHandler(EnvironmentVariableConflictException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleEnvironmentVariableConflictException(
             EnvironmentVariableConflictException e) {
         log.warn("Environment variable compare-and-set conflict: variableName={}", e.getVariableName());
-        Result<Map<String, Object>> result = Result.error(HttpStatus.CONFLICT.value(), e.getMessage());
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("reasonCode", EnvironmentVariableConflictException.REASON_CODE);
         data.put("variableName", e.getVariableName());
         data.put("currentVariable", e.getCurrentVariable());
-        result.setData(data);
-        return json(HttpStatus.CONFLICT).body(result);
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), data);
     }
 
     @ExceptionHandler(ConflictException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleConflictException(ConflictException e) {
         log.warn("Conflict response [{}]", e.getCode());
-        Result<Map<String, Object>> result = Result.conflict(e.getMessage());
-        if (e.getReasonCode() != null) {
-            result.setData(Map.of("reasonCode", e.getReasonCode(),
-                    "errors", Map.of(e.getField(), e.getMessage())));
-        }
-        return json(HttpStatus.CONFLICT).body(result);
+        Map<String, Object> data = e.getReasonCode() == null ? null : Map.of(
+                "reasonCode", e.getReasonCode(), "errors", Map.of(e.getField(), e.getMessage()));
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), data);
     }
 
     @ExceptionHandler(BoardContentConflictException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleBoardContentConflictException(
             BoardContentConflictException e) {
-        Result<Map<String, Object>> result = Result.conflict(e.getMessage());
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("reasonCode", e.getReasonCode());
         details.put("errors", e.getErrors());
         if (e.getTemplateName() != null) details.put("templateName", e.getTemplateName());
-        result.setData(details);
-        return json(HttpStatus.CONFLICT).body(result);
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), details);
     }
 
     @ExceptionHandler(FuzzTaskQuotaExceededException.class)
@@ -198,13 +184,10 @@ public class GlobalExceptionHandler {
             FuzzTaskQuotaExceededException e) {
         log.warn("Counterexample-search active-task limit reached: active={}, limit={}",
                 e.getActiveTaskCount(), e.getMaxActiveTasksPerUser());
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.TOO_MANY_REQUESTS.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.TOO_MANY_REQUESTS, e.getMessage(), Map.of(
                 "reasonCode", FuzzTaskQuotaExceededException.REASON_CODE,
                 "activeTaskCount", e.getActiveTaskCount(),
                 "maxActiveTasksPerUser", e.getMaxActiveTasksPerUser()));
-        return json(HttpStatus.TOO_MANY_REQUESTS).body(result);
     }
 
     @ExceptionHandler(FuzzTaskStorageQuotaExceededException.class)
@@ -212,13 +195,10 @@ public class GlobalExceptionHandler {
             FuzzTaskStorageQuotaExceededException e) {
         log.warn("Counterexample-search stored-task limit reached: stored={}, limit={}",
                 e.getStoredTaskCount(), e.getMaxStoredTasksPerUser());
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.TOO_MANY_REQUESTS.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.TOO_MANY_REQUESTS, e.getMessage(), Map.of(
                 "reasonCode", FuzzTaskStorageQuotaExceededException.REASON_CODE,
                 "storedTaskCount", e.getStoredTaskCount(),
                 "maxStoredTasksPerUser", e.getMaxStoredTasksPerUser()));
-        return json(HttpStatus.TOO_MANY_REQUESTS).body(result);
     }
 
     @ExceptionHandler(AsyncTaskQuotaExceededException.class)
@@ -226,58 +206,43 @@ public class GlobalExceptionHandler {
             AsyncTaskQuotaExceededException e) {
         log.warn("{} {}-task limit reached: count={}, limit={}",
                 e.getTaskKind(), e.getQuotaType(), e.getTaskCount(), e.getMaxTasksPerUser());
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.TOO_MANY_REQUESTS.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.TOO_MANY_REQUESTS, e.getMessage(), Map.of(
                 "reasonCode", e.getReasonCode(),
                 "taskKind", e.getTaskKind(),
                 "quotaType", e.getQuotaType().name(),
                 "taskCount", e.getTaskCount(),
                 "maxTasksPerUser", e.getMaxTasksPerUser()));
-        return json(HttpStatus.TOO_MANY_REQUESTS).body(result);
     }
 
     @ExceptionHandler(ChatSessionBusyException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleChatSessionBusyException(
             ChatSessionBusyException e) {
         log.warn("Chat session is busy: {}", e.getSessionId());
-        Result<Map<String, Object>> result = Result.error(HttpStatus.CONFLICT.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), Map.of(
                 "reasonCode", e.getReasonCode(),
                 "sessionId", e.getSessionId()));
-        return json(HttpStatus.CONFLICT).body(result);
     }
 
     @ExceptionHandler(TemplateDeletionConflictException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleTemplateDeletionConflictException(
             TemplateDeletionConflictException e) {
         log.warn("Template deletion conflict [{}]", e.getReasonCode());
-        Result<Map<String, Object>> result = Result.error(HttpStatus.CONFLICT.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.CONFLICT, e.getMessage(), Map.of(
                 "reasonCode", e.getReasonCode(),
                 "currentPreview", e.getCurrentPreview()));
-        return json(HttpStatus.CONFLICT).body(result);
     }
 
     @ExceptionHandler(ValidationException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleValidationException(ValidationException e) {
         log.warn("Validation error: {}", e.getMessage());
-        Result<Map<String, Object>> result = Result.error(422, e.getMessage());
-        result.setData(Map.of("errors", e.getErrors()));
-        return json(HttpStatus.UNPROCESSABLE_ENTITY)  // 422
-                .body(result);
+        return jsonError(HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage(), Map.of("errors", e.getErrors()));
     }
 
     @ExceptionHandler(SmvGenerationException.class)
     public ResponseEntity<Result<Map<String, Object>>> handleSmvGenerationException(SmvGenerationException e) {
         log.error("SMV generation error [{}]: {}", e.getErrorCategory(), e.getMessage(), e);
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.INTERNAL_SERVER_ERROR.value(),
-                "[" + e.getErrorCategory() + "] " + e.getMessage()
-        );
-        result.setData(Map.of("errorCategory", e.getErrorCategory()));
-        return json(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(result);
+        return jsonError(HttpStatus.INTERNAL_SERVER_ERROR, "[" + e.getErrorCategory() + "] " + e.getMessage(),
+                Map.of("errorCategory", e.getErrorCategory()));
     }
 
     @ExceptionHandler(PersistedDataIntegrityException.class)
@@ -285,16 +250,14 @@ public class GlobalExceptionHandler {
             PersistedDataIntegrityException e) {
         log.error("Persisted semantic data is invalid: type={}, id={}, field={}",
                 e.getRecordType(), e.getRecordId(), e.getField(), e);
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.INTERNAL_SERVER_ERROR.value(),
-                "Stored model data is invalid; the operation was stopped before using an incomplete model.");
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("reasonCode", e.getReasonCode());
         details.put("recordType", e.getRecordType());
         if (e.getRecordId() != null) details.put("recordId", e.getRecordId());
         details.put("field", e.getField());
-        result.setData(details);
-        return json(HttpStatus.INTERNAL_SERVER_ERROR).body(result);
+        return jsonError(HttpStatus.INTERNAL_SERVER_ERROR,
+                "Stored model data is invalid; the operation was stopped before using an incomplete model.",
+                details);
     }
 
     @ExceptionHandler(InternalServerException.class)
@@ -308,13 +271,10 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Map<String, Object>>> handleAsyncTaskDispatchOutcomeUnknownException(
             AsyncTaskDispatchOutcomeUnknownException e) {
         log.error("{} task {} dispatch outcome is unknown", e.getTaskKind(), e.getTaskId(), e);
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.SERVICE_UNAVAILABLE.value(), e.getMessage());
-        result.setData(Map.of(
+        return jsonError(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage(), Map.of(
                 "reasonCode", AsyncTaskDispatchOutcomeUnknownException.REASON_CODE,
                 "taskKind", e.getTaskKind(),
                 "taskId", e.getTaskId()));
-        return json(HttpStatus.SERVICE_UNAVAILABLE).body(result);
     }
 
     @ExceptionHandler(ServiceUnavailableException.class)
@@ -328,10 +288,8 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Result<Map<String, Object>>> handleFixApplyPreflightUnavailableException(
             FixApplyPreflightUnavailableException e) {
         log.warn("Automatic-fix apply preflight unavailable");
-        Result<Map<String, Object>> result = Result.error(
-                HttpStatus.SERVICE_UNAVAILABLE.value(), e.getMessage());
-        result.setData(Map.of("reasonCode", FixApplyPreflightUnavailableException.REASON_CODE));
-        return json(HttpStatus.SERVICE_UNAVAILABLE).body(result);
+        return jsonError(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage(),
+                Map.of("reasonCode", FixApplyPreflightUnavailableException.REASON_CODE));
     }
 
     @ExceptionHandler(SimulationExecutionException.class)
@@ -390,10 +348,8 @@ public class GlobalExceptionHandler {
             HttpMessageNotReadableException e) {
         log.warn("Malformed request body: {}", e.getMessage());
         RequestBodyError error = describeRequestBodyError(e);
-        Result<Map<String, Object>> result = Result.error(HttpStatus.BAD_REQUEST.value(), error.message());
-        result.setData(Map.of("errors", Map.of(error.path(), error.reason())));
-        return json(HttpStatus.BAD_REQUEST)
-                .body(result);
+        return jsonError(HttpStatus.BAD_REQUEST, error.message(),
+                Map.of("errors", Map.of(error.path(), error.reason())));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -410,10 +366,7 @@ public class GlobalExceptionHandler {
                 errors, error.getField(), Objects.toString(error.getDefaultMessage(), "Validation failed")));
         String message = validationMessage(errors);
         log.warn("Validation failed: {}", message);
-        Result<Map<String, Object>> result = Result.error(400, message);
-        result.setData(Map.of("errors", errors));
-        return json(HttpStatus.BAD_REQUEST)
-                .body(result);
+        return jsonError(HttpStatus.BAD_REQUEST, message, Map.of("errors", errors));
     }
 
     @ExceptionHandler(org.springframework.web.method.annotation.HandlerMethodValidationException.class)
@@ -427,10 +380,7 @@ public class GlobalExceptionHandler {
         });
         String message = validationMessage(errors);
         log.warn("Handler method validation failed: {}", message);
-        Result<Map<String, Object>> result = Result.error(400, message);
-        result.setData(Map.of("errors", errors));
-        return json(HttpStatus.BAD_REQUEST)
-                .body(result);
+        return jsonError(HttpStatus.BAD_REQUEST, message, Map.of("errors", errors));
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
@@ -440,10 +390,7 @@ public class GlobalExceptionHandler {
                 errors, violation.getPropertyPath().toString(), violation.getMessage()));
         String message = validationMessage(errors);
         log.warn("Constraint violation: {}", message);
-        Result<Map<String, Object>> result = Result.error(400, message);
-        result.setData(Map.of("errors", errors));
-        return json(HttpStatus.BAD_REQUEST)
-                .body(result);
+        return jsonError(HttpStatus.BAD_REQUEST, message, Map.of("errors", errors));
     }
 
     private void mergeValidationError(Map<String, String> errors, String field, String reason) {
@@ -540,6 +487,13 @@ public class GlobalExceptionHandler {
         log.error("Unexpected error: {} - {}", e.getClass().getName(), e.getMessage(), e);
         return json(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Result.error("Internal server error"));
+    }
+
+    private ResponseEntity<Result<Map<String, Object>>> jsonError(
+            HttpStatus status, String message, Map<String, Object> data) {
+        Result<Map<String, Object>> result = Result.error(status.value(), message);
+        result.setData(data);
+        return json(status).body(result);
     }
 
     private ResponseEntity.BodyBuilder json(HttpStatus status) {

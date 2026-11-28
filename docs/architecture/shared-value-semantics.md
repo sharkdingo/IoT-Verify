@@ -77,9 +77,10 @@ mirror. Keying it off the capability set silently dropped a user's label edit fo
 Environment Pool renders as editable.
 
 Two consequences worth knowing before reading further. A per-device label for a shared name is
-**[REJECTED]** at both writer boundaries rather than merged — `BoardStorageServiceImpl.validateNodeVariables`
-and `NusmvRequestValidator.validateDeviceVariables` both name the pool as the place to supply it — so
-this is a diagnosable `422` naming the field, not a silent overwrite. And the device dialog's runtime section renders
+**[REJECTED]** through `ManifestConditionValidation` at both writer boundaries. Board validation uses declared
+names, while model request admission reports affect-only names as unknown because those devices have no readable
+value. Both return a field-specific `422`. Supply shared labels through the environment pool. The device
+dialog's runtime section renders
 only when the template has modes *with* working states or at least one device-local variable
 (`DeviceDialog.hasRuntimeFields`), so a template that is purely a shared-value reader has no per-device
 runtime surface at all — 13 of the bundled ones, every single-reading sensor among them. For those the
@@ -152,9 +153,9 @@ reach storage by three routes and each was independently permissive:
 | :--- | :--- | :--- |
 | `RuleBuilder.getDeviceVariables` | a person building a rule | an affect-only value is not offered |
 | `ControlCenter.getAvailableKeys` | a person building a specification | an affect-only value is not offered |
-| `BoardSemanticValidator.findVariable` | the assistant's rule/spec tools, before writing | refused with an actionable reason |
-| `BoardStorageServiceImpl.conditionSourceVariable` | persist time — REST board endpoints, assistant tools, scene import | rejected with the variable named |
-| `NusmvRequestValidator.internalVariable` | a verification/simulation request | rejected before generation |
+| `BoardSemanticValidator` via `findConditionVariable` | the assistant's rule/spec tools, before writing | refused with an actionable reason |
+| `BoardStorageServiceImpl` via `findConditionVariable` | persist time — REST board endpoints, assistant tools, scene import | rejected with the variable named |
+| `NusmvRequestValidator.conditionVariable` | a verification/simulation request | rejected before generation |
 
 A sixth read-capability narrowing exists outside that table, deliberately. A Transition `Trigger` is
 template authoring rather than a condition source, so it has no writer boundary among the five above,
@@ -164,11 +165,9 @@ which for an affect-only declaration is declared and never assigned — an uncon
 re-picks every step. Measured before the check: a lamp declaring "switch off when illuminance >= 80"
 fired while the real shared value sat at 20.
 
-**Two lookups that must stay distinct, and one that must stay permissive.** Each of the gates above
-is a *narrowing* of a capability-blind existence lookup that is kept beside it and left alone: those
-answer whether a declaration exists at all — domain resolution, runtime overrides, contradiction
-detection — where an affect-only declaration is a legitimate answer. Conflating the two questions is
-what made this gap span four boundaries.
+`ManifestConditionSemantics` owns the backend read-capability rule. It also provides the
+declaration lookup used by domain resolution, runtime overrides, and contradiction detection,
+where an affect-only declaration is a legitimate answer.
 
 A specification may still reference an affect-only value's **trust or privacy label**
 (`propertyScope: variable`). The device module declares `trust_<name>` and `privacy_<name>` for every

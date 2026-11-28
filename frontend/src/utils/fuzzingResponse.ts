@@ -17,7 +17,7 @@ import {
   FUZZING_EXPLORATION_MODES,
   isValidFuzzPaperDomainFingerprint
 } from '@/types/fuzzing'
-import type { AsyncTaskStatus, TaskProgressStage } from '@/types/task'
+import { isAsyncTaskStatus, isTaskProgressStage } from '@/types/task'
 import { validateTraceStatePayload } from './traceStateResponse'
 import { isRunInitiator, type ModelPlaybackScene } from '@/types/model'
 import { MODEL_TOKEN_SOURCE_SET } from '@/types/modelToken'
@@ -69,25 +69,6 @@ export class FuzzResponseContractError extends Error {
     this.name = 'FuzzResponseContractError'
   }
 }
-
-const TASK_STATUSES = new Set<AsyncTaskStatus>([
-  'PENDING',
-  'RUNNING',
-  'COMPLETED',
-  'FAILED',
-  'CANCELLED'
-])
-const TASK_PROGRESS_STAGES = new Set<TaskProgressStage>([
-  'QUEUED',
-  'STARTING',
-  'GENERATING_MODEL',
-  'EXECUTING_MODEL_CHECKER',
-  'PARSING_RESULTS',
-  'RUNNING_SIMULATION',
-  'PREPARING_EXPLORATION',
-  'EXPLORING_CANDIDATES',
-  'PERSISTING_RESULT'
-])
 
 const OUTCOMES = new Set(['FOUND_VIOLATION', 'BUDGET_EXHAUSTED', 'INCONCLUSIVE'])
 const INPUT_EVENT_KINDS = new Set([
@@ -149,23 +130,6 @@ export const assertFuzzingFindingBelongsToRun = (
   if (ownerId !== expectedRunId) {
     throw new FuzzResponseContractError(context, 'finding fuzzTaskId must match the owning run')
   }
-}
-
-export const resolveFuzzingRunFinding = (
-  run: Pick<FuzzingRun, 'id' | 'findings'>,
-  findingId: number,
-  context = 'Fuzz finding replay'
-): FuzzingFinding => {
-  const expectedFindingId = integer(findingId, 'findingId', context, 1)
-  const finding = run.findings.find(candidate => candidate.id === expectedFindingId)
-  if (!finding) {
-    throw new FuzzResponseContractError(
-      context,
-      'the owning run does not contain the requested finding evidence'
-    )
-  }
-  assertFuzzingFindingBelongsToRun(finding, run.id, context)
-  return finding
 }
 
 const text = (value: unknown, field: string, context: string, allowEmpty = false): string => {
@@ -363,7 +327,7 @@ const validateTask = (value: unknown, context: string): FuzzingTask => {
     throw new FuzzResponseContractError(context, 'initiator is invalid')
   }
   validateExplorationMode(task.explorationMode, context)
-  if (!TASK_STATUSES.has(task.status)) {
+  if (!isAsyncTaskStatus(task.status)) {
     throw new FuzzResponseContractError(context, 'status is invalid')
   }
   text(task.createdAt, 'createdAt', context)
@@ -374,7 +338,7 @@ const validateTask = (value: unknown, context: string): FuzzingTask => {
   if (task.progress > 100) {
     throw new FuzzResponseContractError(context, 'progress must be <= 100')
   }
-  if (task.progressStage !== undefined && !TASK_PROGRESS_STAGES.has(task.progressStage)) {
+  if (task.progressStage !== undefined && !isTaskProgressStage(task.progressStage)) {
     throw new FuzzResponseContractError(context, 'progressStage is invalid')
   }
   if (task.processingTimeMs !== undefined) integer(task.processingTimeMs, 'processingTimeMs', context)

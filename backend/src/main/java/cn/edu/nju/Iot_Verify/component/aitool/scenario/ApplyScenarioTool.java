@@ -119,9 +119,7 @@ public class ApplyScenarioTool extends AbstractAiTool {
             putVerificationReadiness(response, pending.scene());
             log.info("Applied AI scenario draft atomically: userId={}, sessionId={}, scenarioName={}",
                     userId, sessionId, pending.scenarioName());
-            return successJson(response, "Scenario replacement result unavailable.");
-        } catch (ArgParseException e) {
-            return e.getErrorResponse();
+            return successJson(response);
         } catch (ArgValidationException e) {
             return e.getErrorResponse();
         } catch (BoardReplacementStaleException e) {
@@ -164,8 +162,7 @@ public class ApplyScenarioTool extends AbstractAiTool {
                 "resultAvailable", false,
                 "mutationMayHaveCommitted", true,
                 "errorCode", "MUTATION_RESULT_INVALID",
-                "message", "The scenario replacement outcome could not be confirmed. Refresh the Board before retrying."),
-                "Scenario replacement result unavailable.");
+                "message", "The scenario replacement outcome could not be confirmed. Refresh the Board before retrying."));
     }
 
     private String preview(Long userId, String sessionId) {
@@ -182,7 +179,7 @@ public class ApplyScenarioTool extends AbstractAiTool {
         response.put("message", "No changes were made. Explicit user confirmation is required before atomically replacing the current board with this scenario draft.");
         response.put("operation", "preview");
         response.put("requiresUserConfirmation", true);
-        return readOnlySuccessJson(response, "Scenario replacement preview unavailable.");
+        return readOnlySuccessJson(response);
     }
 
     private String stalePreview(Long userId, BoardReplacementStaleException exception) {

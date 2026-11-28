@@ -1,5 +1,6 @@
 // src/api/rules.ts - Rules API
 import api from '@/api/http'
+import { unpack } from './resultEnvelope'
 import type {
     RecommendationAdjustmentItem,
     RecommendationFilteredItem,
@@ -11,18 +12,6 @@ import {
   markRecommendationResponseReceived,
   type OwnedRecommendationPostOptions
 } from '@/utils/recommendationRequestRecovery'
-
-// 辅助函数：解包Result（后端返回 { code, message, data }）
-const unpack = <T>(response: any): T => {
-  return response.data.data;
-};
-
-// 用于取消请求的 AbortController
-let currentAbortController: AbortController | null = null;
-
-/**
- * 获取规则推荐
- */
 
 export type {
     RecommendationAdjustmentItem,
@@ -46,62 +35,26 @@ export interface RecommendRulesResponse {
 }
 
 export const recommendRules = async (
-  options: OwnedRecommendationPostOptions,
+  { requestId, signal, authToken }: Required<OwnedRecommendationPostOptions>,
   maxRecommendations: number = 5,
   language: string = 'en',
   userRequirement: string = ''
 ): Promise<RecommendRulesResponse> => {
-  const requestId = options.requestId || crypto.randomUUID()
-  const signal = options.signal
-  const ownedController = signal ? null : new AbortController()
-  if (ownedController) {
-    currentAbortController?.abort()
-    currentAbortController = ownedController
-  }
-
+  const response = await api.post<any>('/board/rules/recommend', {
+    maxRecommendations, language, userRequirement, requestId
+  }, {
+    signal,
+    timeout: 0,
+    headers: { Authorization: `Bearer ${authToken}` }
+  })
   try {
-    const response = await api.post<any>('/board/rules/recommend', {
-      maxRecommendations, language, userRequirement, requestId
-    }, {
-      signal: signal || ownedController!.signal,
-      timeout: 0,
-      headers: { Authorization: `Bearer ${options.authToken}` }
-    })
-    try {
-      return validateStandaloneRecommendationResponse<RecommendRulesResponse>(
-        unpack<unknown>(response),
-        'Rule recommendation',
-        validateRuleRecommendationCandidate,
-        true
-      )
-    } catch (error) {
-      throw markRecommendationResponseReceived(error)
-    }
-  } finally {
-    if (ownedController && currentAbortController === ownedController) {
-      currentAbortController = null
-    }
+    return validateStandaloneRecommendationResponse<RecommendRulesResponse>(
+      unpack<unknown>(response),
+      'Rule recommendation',
+      validateRuleRecommendationCandidate,
+      true
+    )
+  } catch (error) {
+    throw markRecommendationResponseReceived(error)
   }
-}
-
-/**
- * 取消规则推荐请求
- */
-export const cancelRecommendRules = (): void => {
-  if (currentAbortController) {
-    currentAbortController.abort()
-    currentAbortController = null
-  }
-}
-
-/**
- * 规则类型定义
- */
-// NOTE: targeted rule persistence and RuleDto <-> RuleForm mapping live in `api/board.ts`.
-// This module owns only rule recommendation so there is one mutation authority.
-
-// Default export for convenience
-export default {
-  recommendRules,
-  cancelRecommendRules
 }
