@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.configure.DatabaseSchemaConstraints;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
 import cn.edu.nju.Iot_Verify.po.FuzzTaskPo;
 import cn.edu.nju.Iot_Verify.po.SimulationTaskPo;
@@ -7,8 +8,11 @@ import cn.edu.nju.Iot_Verify.po.TaskView;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.repository.FuzzTaskRepository;
 import cn.edu.nju.Iot_Verify.repository.SimulationTaskRepository;
+import cn.edu.nju.Iot_Verify.repository.UserRepository;
 import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
 import cn.edu.nju.Iot_Verify.service.board.MySqlAvailableCondition;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -16,6 +20,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,16 +45,30 @@ import static org.junit.jupiter.api.Assertions.*;
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ExtendWith(MySqlAvailableCondition.class)
+@Import(DatabaseSchemaConstraints.class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class TaskLeaseUpdateMySqlIntegrationTest {
 
     private static final long WAIT_SECONDS = 10;
     private static final String WORKER_ID = "lease-test-worker";
 
+    @Autowired private UserRepository users;
     @Autowired private VerificationTaskRepository verificationTasks;
     @Autowired private SimulationTaskRepository simulationTasks;
     @Autowired private FuzzTaskRepository fuzzTasks;
     @Autowired private PlatformTransactionManager transactionManager;
+
+    private Long ownerId;
+
+    @BeforeEach
+    void createOwner() {
+        ownerId = TaskMySqlTestUsers.createOwner(users);
+    }
+
+    @AfterEach
+    void deleteOwner() {
+        if (ownerId != null) users.deleteById(ownerId);
+    }
 
     enum TaskKind { VERIFICATION, SIMULATION, FUZZ }
 
@@ -120,7 +139,7 @@ class TaskLeaseUpdateMySqlIntegrationTest {
         return switch (kind) {
             case VERIFICATION -> {
                 Long id = verificationTasks.saveAndFlush(VerificationTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
+                        .userId(ownerId).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
                         .status(start ? VerificationTaskPo.TaskStatus.PENDING : VerificationTaskPo.TaskStatus.RUNNING)
                         .build()).getId();
                 yield new Operation(
@@ -134,7 +153,7 @@ class TaskLeaseUpdateMySqlIntegrationTest {
             }
             case SIMULATION -> {
                 Long id = simulationTasks.saveAndFlush(SimulationTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
+                        .userId(ownerId).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
                         .status(start ? SimulationTaskPo.TaskStatus.PENDING : SimulationTaskPo.TaskStatus.RUNNING)
                         .build()).getId();
                 yield new Operation(
@@ -148,7 +167,7 @@ class TaskLeaseUpdateMySqlIntegrationTest {
             }
             case FUZZ -> {
                 Long id = fuzzTasks.saveAndFlush(FuzzTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
+                        .userId(ownerId).createdAt(now).progress(0).workerId(WORKER_ID).leaseExpiresAt(expiry)
                         .status(start ? FuzzTaskPo.TaskStatus.PENDING : FuzzTaskPo.TaskStatus.RUNNING)
                         .targetSpecIdsJson("[]").maxIterations(1).pathLength(2).populationSize(1)
                         .modelInputSnapshotJson("{}").modelSnapshotJson("{}")

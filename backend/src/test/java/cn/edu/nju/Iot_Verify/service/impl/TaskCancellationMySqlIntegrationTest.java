@@ -1,5 +1,6 @@
 package cn.edu.nju.Iot_Verify.service.impl;
 
+import cn.edu.nju.Iot_Verify.configure.DatabaseSchemaConstraints;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationOutcome;
 import cn.edu.nju.Iot_Verify.dto.model.TaskCancellationResultDto;
 import cn.edu.nju.Iot_Verify.dto.model.TaskProgressStage;
@@ -10,16 +11,20 @@ import cn.edu.nju.Iot_Verify.po.TaskView;
 import cn.edu.nju.Iot_Verify.po.VerificationTaskPo;
 import cn.edu.nju.Iot_Verify.repository.FuzzTaskRepository;
 import cn.edu.nju.Iot_Verify.repository.SimulationTaskRepository;
+import cn.edu.nju.Iot_Verify.repository.UserRepository;
 import cn.edu.nju.Iot_Verify.repository.VerificationTaskRepository;
 import cn.edu.nju.Iot_Verify.service.board.MySqlAvailableCondition;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Propagation;
@@ -49,6 +54,7 @@ import static cn.edu.nju.Iot_Verify.service.impl.AbstractAsyncTaskService.LocalE
 })
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ExtendWith(MySqlAvailableCondition.class)
+@Import(DatabaseSchemaConstraints.class)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class TaskCancellationMySqlIntegrationTest {
 
@@ -56,11 +62,24 @@ class TaskCancellationMySqlIntegrationTest {
     private static final String WORKER_ID = "cancellation-it-worker";
     private static final int NEXT_WORKER_PROGRESS = 32;
 
+    @Autowired private UserRepository users;
     @Autowired private VerificationTaskRepository verificationTasks;
     @Autowired private SimulationTaskRepository simulationTasks;
     @Autowired private FuzzTaskRepository fuzzTasks;
     @Autowired private PlatformTransactionManager transactionManager;
     @Autowired private EntityManager entityManager;
+
+    private Long ownerId;
+
+    @BeforeEach
+    void createOwner() {
+        ownerId = TaskMySqlTestUsers.createOwner(users);
+    }
+
+    @AfterEach
+    void deleteOwner() {
+        if (ownerId != null) users.deleteById(ownerId);
+    }
 
     enum TaskKind { VERIFICATION, SIMULATION, FUZZ }
 
@@ -82,7 +101,7 @@ class TaskCancellationMySqlIntegrationTest {
                         .setParameter("id", operation.id()).getSingleResult());
                 competing.executeWithoutResult(worker -> assertEquals(1,
                         operation.cancel().apply(verificationTasks.currentDatabaseTime())));
-                return new CancellationService(operation).cancel(9001L, operation.id());
+                return new CancellationService(operation).cancel(ownerId, operation.id());
             });
             assertNotNull(result);
             assertFalse(result.isCancellationAccepted());
@@ -106,7 +125,7 @@ class TaskCancellationMySqlIntegrationTest {
         CancellationService service = observeCancellation(queued, STOPPED_BEFORE_START, statesObservedByStop);
         try {
             TaskCancellationResultDto result = transactions.execute(status -> {
-                TaskCancellationResultDto receipt = service.cancel(9001L, queued.id());
+                TaskCancellationResultDto receipt = service.cancel(ownerId, queued.id());
                 assertAll(
                         () -> assertTrue(statesObservedByStop.isEmpty(), "Stopping a queued worker must wait for commit"),
                         () -> assertFalse(service.isLocalStopRequested(queued.id()), "The queued Future must remain available until commit"));
@@ -137,7 +156,7 @@ class TaskCancellationMySqlIntegrationTest {
         CancellationService service = observeCancellation(running, STOP_REQUESTED, statesObservedByStop);
         try {
             Boolean stoppedBeforeRollback = transactions.execute(status -> {
-                service.cancel(9001L, running.id());
+                service.cancel(ownerId, running.id());
                 status.setRollbackOnly();
                 return service.isLocalStopRequested(running.id());
             });
@@ -154,7 +173,7 @@ class TaskCancellationMySqlIntegrationTest {
                     verificationTasks::currentDatabaseTime, (task, now) -> running.advanceProgress().apply(now)).updated());
             assertEquals(NEXT_WORKER_PROGRESS, running.read().get().orElseThrow().getProgress());
 
-            TaskCancellationResultDto result = transactions.execute(status -> service.cancel(9001L, running.id()));
+            TaskCancellationResultDto result = transactions.execute(status -> service.cancel(ownerId, running.id()));
             assertNotNull(result);
             assertTrue(result.isCancellationAccepted());
             assertEquals(TaskCancellationOutcome.ACCEPTED, result.getCancellationOutcome());
@@ -197,7 +216,7 @@ class TaskCancellationMySqlIntegrationTest {
                 var recovery = executor.submit(() -> sweep.failCandidates().applyAsInt(sweep.findCandidates().get()));
                 assertEquals(1, assertDoesNotThrow(() -> recovery.get(LOCK_WAIT_SECONDS, TimeUnit.SECONDS),
                         "Expiry recovery must not wait on the unrelated, live cancellation row"));
-                return new CancellationService(live).cancel(9001L, live.id());
+                return new CancellationService(live).cancel(ownerId, live.id());
             });
             assertNotNull(result);
             assertTrue(result.isCancellationAccepted());
@@ -289,12 +308,12 @@ class TaskCancellationMySqlIntegrationTest {
         return switch (kind) {
             case VERIFICATION -> {
                 Long id = verificationTasks.saveAndFlush(VerificationTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
+                        .userId(ownerId).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
                         .status(lease == null ? VerificationTaskPo.TaskStatus.PENDING : VerificationTaskPo.TaskStatus.RUNNING)
                         .build()).getId();
                 yield new Operation(id, "verification_task",
-                        () -> verificationTasks.findByIdAndUserId(id, 9001L).map(TaskView.class::cast),
-                        () -> verificationTasks.findByIdAndUserIdForUpdate(id, 9001L).map(TaskView.class::cast),
+                        () -> verificationTasks.findByIdAndUserId(id, ownerId).map(TaskView.class::cast),
+                        () -> verificationTasks.findByIdAndUserIdForUpdate(id, ownerId).map(TaskView.class::cast),
                         time -> verificationTasks.cancelTaskIfStillActive(id,
                                 VerificationTaskPo.TaskStatus.CANCELLED, time, VerificationOutcome.INCONCLUSIVE,
                                 List.of(VerificationTaskPo.TaskStatus.PENDING, VerificationTaskPo.TaskStatus.RUNNING)),
@@ -304,12 +323,12 @@ class TaskCancellationMySqlIntegrationTest {
             }
             case SIMULATION -> {
                 Long id = simulationTasks.saveAndFlush(SimulationTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
+                        .userId(ownerId).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
                         .status(lease == null ? SimulationTaskPo.TaskStatus.PENDING : SimulationTaskPo.TaskStatus.RUNNING)
                         .build()).getId();
                 yield new Operation(id, "simulation_task",
-                        () -> simulationTasks.findByIdAndUserId(id, 9001L).map(TaskView.class::cast),
-                        () -> simulationTasks.findByIdAndUserIdForUpdate(id, 9001L).map(TaskView.class::cast),
+                        () -> simulationTasks.findByIdAndUserId(id, ownerId).map(TaskView.class::cast),
+                        () -> simulationTasks.findByIdAndUserIdForUpdate(id, ownerId).map(TaskView.class::cast),
                         time -> simulationTasks.cancelTaskIfStillActive(id, SimulationTaskPo.TaskStatus.CANCELLED,
                                 time, List.of(SimulationTaskPo.TaskStatus.PENDING, SimulationTaskPo.TaskStatus.RUNNING)),
                         time -> simulationTasks.updateProgressIfActive(id, NEXT_WORKER_PROGRESS,
@@ -318,13 +337,13 @@ class TaskCancellationMySqlIntegrationTest {
             }
             case FUZZ -> {
                 Long id = fuzzTasks.saveAndFlush(FuzzTaskPo.builder()
-                        .userId(9001L).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
+                        .userId(ownerId).createdAt(now).progress(progress).workerId(worker).leaseExpiresAt(lease)
                         .status(lease == null ? FuzzTaskPo.TaskStatus.PENDING : FuzzTaskPo.TaskStatus.RUNNING)
                         .targetSpecIdsJson("[]").maxIterations(1).pathLength(2).populationSize(1)
                         .modelInputSnapshotJson("{}").modelSnapshotJson("{}").build()).getId();
                 yield new Operation(id, "fuzz_task",
-                        () -> fuzzTasks.findByIdAndUserId(id, 9001L).map(TaskView.class::cast),
-                        () -> fuzzTasks.findByIdAndUserIdForUpdate(id, 9001L).map(TaskView.class::cast),
+                        () -> fuzzTasks.findByIdAndUserId(id, ownerId).map(TaskView.class::cast),
+                        () -> fuzzTasks.findByIdAndUserIdForUpdate(id, ownerId).map(TaskView.class::cast),
                         time -> fuzzTasks.cancelTaskIfStillActive(id, FuzzTaskPo.TaskStatus.CANCELLED,
                                 time, List.of(FuzzTaskPo.TaskStatus.PENDING, FuzzTaskPo.TaskStatus.RUNNING)),
                         time -> fuzzTasks.updateProgressIfActive(id, NEXT_WORKER_PROGRESS,
